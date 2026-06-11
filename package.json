@@ -1,0 +1,22 @@
+{
+  "name": "zehntage-reactor",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "zehntage-reactor": "./bin/zehntage-reactor"
+  },
+  "scripts": {
+    "start": "bun run src/cli.ts",
+    "test": "bun test",
+    "smoke": "bun run scripts/smoke.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
