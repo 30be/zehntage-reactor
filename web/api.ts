@@ -78,8 +78,14 @@ export const api = {
   subs: (id: string) => jget<SubTrackInfo[]>(`/api/subs/${id}`),
   cues: (id: string, trackId: string) =>
     jget<Cue[]>(`/api/subs/${id}/${encodeURIComponent(trackId)}`),
-  lookup: (word: string, context: string, source: string) =>
-    jpost<WordLookup>("/api/lookup", { word, context, source }),
+  lookup: (p: {
+    word: string;
+    context: string;
+    source: string;
+    mediaId?: string;
+    timestamp?: number;
+    withFrame?: boolean;
+  }) => jpost<WordLookup>("/api/lookup", p),
   ankiWords: () => jget<AnkiWordsResponse>("/api/anki/words"),
   ankiAdd: (p: {
     word: string;

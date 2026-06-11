@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   api,
   mediaUrl,
@@ -25,9 +32,35 @@ interface Props {
 interface PopupState {
   surface: string;
   reading?: string;
-  x: number;
-  y: number;
+  x: number; // horizontal center of the anchored word (viewport coords)
+  y: number; // top edge of the anchored word
+  anchorBottom: number; // bottom edge of the anchored word
   context: string;
+  timestamp: number;
+}
+
+const STORAGE_PREFIX = "zr.tracks.";
+
+function readSavedTracks(
+  mediaId: string,
+): { primary?: string; secondary?: string } {
+  try {
+    const raw = localStorage.getItem(STORAGE_PREFIX + mediaId);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveTracks(mediaId: string, primary: string, secondary: string): void {
+  try {
+    localStorage.setItem(
+      STORAGE_PREFIX + mediaId,
+      JSON.stringify({ primary, secondary }),
+    );
+  } catch {
+    /* ignore quota / disabled storage */
+  }
 }
 
 function langLabel(t: SubTrackInfo): string {
@@ -49,6 +82,7 @@ export function Player({ entry, toast, settings }: Props) {
 
   const [tokens, setTokens] = useState<KToken[] | null>(null);
   const tokenizerReady = useRef(false);
+  const tracksLoaded = useRef(false);
 
   const [wordIndex, setWordIndex] = useState<WordIndex>(() =>
     buildWordIndex([], {}),
@@ -56,8 +90,14 @@ export function Player({ entry, toast, settings }: Props) {
   const [knownFronts, setKnownFronts] = useState<Set<string>>(new Set());
 
   const [popup, setPopup] = useState<PopupState | null>(null);
+  const lookupRef = useRef<HTMLDivElement>(null);
+  const [popupPos, setPopupPos] = useState<React.CSSProperties>({
+    visibility: "hidden",
+  });
   const [lookup, setLookup] = useState<WordLookup | null>(null);
   const [lookupLoading, setLookupLoading] = useState(false);
+  const [frameLoading, setFrameLoading] = useState(false);
+  const [frameAdded, setFrameAdded] = useState(false);
   const lookupCache = useRef<Map<string, WordLookup>>(new Map());
 
   const [whisperBusy, setWhisperBusy] = useState(false);
@@ -78,21 +118,41 @@ export function Player({ entry, toast, settings }: Props) {
       setWordIndex(buildWordIndex(anki.words, anki.progress));
       setKnownFronts(new Set(anki.words.map((w) => w.front)));
 
+      // Auto-select sensible defaults: prefer a Japanese primary, ru/en secondary.
       const primLang = (settings.primaryLang as string) || "ja";
       const secLang = (settings.secondaryLang as string) || "ru";
-      const prim =
+      const isJa = (l: string) => l === "jpn" || l === "ja" || l.startsWith("ja");
+      const autoPrim =
+        ts.find((t) => t.kind === "embedded" && isJa(t.lang)) ??
+        ts.find((t) => isJa(t.lang)) ??
         ts.find((t) => t.lang === primLang) ??
-        ts.find((t) => t.lang.startsWith("ja"));
-      const sec =
-        ts.find((t) => t.lang === secLang) ??
-        ts.find((t) => t.id !== prim?.id && (t.lang === "ru" || t.lang === "en"));
-      if (prim) setPrimaryId(prim.id);
-      if (sec && sec.id !== prim?.id) setSecondaryId(sec.id);
+        ts.find((t) => t.lang === "ja");
+      const autoSec =
+        ts.find((t) => t.id !== autoPrim?.id && t.lang === secLang) ??
+        ts.find((t) => t.id !== autoPrim?.id && (t.lang === "ru" || t.lang === "ru".slice(0, 2))) ??
+        ts.find((t) => t.id !== autoPrim?.id && t.lang.startsWith("ru")) ??
+        ts.find((t) => t.id !== autoPrim?.id && (t.lang === "en" || t.lang.startsWith("en")));
+
+      // Restored selection (from localStorage) wins over the auto default.
+      const saved = readSavedTracks(entry.id);
+      const exists = (id?: string) =>
+        id != null && ts.some((t) => t.id === id) ? id : undefined;
+      const primId = exists(saved.primary) ?? autoPrim?.id ?? "";
+      const secId = exists(saved.secondary) ?? autoSec?.id ?? "";
+      setPrimaryId(primId);
+      if (secId !== primId) setSecondaryId(secId);
+      tracksLoaded.current = true;
     })();
     return () => {
       cancelled = true;
     };
   }, [entry.id]);
+
+  // persist track choices per media id (after initial load completes)
+  useEffect(() => {
+    if (!tracksLoaded.current) return;
+    saveTracks(entry.id, primaryId, secondaryId);
+  }, [entry.id, primaryId, secondaryId]);
 
   // --- load cues when track ids change ---
   useEffect(() => {
@@ -178,20 +238,25 @@ export function Player({ entry, toast, settings }: Props) {
       setPopup({
         surface: tok.surface_form,
         reading: tok.reading,
-        x: Math.min(rect.left, window.innerWidth - 340),
-        y: rect.top - 8,
+        // anchor at the word; final clamped position computed at render time
+        x: rect.left + rect.width / 2,
+        y: rect.top,
+        anchorBottom: rect.bottom,
         context: ctx,
+        timestamp: videoRef.current?.currentTime ?? 0,
       });
     },
     [primaryCues, activeP, primaryText],
   );
 
-  // fetch lookup when popup target changes
+  // fetch lookup when popup target changes (default: NO frame — saves latency)
   useEffect(() => {
     if (!popup) {
       setLookup(null);
       return;
     }
+    setFrameAdded(false);
+    setFrameLoading(false);
     const cached = lookupCache.current.get(popup.surface);
     if (cached) {
       setLookup(cached);
@@ -202,7 +267,7 @@ export function Player({ entry, toast, settings }: Props) {
     setLookup(null);
     setLookupLoading(true);
     void api
-      .lookup(popup.surface, popup.context, entry.name)
+      .lookup({ word: popup.surface, context: popup.context, source: entry.name })
       .then((res) => {
         if (cancelled) return;
         lookupCache.current.set(popup.surface, res);
@@ -214,6 +279,56 @@ export function Player({ entry, toast, settings }: Props) {
       cancelled = true;
     };
   }, [popup?.surface]);
+
+  // re-run the current lookup WITH a video frame, replacing the panel content.
+  const onAddFrame = useCallback(async () => {
+    if (!popup) return;
+    setFrameLoading(true);
+    try {
+      const res = await api.lookup({
+        word: popup.surface,
+        context: popup.context,
+        source: entry.name,
+        mediaId: entry.id,
+        timestamp: popup.timestamp,
+        withFrame: true,
+      });
+      lookupCache.current.set(popup.surface, res);
+      setLookup(res);
+      setFrameAdded(true);
+    } catch (e) {
+      toast(`Frame lookup failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setFrameLoading(false);
+    }
+  }, [popup, entry.id, entry.name, toast]);
+
+  // Position the lookup panel: prefer above the word, flip below when there
+  // isn't room, and clamp horizontally so it can never be cut off-screen.
+  useLayoutEffect(() => {
+    if (!popup) {
+      setPopupPos({ visibility: "hidden" });
+      return;
+    }
+    const el = lookupRef.current;
+    if (!el) return;
+    const margin = 8;
+    const { width, height } = el.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    const spaceAbove = popup.y;
+    const spaceBelow = vh - popup.anchorBottom;
+    const placeBelow = spaceAbove < height + margin && spaceBelow > spaceAbove;
+
+    let top = placeBelow ? popup.anchorBottom + margin : popup.y - height - margin;
+    top = Math.max(margin, Math.min(top, vh - height - margin));
+
+    let left = popup.x - width / 2;
+    left = Math.max(margin, Math.min(left, vw - width - margin));
+
+    setPopupPos({ left, top, visibility: "visible" });
+  }, [popup, lookup, lookupLoading, frameLoading, frameAdded]);
 
   const popupFront = useMemo(() => {
     if (!popup) return null;
@@ -384,8 +499,9 @@ export function Player({ entry, toast, settings }: Props) {
 
       {popup && (
         <div
+          ref={lookupRef}
           className="lookup"
-          style={{ left: popup.x, top: popup.y, transform: "translateY(-100%)" }}
+          style={popupPos}
           onMouseLeave={() => setPopup(null)}
         >
           <div>
@@ -411,6 +527,14 @@ export function Player({ entry, toast, settings }: Props) {
                 Add to Anki
               </button>
             )}
+            <button
+              className="btn"
+              disabled={!lookup || frameLoading || frameAdded}
+              onClick={onAddFrame}
+              title="Re-run the lookup using the current video frame"
+            >
+              {frameLoading ? "Adding frame…" : frameAdded ? "Frame added" : "Add frame"}
+            </button>
           </div>
         </div>
       )}

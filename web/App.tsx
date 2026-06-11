@@ -177,12 +177,18 @@ function Settings({
   const [autoWhisper, setAutoWhisper] = useState(
     Boolean(settings.whisperAutoGenerate),
   );
+  const promptDefault = (settings.lookupPromptDefault as string) || "";
+  const [lookupPrompt, setLookupPrompt] = useState(
+    (settings.lookupPrompt as string) || promptDefault,
+  );
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     setPrimaryLang((settings.primaryLang as string) || "ja");
     setSecondaryLang((settings.secondaryLang as string) || "ru");
     setAutoWhisper(Boolean(settings.whisperAutoGenerate));
+    const def = (settings.lookupPromptDefault as string) || "";
+    setLookupPrompt((settings.lookupPrompt as string) || def);
   }, [settings]);
 
   const onSave = async () => {
@@ -192,6 +198,7 @@ function Settings({
         primaryLang,
         secondaryLang,
         whisperAutoGenerate: autoWhisper,
+        lookupPrompt,
       });
       setSettings(next);
       toast("Settings saved");
@@ -232,6 +239,29 @@ function Settings({
             onChange={(e) => setAutoWhisper(e.target.checked)}
           />
           <label htmlFor="autoWhisper">Auto-generate Japanese subtitles</label>
+        </div>
+        <div className="field">
+          <label>Word-lookup prompt (Gemini)</label>
+          <textarea
+            className="prompt"
+            rows={12}
+            value={lookupPrompt}
+            onChange={(e) => setLookupPrompt(e.target.value)}
+            placeholder={promptDefault}
+          />
+          <div className="hint">
+            Template placeholders: <code>{"{word}"}</code> <code>{"{context}"}</code>{" "}
+            <code>{"{source}"}</code> are substituted at lookup time.
+          </div>
+          <div>
+            <button
+              type="button"
+              className="btn sm"
+              onClick={() => setLookupPrompt(promptDefault)}
+            >
+              Reset to default
+            </button>
+          </div>
         </div>
         <div>
           <button className="btn primary" disabled={saving} onClick={onSave}>

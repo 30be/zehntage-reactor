@@ -122,7 +122,8 @@ a { color: inherit; }
 
 .sub-overlay {
   position: absolute;
-  left: 0; right: 0; bottom: 12px;
+  /* sit just above the video's native control bar / bottom edge */
+  left: 0; right: 0; bottom: 64px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -210,6 +211,26 @@ input[type="text"] {
 }
 .switch { display: flex; align-items: center; gap: 10px; }
 .switch input { width: 16px; height: 16px; }
+
+textarea.prompt {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  resize: vertical;
+  min-height: 160px;
+}
+.hint { font-size: 12px; color: var(--muted); }
+.hint code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  background: var(--muted-bg);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
 
 .toast {
   position: fixed;
