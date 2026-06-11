@@ -2,6 +2,7 @@
 // adapted for Japanese: no article, added `reading` (kana) field.
 
 import { loadSecrets } from "./env.ts";
+import { readSettings } from "./settings.ts";
 import type { Cue } from "./subs.ts";
 
 const GEMINI_URL =
@@ -33,9 +34,28 @@ export interface WordLookup {
   context: string;
 }
 
-async function callGemini(prompt: string, schema: unknown): Promise<unknown> {
+export interface GeminiImage {
+  bytes: Uint8Array;
+  mimeType: string;
+}
+
+async function callGemini(
+  prompt: string,
+  schema: unknown,
+  image?: GeminiImage,
+): Promise<unknown> {
   const { geminiApiKey } = await loadSecrets();
   if (!geminiApiKey) throw new Error("GEMINI_API_KEY not set in ~/.env");
+
+  const parts: unknown[] = [{ text: prompt }];
+  if (image) {
+    parts.push({
+      inlineData: {
+        mimeType: image.mimeType,
+        data: Buffer.from(image.bytes).toString("base64"),
+      },
+    });
+  }
 
   const resp = await fetch(GEMINI_URL, {
     method: "POST",
@@ -44,7 +64,7 @@ async function callGemini(prompt: string, schema: unknown): Promise<unknown> {
       "x-goog-api-key": geminiApiKey,
     },
     body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
+      contents: [{ parts }],
       generationConfig: {
         temperature: 0.2,
         responseMimeType: "application/json",
@@ -64,12 +84,15 @@ async function callGemini(prompt: string, schema: unknown): Promise<unknown> {
   return JSON.parse(cleaned);
 }
 
-export function buildWordPrompt(word: string, context: string, source: string): string {
-  return `The learner is a native Russian speaker, fluent in English, learning Japanese. They are studying the word "${word}", which appeared in the subtitle text below.
+/**
+ * Built-in word-lookup prompt template. Placeholders {word} {context} {source}
+ * are substituted. Exported so the settings page can prefill / restore it.
+ */
+export const DEFAULT_LOOKUP_PROMPT = `The learner is a native Russian speaker, fluent in English, learning Japanese. They are studying the word "{word}", which appeared in the subtitle text below.
 
 Provide four fields:
-- reading: if "${word}" is Japanese, its reading in kana (hiragana for native/Sino-Japanese words, katakana for loanwords). Otherwise an empty string.
-- translation: "${word}" translated into Russian — or into English if the word is itself Russian. Expand abbreviations using the text.
+- reading: if "{word}" is Japanese, its reading in kana (hiragana for native/Sino-Japanese words, katakana for loanwords). Otherwise an empty string.
+- translation: "{word}" translated into Russian — or into English if the word is itself Russian. Expand abbreviations using the text.
 - notes: If the studied word is a proper noun naming a real person, place, work, or brand, give a one-sentence encyclopedic abstract — who or what it is and what it is best known for (max ~30 words). Otherwise a short explanation (max ~25 words) that makes the word stick: when the translation loses nuance say what it actually means, and add a memory hook — a kanji breakdown, a genuine cognate or known loanword, a sound-alike, or a vivid image. Never leave this empty.
 - context: the single sentence from the text below that best shows the word in use, trimmed to just that sentence, with the studied word wrapped in <b></b>. If the text below has no usable sentence, invent a short natural one.
 
@@ -77,18 +100,44 @@ Examples:
 - "図書館" → reading: "としょかん", translation: "библиотека", notes: "図 (рисунок/план) + 書 (книга) + 館 (здание) — 'здание для книг и документов'."
 - "気になる" → reading: "きになる", translation: "беспокоить, интересовать", notes: "буквально 'становиться ки (духом/вниманием)' — что-то засело в голове, фирменная фраза Читанды из «Хёки»."
 
-Source: ${source}
+Source: {source}
 
 Text:
-${context}`;
+{context}`;
+
+/** Substitute {word} {context} {source} placeholders in a prompt template. */
+function fillTemplate(
+  template: string,
+  word: string,
+  context: string,
+  source: string,
+): string {
+  return template
+    .replaceAll("{word}", word)
+    .replaceAll("{context}", context)
+    .replaceAll("{source}", source);
+}
+
+export function buildWordPrompt(
+  word: string,
+  context: string,
+  source: string,
+  template?: string,
+): string {
+  const tpl = template && template.trim() ? template : DEFAULT_LOOKUP_PROMPT;
+  return fillTemplate(tpl, word, context, source);
 }
 
 export async function lookupWord(
   word: string,
   context: string,
   source: string,
+  image?: GeminiImage,
 ): Promise<WordLookup> {
-  return (await callGemini(buildWordPrompt(word, context, source), WORD_SCHEMA)) as WordLookup;
+  const settings = await readSettings();
+  const template = typeof settings.lookupPrompt === "string" ? settings.lookupPrompt : "";
+  const prompt = buildWordPrompt(word, context, source, template);
+  return (await callGemini(prompt, WORD_SCHEMA, image)) as WordLookup;
 }
 
 // --- cue translation (batched, cheap) ---

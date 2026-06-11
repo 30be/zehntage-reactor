@@ -18,8 +18,8 @@ import {
   type SubTrack,
 } from "../lib/subs.ts";
 import { whisperQueue, type WhisperEvent } from "../lib/whisper.ts";
-import { lookupWord, translateCues } from "../lib/gemini.ts";
-import { listWords, getProgress, addCard, deleteCard } from "../lib/anki.ts";
+import { lookupWord, translateCues, DEFAULT_LOOKUP_PROMPT } from "../lib/gemini.ts";
+import { listWords, getProgress, addCard, deleteCard, uploadImage } from "../lib/anki.ts";
 import { readSettings, writeSettings } from "../lib/settings.ts";
 
 const PUBLIC_DIR = join(import.meta.dir, "..", "..", "public");
@@ -218,9 +218,30 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
 
       // --- Gemini word lookup ---
       if (req.method === "POST" && path === "/api/lookup") {
-        const body = (await req.json()) as { word?: string; context?: string; source?: string };
+        const body = (await req.json()) as {
+          word?: string;
+          context?: string;
+          source?: string;
+          mediaId?: string;
+          timestamp?: number;
+          withFrame?: boolean;
+        };
         if (!body.word) return err("word required", 400);
-        return json(await lookupWord(body.word, body.context ?? "", body.source ?? ""));
+
+        let image: { bytes: Uint8Array; mimeType: string } | undefined;
+        if (body.withFrame && body.mediaId !== undefined && body.timestamp !== undefined) {
+          const entry = library.get(body.mediaId);
+          if (entry) {
+            try {
+              const frame = await captureFrame(entry.absPath, Math.max(0, body.timestamp), 480);
+              image = { bytes: frame, mimeType: "image/jpeg" };
+            } catch {
+              // no frame — fall back to text-only lookup
+            }
+          }
+        }
+
+        return json(await lookupWord(body.word, body.context ?? "", body.source ?? "", image));
       }
 
       // --- Anki ---
@@ -243,6 +264,7 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
 
         let context = body.context ?? "";
         const extras: string[] = [];
+        let image: string | undefined;
         if (body.mediaId !== undefined && body.timestamp !== undefined) {
           const entry = library.get(body.mediaId);
           if (entry) {
@@ -252,8 +274,9 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
             extras.push(`${entry.name} @ ${mm}:${String(ss).padStart(2, "0")}`);
             try {
               const frame = await captureFrame(entry.absPath, ts, 320);
-              const b64 = Buffer.from(frame).toString("base64");
-              extras.push(`<img src="data:image/jpeg;base64,${b64}">`);
+              // Upload the frame as a real Anki media file instead of inlining
+              // a base64 JPEG into context (which bloated /zehntage/list).
+              image = await uploadImage(frame, "image/jpeg");
             } catch {
               // no frame — card still goes through
             }
@@ -267,6 +290,7 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
           back: body.translation,
           notes: body.notes ?? "",
           context,
+          ...(image ? { image, image_field: "context" } : {}),
         });
         return json({ ok: true });
       }
@@ -280,7 +304,10 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
 
       // --- settings ---
       if (path === "/api/settings") {
-        if (req.method === "GET") return json(await readSettings());
+        if (req.method === "GET") {
+          const settings = await readSettings();
+          return json({ ...settings, lookupPromptDefault: DEFAULT_LOOKUP_PROMPT });
+        }
         if (req.method === "POST") {
           const patch = (await req.json()) as Record<string, unknown>;
           return json(await writeSettings(patch));

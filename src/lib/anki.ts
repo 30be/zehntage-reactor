@@ -7,8 +7,42 @@ export interface AnkiCard {
   back: string;
   notes?: string;
   context?: string;
+  /** data: URI, http(s) URL, or an upload-dir path returned by uploadImage(). */
   image?: string;
+  /** Field the image renders into on the card (default "notes" server-side). */
+  image_field?: string;
   [key: string]: unknown;
+}
+
+async function ankiBase(): Promise<{ base: string; key: string }> {
+  const { ankiUrl, ankiKey } = await loadSecrets();
+  if (!ankiUrl || !ankiKey) {
+    throw new Error("ZEHNTAGE_ANKI_URL or ZEHNTAGE_ANKI_KEY not set in ~/.env");
+  }
+  return { base: ankiUrl, key: ankiKey };
+}
+
+/**
+ * Upload raw image bytes to the anki-mcp unauthenticated `/upload` endpoint.
+ * Returns the server-side path (under the upload dir) to pass as a card `image`,
+ * so the frame becomes a real Anki media file instead of an inlined base64 blob.
+ */
+export async function uploadImage(
+  bytes: Uint8Array,
+  mimeType = "image/jpeg",
+): Promise<string> {
+  const { base } = await ankiBase();
+  const resp = await fetch(`${base}/upload`, {
+    method: "POST",
+    headers: { "Content-Type": mimeType },
+    body: bytes,
+  });
+  if (!resp.ok) {
+    throw new Error(`anki-mcp upload error ${resp.status}: ${await resp.text()}`);
+  }
+  const data = (await resp.json()) as { ok?: boolean; path?: string };
+  if (!data.path) throw new Error("anki-mcp upload returned no path");
+  return data.path;
 }
 
 async function zehntageRequest(

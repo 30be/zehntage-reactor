@@ -8,6 +8,12 @@ export interface Settings {
   targetLang: string;
   knownLang: string;
   blurSecondary: boolean;
+  /**
+   * Override template for the word-lookup prompt. Placeholders {word}
+   * {context} {source} are substituted. Empty string means "use the
+   * built-in default" (see gemini.ts DEFAULT_LOOKUP_PROMPT).
+   */
+  lookupPrompt: string;
   [key: string]: unknown;
 }
 
@@ -15,6 +21,7 @@ const DEFAULTS: Settings = {
   targetLang: "ja",
   knownLang: "ru",
   blurSecondary: true,
+  lookupPrompt: "",
 };
 
 const dir = join(homedir(), ".config", "zehntage-reactor");
