@@ -8,6 +8,7 @@ import {
 } from "react";
 import {
   api,
+  ApiError,
   mediaUrl,
   type Cue,
   type LibraryEntry,
@@ -64,9 +65,17 @@ function saveTracks(mediaId: string, primary: string, secondary: string): void {
 }
 
 function langLabel(t: SubTrackInfo): string {
-  const title = t.title ? ` · ${t.title}` : "";
-  return `${t.lang}${title} (${t.kind})`;
+  // Prefer the backend-provided friendly label ("Japanese · Whisper").
+  if (t.label && t.label.trim()) return t.label;
+  // Fallback: plain lang code (+ title if present). No sidecar/embedded jargon.
+  return t.title ? `${t.lang} · ${t.title}` : t.lang;
 }
+
+const HOVER_OPEN_MS = 200; // hover-intent: rest this long before opening/looking up
+const HOVER_CLOSE_MS = 120; // grace after leaving the word before hiding
+
+const isJaLang = (l: string) => l === "ja" || l === "jpn" || l.startsWith("ja");
+const isRuLang = (l: string) => l === "ru" || l === "rus" || l.startsWith("ru");
 
 export function Player({ entry, toast, settings }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -98,12 +107,31 @@ export function Player({ entry, toast, settings }: Props) {
   const [lookupLoading, setLookupLoading] = useState(false);
   const [frameLoading, setFrameLoading] = useState(false);
   const [frameAdded, setFrameAdded] = useState(false);
+  const [reloadLoading, setReloadLoading] = useState(false);
   const lookupCache = useRef<Map<string, WordLookup>>(new Map());
+
+  // hover-intent: open the popup only once the cursor RESTS on a word ~200ms;
+  // a separate grace timer hides it after the cursor leaves to empty space.
+  const openTimer = useRef<number | null>(null);
+  const closeTimer = useRef<number | null>(null);
+  const clearOpenTimer = useCallback(() => {
+    if (openTimer.current != null) {
+      window.clearTimeout(openTimer.current);
+      openTimer.current = null;
+    }
+  }, []);
+  const clearCloseTimer = useCallback(() => {
+    if (closeTimer.current != null) {
+      window.clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+  }, []);
 
   const [whisperBusy, setWhisperBusy] = useState(false);
   const [whisperStatus, setWhisperStatus] = useState<string>("");
   const [translateBusy, setTranslateBusy] = useState(false);
   const whisperJobRef = useRef<string | null>(null);
+  const whisperEsRef = useRef<EventSource | null>(null);
 
   // --- load tracks + anki words ---
   useEffect(() => {
@@ -230,24 +258,54 @@ export function Player({ entry, toast, settings }: Props) {
     setKnownFronts(new Set(anki.words.map((w) => w.front)));
   }, []);
 
-  // --- word hover -> popup + lookup ---
+  // --- word hover -> popup + lookup (with ~200ms hover-intent debounce) ---
+  // We only OPEN the popup (and fire the lookup) once the cursor RESTS on a
+  // word for HOVER_OPEN_MS. Sliding across a sentence cancels pending opens,
+  // so no lookup storm. The per-surface lookupCache keeps revisits instant.
   const onWordEnter = useCallback(
     (tok: KToken, e: React.MouseEvent) => {
-      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-      const ctx = contextAround(primaryCues, activeP) || primaryText;
-      setPopup({
-        surface: tok.surface_form,
-        reading: tok.reading,
-        // anchor at the word; final clamped position computed at render time
-        x: rect.left + rect.width / 2,
-        y: rect.top,
-        anchorBottom: rect.bottom,
-        context: ctx,
-        timestamp: videoRef.current?.currentTime ?? 0,
-      });
+      clearCloseTimer();
+      clearOpenTimer();
+      const el = e.currentTarget as HTMLElement;
+      const surface = tok.surface_form;
+      const reading = tok.reading;
+      openTimer.current = window.setTimeout(() => {
+        openTimer.current = null;
+        const rect = el.getBoundingClientRect();
+        const ctx = contextAround(primaryCues, activeP) || primaryText;
+        setPopup({
+          surface,
+          reading,
+          x: rect.left + rect.width / 2,
+          y: rect.top,
+          anchorBottom: rect.bottom,
+          context: ctx,
+          timestamp: videoRef.current?.currentTime ?? 0,
+        });
+      }, HOVER_OPEN_MS);
     },
-    [primaryCues, activeP, primaryText],
+    [primaryCues, activeP, primaryText, clearOpenTimer, clearCloseTimer],
   );
+
+  // Leaving a word to empty space: cancel a pending open, and if a popup is
+  // showing, schedule a hide with a short grace so the cursor can reach the
+  // panel. Entering the panel cancels the hide; leaving the panel hides it.
+  const onWordLeave = useCallback(() => {
+    clearOpenTimer();
+    clearCloseTimer();
+    closeTimer.current = window.setTimeout(() => {
+      closeTimer.current = null;
+      setPopup(null);
+    }, HOVER_CLOSE_MS);
+  }, [clearOpenTimer, clearCloseTimer]);
+
+  const onPanelEnter = useCallback(() => {
+    clearCloseTimer();
+  }, [clearCloseTimer]);
+  const onPanelLeave = useCallback(() => {
+    clearCloseTimer();
+    setPopup(null);
+  }, [clearCloseTimer]);
 
   // fetch lookup when popup target changes (default: NO frame — saves latency)
   useEffect(() => {
@@ -303,6 +361,29 @@ export function Player({ entry, toast, settings }: Props) {
     }
   }, [popup, entry.id, entry.name, toast]);
 
+  // Regenerate the lookup text for the same word, BYPASSING the cache (force a
+  // fresh Gemini call). Replaces the panel content and updates the cache.
+  const onReload = useCallback(async () => {
+    if (!popup) return;
+    setReloadLoading(true);
+    setLookupLoading(true);
+    try {
+      const res = await api.lookup({
+        word: popup.surface,
+        context: popup.context,
+        source: entry.name,
+        noCache: true,
+      });
+      lookupCache.current.set(popup.surface, res);
+      setLookup(res);
+    } catch (e) {
+      toast(`Regenerate failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setReloadLoading(false);
+      setLookupLoading(false);
+    }
+  }, [popup, entry.name, toast]);
+
   // Position the lookup panel: prefer above the word, flip below when there
   // isn't room, and clamp horizontally so it can never be cut off-screen.
   useLayoutEffect(() => {
@@ -339,8 +420,16 @@ export function Player({ entry, toast, settings }: Props) {
   const popupSaved = popupFront ? knownFronts.has(popupFront) : false;
 
   const onAdd = useCallback(async () => {
-    if (!popup || !lookup) return;
+    if (!popup || !lookup || !popupFront) return;
     const v = videoRef.current;
+    const front = popupFront;
+    // OPTIMISTIC: immediately flip the button to the saved/Delete state by
+    // marking the word known; POST in the background and revert on failure.
+    setKnownFronts((prev) => {
+      const next = new Set(prev);
+      next.add(front);
+      return next;
+    });
     try {
       await api.ankiAdd({
         word: popup.surface,
@@ -351,12 +440,18 @@ export function Player({ entry, toast, settings }: Props) {
         mediaId: entry.id,
         timestamp: v?.currentTime ?? 0,
       });
-      toast("Added to Anki");
-      await refreshAnki();
+      // sync real progress data (color etc.) in the background
+      void refreshAnki();
     } catch (e) {
+      // revert the optimistic state
+      setKnownFronts((prev) => {
+        const next = new Set(prev);
+        next.delete(front);
+        return next;
+      });
       toast(`Add failed: ${e instanceof Error ? e.message : e}`);
     }
-  }, [popup, lookup, primaryText, entry.id, refreshAnki, toast]);
+  }, [popup, lookup, popupFront, primaryText, entry.id, refreshAnki, toast]);
 
   const onDelete = useCallback(async () => {
     if (!popupFront) return;
@@ -377,7 +472,23 @@ export function Player({ entry, toast, settings }: Props) {
       const { jobId } = await api.whisperStart(entry.id, "ja");
       whisperJobRef.current = jobId;
       const liveCues: Cue[] = [];
+      // Coalesce the per-cue state updates: whisper streams hundreds of cues
+      // over a long episode; a setState per cue floods React and can crash the
+      // tab. Flush at most ~4×/sec, plus an immediate flush on terminal status.
+      let flushTimer: number | null = null;
+      let dirty = false;
+      const flush = () => {
+        flushTimer = null;
+        if (!dirty) return;
+        dirty = false;
+        setPrimaryCues(liveCues.slice());
+      };
+      const scheduleFlush = () => {
+        dirty = true;
+        if (flushTimer == null) flushTimer = window.setTimeout(flush, 250);
+      };
       const es = new EventSource(api.whisperEventsUrl(jobId));
+      whisperEsRef.current = es;
       es.onmessage = (ev) => {
         const data = JSON.parse(ev.data) as
           | { type: "snapshot"; status: string; cues: Cue[] }
@@ -386,11 +497,11 @@ export function Player({ entry, toast, settings }: Props) {
         if (data.type === "snapshot") {
           liveCues.length = 0;
           liveCues.push(...data.cues);
-          setPrimaryCues([...liveCues]);
+          scheduleFlush();
           setWhisperStatus(data.status);
         } else if (data.type === "cue") {
           liveCues.push(data.cue);
-          setPrimaryCues([...liveCues]);
+          scheduleFlush();
         } else if (data.type === "status") {
           setWhisperStatus(data.status);
           if (
@@ -398,14 +509,19 @@ export function Player({ entry, toast, settings }: Props) {
             data.status === "error" ||
             data.status === "canceled"
           ) {
+            if (flushTimer != null) window.clearTimeout(flushTimer);
+            flush();
             es.close();
+            whisperEsRef.current = null;
             setWhisperBusy(false);
             whisperJobRef.current = null;
             if (data.status === "done") {
-              // refresh tracks and switch to the new sidecar
+              // refresh tracks and switch to the freshly-generated JP track
               void api.subs(entry.id).then((ts) => {
                 setTracks(ts);
-                const ja = ts.find((t) => t.id === "sidecar:ja");
+                const ja =
+                  ts.find((t) => t.id === "sidecar:ja") ??
+                  ts.find((t) => isJaLang(t.lang));
                 if (ja) setPrimaryId(ja.id);
               });
               toast("Japanese subtitles generated");
@@ -416,7 +532,10 @@ export function Player({ entry, toast, settings }: Props) {
         }
       };
       es.onerror = () => {
+        if (flushTimer != null) window.clearTimeout(flushTimer);
+        flush();
         es.close();
+        whisperEsRef.current = null;
         setWhisperBusy(false);
       };
     } catch (e) {
@@ -441,13 +560,19 @@ export function Player({ entry, toast, settings }: Props) {
       const ru = ts.find((t) => t.id === res.track);
       if (ru) setSecondaryId(ru.id);
     } catch (e) {
-      toast(`Translate failed: ${e instanceof Error ? e.message : e}`);
+      if (e instanceof ApiError && e.status === 409) {
+        toast("A Russian track already exists for this video.");
+      } else {
+        toast(`Translate failed: ${e instanceof Error ? e.message : e}`);
+      }
     } finally {
       setTranslateBusy(false);
     }
   }, [entry.id, primaryId, toast]);
 
-  const hasJa = tracks.some((t) => t.lang.startsWith("ja"));
+  const hasJa = tracks.some((t) => isJaLang(t.lang));
+  const hasRu = tracks.some((t) => isRuLang(t.lang));
+  const primaryTrackLang = tracks.find((t) => t.id === primaryId)?.lang ?? "";
 
   return (
     <div className="player-wrap">
@@ -478,6 +603,7 @@ export function Player({ entry, toast, settings }: Props) {
                           : undefined
                       }
                       onMouseEnter={(e) => onWordEnter(tok, e)}
+                      onMouseLeave={onWordLeave}
                     >
                       {tok.surface_form}
                     </span>
@@ -502,7 +628,8 @@ export function Player({ entry, toast, settings }: Props) {
           ref={lookupRef}
           className="lookup"
           style={popupPos}
-          onMouseLeave={() => setPopup(null)}
+          onMouseEnter={onPanelEnter}
+          onMouseLeave={onPanelLeave}
         >
           <div>
             <span className="word">{popup.surface}</span>
@@ -519,11 +646,16 @@ export function Player({ entry, toast, settings }: Props) {
           )}
           <div className="row">
             {popupSaved ? (
-              <button className="btn danger" onClick={onDelete}>
+              <button className="btn danger" onClick={onDelete} title="Remove this word from Anki">
                 Delete
               </button>
             ) : (
-              <button className="btn" disabled={!lookup} onClick={onAdd}>
+              <button
+                className="btn"
+                disabled={!lookup}
+                onClick={onAdd}
+                title="Add this word to Anki with the current video frame"
+              >
                 Add to Anki
               </button>
             )}
@@ -531,9 +663,17 @@ export function Player({ entry, toast, settings }: Props) {
               className="btn"
               disabled={!lookup || frameLoading || frameAdded}
               onClick={onAddFrame}
-              title="Re-run the lookup using the current video frame"
+              title="Re-run the lookup using the current video frame as visual context"
             >
               {frameLoading ? "Adding frame…" : frameAdded ? "Frame added" : "Add frame"}
+            </button>
+            <button
+              className="btn"
+              disabled={!lookup || reloadLoading}
+              onClick={onReload}
+              title="Regenerate the explanation from scratch (when Gemini's answer is off)"
+            >
+              {reloadLoading ? "…" : "↻ Regenerate"}
             </button>
           </div>
         </div>
@@ -570,20 +710,29 @@ export function Player({ entry, toast, settings }: Props) {
         </div>
 
         {!hasJa && !whisperBusy && (
-          <button className="btn primary" onClick={onGenerateJa}>
+          <button
+            className="btn primary"
+            onClick={onGenerateJa}
+            title="Transcribe the audio to Japanese subtitles with Whisper (saved as a track)"
+          >
             Generate Japanese subtitles
           </button>
         )}
         {whisperBusy && (
           <>
             <span className="spinner-line">Whisper: {whisperStatus}…</span>
-            <button className="btn sm" onClick={onCancelWhisper}>
+            <button className="btn sm" onClick={onCancelWhisper} title="Stop transcription">
               Cancel
             </button>
           </>
         )}
-        {primaryId && (
-          <button className="btn" disabled={translateBusy} onClick={onTranslateRu}>
+        {primaryId && isJaLang(primaryTrackLang) && !hasRu && (
+          <button
+            className="btn"
+            disabled={translateBusy}
+            onClick={onTranslateRu}
+            title="Translate the Japanese subtitles to Russian with Gemini and save as a track"
+          >
             {translateBusy ? "Translating…" : "Translate → RU"}
           </button>
         )}

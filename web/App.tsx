@@ -47,7 +47,9 @@ export function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <span className="brand">zehntage-reactor</span>
+        <a className="brand" href="#/" title="Back to Library">
+          zehntage-reactor
+        </a>
         <nav>
           <button className="btn ghost sm" onClick={() => go("#/")}>
             Library
@@ -61,7 +63,7 @@ export function App() {
       <main className="container">
         {route.name === "library" && <Library go={go} />}
         {route.name === "settings" && (
-          <Settings settings={settings} setSettings={setSettings} toast={toast} />
+          <Settings settings={settings} setSettings={setSettings} toast={toast} go={go} />
         )}
         {route.name === "player" && (
           <PlayerRoute id={route.id} toast={toast} settings={settings} go={go} />
@@ -163,10 +165,12 @@ function Settings({
   settings,
   setSettings,
   toast,
+  go,
 }: {
   settings: Record<string, unknown>;
   setSettings: (s: Record<string, unknown>) => void;
   toast: (m: string) => void;
+  go: (h: string) => void;
 }) {
   const [primaryLang, setPrimaryLang] = useState(
     (settings.targetLang as string) || "ja",
@@ -211,6 +215,9 @@ function Settings({
 
   return (
     <>
+      <button className="btn ghost sm" onClick={() => go("#/")} style={{ marginBottom: 12 }}>
+        ← Library
+      </button>
       <h1 className="h1">Settings</h1>
       <div className="form">
         <div className="field">

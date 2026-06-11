@@ -44,31 +44,42 @@ export function matchFront(
 }
 
 /**
- * Color for a known word. No progress entry => "learning" red.
- * Maturity derived from interval (days) primarily, reps as fallback.
- * 0 => red (#ef4444), mature (>=21d) => green (#22c55e).
+ * Discrete RED -> BLUE maturity gradient in 6 steps, keyed off the SRS
+ * `interval` (days). A word in the deck with no/0 interval = step 0 (red).
+ *
+ * Buckets (interval in days):
+ *   step 0: < 1    (#ef4444 red       — brand-new / learning)
+ *   step 1: < 4    (#f97316 orange)
+ *   step 2: < 11   (#eab308 yellow)
+ *   step 3: < 30   (#22c55e green)
+ *   step 4: < 90   (#06b6d4 cyan)
+ *   step 5: >= 90  (#3b82f6 blue      — mature)
+ */
+export const PROGRESS_COLORS = [
+  "#ef4444", // 0 red
+  "#f97316", // 1 orange
+  "#eab308", // 2 yellow
+  "#22c55e", // 3 green
+  "#06b6d4", // 4 cyan
+  "#3b82f6", // 5 blue
+] as const;
+
+const PROGRESS_THRESHOLDS = [1, 4, 11, 30, 90]; // upper bounds (exclusive) for steps 0..4
+
+/** Map an interval (days) into a 0..5 maturity bucket. */
+export function progressBucket(intervalDays: number): number {
+  const days = Math.max(0, intervalDays || 0);
+  for (let i = 0; i < PROGRESS_THRESHOLDS.length; i++) {
+    if (days < PROGRESS_THRESHOLDS[i]!) return i;
+  }
+  return 5;
+}
+
+/**
+ * Color for a known word. No progress entry (or 0 interval) => step 0 red.
+ * A word NOT in the deck should not call this (render no underline instead).
  */
 export function progressColor(p?: ProgressEntry): string {
-  if (!p) return "#ef4444"; // learning, no SRS data
-  // queue/type: new(0)/learning -> red end. Use interval as the main signal.
-  const days = Math.max(0, p.interval || 0);
-  // Reps give a little nudge when interval is still tiny.
-  const repNudge = Math.min(1, (p.reps || 0) / 8) * 5;
-  const effective = days + repNudge;
-  const t = Math.max(0, Math.min(1, effective / 21)); // 0..1 over ~3 weeks
-  return lerpColor("#ef4444", "#22c55e", t);
-}
-
-function lerpColor(a: string, b: string, t: number): string {
-  const pa = hexToRgb(a);
-  const pb = hexToRgb(b);
-  const r = Math.round(pa[0] + (pb[0] - pa[0]) * t);
-  const g = Math.round(pa[1] + (pb[1] - pa[1]) * t);
-  const bl = Math.round(pa[2] + (pb[2] - pa[2]) * t);
-  return `rgb(${r}, ${g}, ${bl})`;
-}
-
-function hexToRgb(h: string): [number, number, number] {
-  const n = parseInt(h.slice(1), 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  const days = p ? Math.max(0, p.interval || 0) : 0;
+  return PROGRESS_COLORS[progressBucket(days)]!;
 }

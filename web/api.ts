@@ -18,8 +18,21 @@ export interface SubTrackInfo {
   id: string; // "sidecar:ru" | "embedded:2"
   kind: "sidecar" | "embedded";
   lang: string;
+  label?: string; // friendly "Japanese · Whisper" (from backend)
   title?: string;
   codec?: string;
+}
+
+/** Error thrown by jpost with the parsed HTTP status + server-provided error. */
+export class ApiError extends Error {
+  status: number;
+  serverError?: string;
+  constructor(status: number, message: string, serverError?: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.serverError = serverError;
+  }
 }
 
 export interface WordLookup {
@@ -68,7 +81,20 @@ async function jpost<T>(path: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`${path} → ${r.status}`);
+  if (!r.ok) {
+    let serverError: string | undefined;
+    try {
+      const j = (await r.json()) as { error?: string };
+      serverError = j?.error;
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new ApiError(
+      r.status,
+      `${path} → ${r.status}${serverError ? ` (${serverError})` : ""}`,
+      serverError,
+    );
+  }
   return (await r.json()) as T;
 }
 
@@ -85,6 +111,7 @@ export const api = {
     mediaId?: string;
     timestamp?: number;
     withFrame?: boolean;
+    noCache?: boolean;
   }) => jpost<WordLookup>("/api/lookup", p),
   ankiWords: () => jget<AnkiWordsResponse>("/api/anki/words"),
   ankiAdd: (p: {
