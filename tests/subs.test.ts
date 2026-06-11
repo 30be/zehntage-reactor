@@ -6,7 +6,49 @@ import {
   parseTimestamp,
   formatSrtTimestamp,
   cuesToSrt,
+  languageName,
+  trackLabel,
+  type SubTrack,
 } from "../src/lib/subs.ts";
+
+describe("languageName", () => {
+  test("known codes (both 2- and 3-letter)", () => {
+    expect(languageName("ja")).toBe("Japanese");
+    expect(languageName("jpn")).toBe("Japanese");
+    expect(languageName("ru")).toBe("Russian");
+    expect(languageName("rus")).toBe("Russian");
+    expect(languageName("en")).toBe("English");
+    expect(languageName("eng")).toBe("English");
+    expect(languageName("de")).toBe("German");
+    expect(languageName("ger")).toBe("German");
+  });
+  test("case-insensitive", () => {
+    expect(languageName("JPN")).toBe("Japanese");
+  });
+  test("unknown code uppercased", () => {
+    expect(languageName("fr")).toBe("FR");
+    expect(languageName("und")).toBe("UND");
+  });
+});
+
+describe("trackLabel", () => {
+  const mk = (p: Partial<SubTrack>): SubTrack =>
+    ({ id: "x", kind: "embedded", lang: "jpn", ...p }) as SubTrack;
+  test("embedded Whisper track", () => {
+    expect(trackLabel(mk({ lang: "jpn", title: "Whisper transcription" }))).toBe(
+      "Japanese · Whisper",
+    );
+  });
+  test("embedded non-whisper track", () => {
+    expect(trackLabel(mk({ lang: "jpn", title: "Full subs" }))).toBe("Japanese · embedded");
+  });
+  test("embedded with no title", () => {
+    expect(trackLabel(mk({ lang: "eng" }))).toBe("English · embedded");
+  });
+  test("sidecar file", () => {
+    expect(trackLabel(mk({ kind: "sidecar", lang: "rus" }))).toBe("Russian · file");
+  });
+});
 
 describe("parseTimestamp", () => {
   test("srt comma form", () => {

@@ -18,6 +18,40 @@ export interface SubTrack {
   path?: string;
   /** stream index for embedded tracks */
   index?: number;
+  /** friendly UI label, e.g. "Japanese · Whisper" */
+  label?: string;
+}
+
+/** Map a raw language code to a friendly display name. */
+export function languageName(code: string): string {
+  switch (code.toLowerCase()) {
+    case "ja":
+    case "jpn":
+      return "Japanese";
+    case "ru":
+    case "rus":
+      return "Russian";
+    case "en":
+    case "eng":
+      return "English";
+    case "de":
+    case "ger":
+      return "German";
+    default:
+      return code.toUpperCase();
+  }
+}
+
+/** Build the friendly "${LanguageName} · ${source}" label for a track. */
+export function trackLabel(track: SubTrack): string {
+  let source: string;
+  if (track.kind === "embedded") {
+    const title = track.title ?? "";
+    source = /whisper/i.test(title) ? "Whisper" : "embedded";
+  } else {
+    source = "file";
+  }
+  return `${languageName(track.lang)} · ${source}`;
 }
 
 // --- timestamp helpers ---

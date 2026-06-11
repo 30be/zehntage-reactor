@@ -1,7 +1,7 @@
 // zehntage-reactor HTTP server (Bun.serve).
 
 import { extname, join, dirname } from "node:path";
-import { Library, type LibraryEntry } from "../lib/library.ts";
+import { Library, subLangsFor, type LibraryEntry } from "../lib/library.ts";
 import {
   serveFileWithRange,
   checkCodecs,
@@ -14,6 +14,7 @@ import {
   parseSubtitleText,
   parseSrt,
   cuesToSrt,
+  trackLabel,
   type Cue,
   type SubTrack,
 } from "../lib/subs.ts";
@@ -95,13 +96,15 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
       if (req.method === "GET" && path === "/api/library") {
         const entries = await library.refresh();
         return json(
-          entries.map((e) => ({
-            id: e.id,
-            name: e.name,
-            relPath: e.relPath,
-            size: e.size,
-            subLangs: e.sidecarSubs.map((s) => s.lang || "und"),
-          })),
+          await Promise.all(
+            entries.map(async (e) => ({
+              id: e.id,
+              name: e.name,
+              relPath: e.relPath,
+              size: e.size,
+              subLangs: await subLangsFor(e),
+            })),
+          ),
         );
       }
 
@@ -131,7 +134,9 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
         const entry = library.get(subsList[1]!);
         if (!entry) return err("not found", 404);
         const tracks = await subTracksFor(entry);
-        return json(tracks.map(({ path: _p, ...rest }) => rest));
+        return json(
+          tracks.map(({ path: _p, ...rest }) => ({ ...rest, label: trackLabel(rest) })),
+        );
       }
 
       const subsCues = path.match(/^\/api\/subs\/([a-f0-9]+)\/([^/]+)$/);
@@ -208,6 +213,12 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
         if (!entry) return err("not found", 404);
         const body = (await req.json().catch(() => ({}))) as { targetLang?: string };
         const targetLang = body.targetLang ?? "ru";
+        // Safety net: refuse to overwrite/duplicate an existing track (sidecar
+        // OR embedded) for the target language.
+        const existing = await subTracksFor(entry);
+        if (existing.some((t) => t.lang.toLowerCase() === targetLang.toLowerCase())) {
+          return err("track exists", 409);
+        }
         const cues = await cuesForTrack(entry, decodeURIComponent(translate[2]!));
         const translated = await translateCues(cues, targetLang);
         const out = sidecarPath(entry, targetLang);

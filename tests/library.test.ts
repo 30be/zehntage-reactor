@@ -2,7 +2,14 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdtemp, rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { scanLibrary, idForRelPath, sidecarLang } from "../src/lib/library.ts";
+import {
+  scanLibrary,
+  idForRelPath,
+  sidecarLang,
+  embeddedCacheKey,
+  subLangsFor,
+  type LibraryEntry,
+} from "../src/lib/library.ts";
 
 let root: string;
 
@@ -41,6 +48,42 @@ describe("scanLibrary", () => {
     const ep = entries.find((e) => e.name === "ep01.mkv")!;
     const langs = ep.sidecarSubs.map((s) => s.lang).sort();
     expect(langs).toEqual(["", "ja"]);
+  });
+});
+
+describe("embeddedCacheKey", () => {
+  test("combines path, size, mtime", () => {
+    expect(embeddedCacheKey("/a/b.mkv", 100, 123)).toBe("/a/b.mkv|100|123");
+  });
+  test("differs when size or mtime changes", () => {
+    const base = embeddedCacheKey("/a/b.mkv", 100, 123);
+    expect(embeddedCacheKey("/a/b.mkv", 101, 123)).not.toBe(base);
+    expect(embeddedCacheKey("/a/b.mkv", 100, 124)).not.toBe(base);
+    expect(embeddedCacheKey("/a/c.mkv", 100, 123)).not.toBe(base);
+  });
+});
+
+describe("subLangsFor", () => {
+  test("includes sidecar langs; embedded probe of fake file yields none", async () => {
+    const entries = await scanLibrary(root);
+    const ep = entries.find((e) => e.name === "ep01.mkv")!;
+    const langs = (await subLangsFor(ep)).sort();
+    // fake mkv isn't probeable -> only sidecars ("" -> "und", "ja")
+    expect(langs).toEqual(["ja", "und"]);
+  });
+  test("dedupes a sidecar+embedded same lang via Set semantics", async () => {
+    const entry = {
+      id: "x",
+      relPath: "x.mkv",
+      absPath: "/nonexistent/x.mkv",
+      name: "x.mkv",
+      size: 0,
+      sidecarSubs: [
+        { lang: "ja", path: "/a.ja.srt", ext: ".srt" },
+        { lang: "ja", path: "/b.ja.srt", ext: ".srt" },
+      ],
+    } as LibraryEntry;
+    expect(await subLangsFor(entry)).toEqual(["ja"]);
   });
 });
 
