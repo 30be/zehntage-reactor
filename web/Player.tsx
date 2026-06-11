@@ -119,8 +119,8 @@ export function Player({ entry, toast, settings }: Props) {
       setKnownFronts(new Set(anki.words.map((w) => w.front)));
 
       // Auto-select sensible defaults: prefer a Japanese primary, ru/en secondary.
-      const primLang = (settings.primaryLang as string) || "ja";
-      const secLang = (settings.secondaryLang as string) || "ru";
+      const primLang = (settings.targetLang as string) || "ja";
+      const secLang = (settings.knownLang as string) || "ru";
       const isJa = (l: string) => l === "jpn" || l === "ja" || l.startsWith("ja");
       const autoPrim =
         ts.find((t) => t.kind === "embedded" && isJa(t.lang)) ??

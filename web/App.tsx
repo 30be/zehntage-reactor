@@ -169,10 +169,10 @@ function Settings({
   toast: (m: string) => void;
 }) {
   const [primaryLang, setPrimaryLang] = useState(
-    (settings.primaryLang as string) || "ja",
+    (settings.targetLang as string) || "ja",
   );
   const [secondaryLang, setSecondaryLang] = useState(
-    (settings.secondaryLang as string) || "ru",
+    (settings.knownLang as string) || "ru",
   );
   const [autoWhisper, setAutoWhisper] = useState(
     Boolean(settings.whisperAutoGenerate),
@@ -184,8 +184,8 @@ function Settings({
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    setPrimaryLang((settings.primaryLang as string) || "ja");
-    setSecondaryLang((settings.secondaryLang as string) || "ru");
+    setPrimaryLang((settings.targetLang as string) || "ja");
+    setSecondaryLang((settings.knownLang as string) || "ru");
     setAutoWhisper(Boolean(settings.whisperAutoGenerate));
     const def = (settings.lookupPromptDefault as string) || "";
     setLookupPrompt((settings.lookupPrompt as string) || def);
@@ -195,8 +195,8 @@ function Settings({
     setSaving(true);
     try {
       const next = await api.saveSettings({
-        primaryLang,
-        secondaryLang,
+        targetLang: primaryLang,
+        knownLang: secondaryLang,
         whisperAutoGenerate: autoWhisper,
         lookupPrompt,
       });
