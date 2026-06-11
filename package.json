@@ -9,7 +9,9 @@
   "scripts": {
     "start": "bun run src/cli.ts",
     "test": "bun test",
-    "smoke": "bun run scripts/smoke.ts"
+    "build:web": "bun run scripts/build-web.ts",
+    "smoke": "bun run scripts/smoke.ts",
+    "check:web": "bun run scripts/check-web.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",
