@@ -24,6 +24,13 @@ function srt(cues: { start: number; end: number; text: string }[]): string {
     .join("\n");
 }
 
+// gap.mp4: cues only at the very start and near the end — the >60s dialogue
+// hole in between exercises the OP/ED "Skip →" pill.
+export const GAP_CUES = [
+  { start: 2, end: 5, text: "始まります。" },
+  { start: 80, end: 83, text: "終わります。" },
+];
+
 export const JA_CUES = [
   { start: 2, end: 5, text: "勉強します。" },
   { start: 6, end: 9, text: "図書館へ行きます。" },
@@ -75,12 +82,15 @@ export default async function globalSetup(): Promise<void> {
   await Promise.all([
     makeVideo(join(LIB, "clip.mp4"), 30),
     makeVideo(join(LIB, "bare.mp4"), 12),
+    makeVideo(join(LIB, "gap.mp4"), 90),
   ]);
   await Bun.write(join(LIB, "clip.ja.srt"), srt(JA_CUES));
   await Bun.write(join(LIB, "subs", "clip.ru.srt"), srt(RU_CUES));
+  await Bun.write(join(LIB, "gap.ja.srt"), srt(GAP_CUES));
   // Backdate the external sidecar: the server's startup migration moves
   // recently-written <base>.<ja|ru>.srt files into subs/ (treating them as
   // generated). An old mtime keeps it an EXTERNAL track, as intended.
   const old = new Date(Date.now() - 30 * 24 * 3600 * 1000);
   await utimes(join(LIB, "clip.ja.srt"), old, old);
+  await utimes(join(LIB, "gap.ja.srt"), old, old);
 }

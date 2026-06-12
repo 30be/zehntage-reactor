@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type BatchStatus, type LibraryEntry } from "./api.ts";
+import {
+  api,
+  type AnkiWordsResponse,
+  type BatchStatus,
+  type LibraryEntry,
+} from "./api.ts";
 import { Player } from "./Player.tsx";
 import { computeCoverage, readKnownWords, type Coverage } from "./coverage.ts";
 import { buildWordIndex } from "./progress.ts";
@@ -8,7 +13,8 @@ import { kataToHira } from "./tokenizer.ts";
 type Route =
   | { name: "library" }
   | { name: "player"; id: string; t?: number }
-  | { name: "settings" };
+  | { name: "settings" }
+  | { name: "stats" };
 
 function parseHash(): Route {
   const h = window.location.hash.replace(/^#\/?/, "");
@@ -21,6 +27,7 @@ function parseHash(): Route {
     return { name: "player", id, ...(Number.isFinite(t) && t >= 0 ? { t } : {}) };
   }
   if (h === "settings") return { name: "settings" };
+  if (h === "stats") return { name: "stats" };
   return { name: "library" };
 }
 
@@ -71,6 +78,9 @@ export function App() {
           <button className="btn ghost sm" onClick={() => go("#/")}>
             Library
           </button>
+          <button className="btn ghost sm" onClick={() => go("#/stats")}>
+            Stats
+          </button>
           <button className="btn ghost sm" onClick={() => go("#/settings")}>
             Settings
           </button>
@@ -79,6 +89,7 @@ export function App() {
 
       <main className="container">
         {route.name === "library" && <Library go={go} toast={toast} />}
+        {route.name === "stats" && <Stats go={go} />}
         {route.name === "settings" && (
           <Settings settings={settings} setSettings={setSettings} toast={toast} go={go} />
         )}
@@ -350,6 +361,110 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
             </div>
           </div>
         ))}
+      </div>
+    </>
+  );
+}
+
+// Maturity threshold for "known" in Anki terms (interval >= 21 days).
+const MATURE_INTERVAL = 21;
+
+function Stats({ go }: { go: (h: string) => void }) {
+  const [entries, setEntries] = useState<LibraryEntry[] | null>(null);
+  const [anki, setAnki] = useState<AnkiWordsResponse | null>(null);
+  const [coverage, setCoverage] = useState<Map<string, Coverage | null>>(
+    () => new Map(),
+  );
+
+  useEffect(() => {
+    void api.library().then(setEntries).catch(() => setEntries([]));
+    void api
+      .ankiWords()
+      .then(setAnki)
+      .catch(() => setAnki({ words: [], progress: {} }));
+  }, []);
+
+  // Per-episode coverage, computed in idle time (same approach as Library).
+  useEffect(() => {
+    if (!entries || !anki || entries.length === 0) return;
+    const ctrl = new AbortController();
+    const { signal } = ctrl;
+    void (async () => {
+      const wordIndex = buildWordIndex(anki.words, anki.progress);
+      const known = readKnownWords();
+      for (const e of entries) {
+        if (signal.aborted) return;
+        if (e.subLangs.length === 0) continue;
+        await idle(signal);
+        if (signal.aborted) return;
+        try {
+          const cov = await computeCoverage(
+            e.id,
+            wordIndex,
+            known,
+            anki.words.length,
+            signal,
+          );
+          if (signal.aborted) return;
+          setCoverage((prev) => new Map(prev).set(e.id, cov));
+        } catch {
+          /* skip this entry */
+        }
+      }
+    })();
+    return () => ctrl.abort();
+  }, [entries, anki]);
+
+  const localKnown = readKnownWords().size;
+  const mature = anki
+    ? Object.values(anki.progress).filter((p) => p.interval >= MATURE_INTERVAL)
+        .length
+    : 0;
+  const withSubs = entries?.filter((e) => e.subLangs.length > 0) ?? [];
+
+  return (
+    <>
+      <h1 className="h1">Stats</h1>
+      <div className="stats-totals">
+        <div className="stat">
+          <span className="stat-num">{anki ? mature + localKnown : "…"}</span>
+          known words
+        </div>
+        <div className="stat">
+          <span className="stat-num">{anki ? anki.words.length : "…"}</span>
+          cards added
+        </div>
+      </div>
+      {entries == null && <div className="empty">Loading…</div>}
+      {entries != null && withSubs.length === 0 && (
+        <div className="empty">No episodes with subtitles.</div>
+      )}
+      <div className="stats-list">
+        {withSubs.map((e) => {
+          const c = coverage.get(e.id);
+          return (
+            <div
+              key={e.id}
+              className="stats-row"
+              onClick={() => go(`#/play/${e.id}`)}
+            >
+              <span className="stats-name">{e.name.replace(/\.[^.]+$/, "")}</span>
+              <span className="stats-bar">
+                <span
+                  className="stats-fill"
+                  style={{ width: `${c?.pct ?? 0}%` }}
+                />
+              </span>
+              <span className="stats-cov">
+                {c
+                  ? `${c.pct}% · ${c.newCount} new`
+                  : c === null
+                    ? "no ja"
+                    : "…"}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </>
   );

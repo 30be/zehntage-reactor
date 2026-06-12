@@ -1924,6 +1924,63 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     }
   }, [entry.id, primaryId, toast]);
 
+  // --- condensed audio export (all ja dialogue spans → one mp3) ---
+  const [condenseBusy, setCondenseBusy] = useState(false);
+  const condenseBusyRef = useRef(false); // sync reentrance guard
+  const onCondense = useCallback(async () => {
+    if (condenseBusyRef.current) return;
+    condenseBusyRef.current = true;
+    setCondenseBusy(true);
+    toast("condensing audio… (can take ~1 min)");
+    try {
+      const r = await api.condense(entry.id);
+      toast(`condensed ${fmtTime(r.duration)} → ${r.path}`);
+    } catch (e) {
+      toast(`condense failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      condenseBusyRef.current = false;
+      if (mountedRef.current) setCondenseBusy(false);
+    }
+  }, [entry.id, toast]);
+
+  // --- OP/ED skip heuristic: a >60s hole in the primary cues means no
+  // dialogue (opening/ending/silence). While playback sits inside such a hole
+  // (and past the first 10s of the file) offer a transient "Skip →" pill that
+  // jumps to 1s before the next cue. No auto-skip — the user decides.
+  const [skipTarget, setSkipTarget] = useState<number | null>(null);
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const cues = displayCues;
+    const upd = () => {
+      let target: number | null = null;
+      if (v.currentTime > 10 && cues.length > 0) {
+        const t = v.currentTime - subOffset;
+        if (activeCueIndex(cues, t) < 0) {
+          const nextIdx = cues.findIndex((c) => c.start > t);
+          if (nextIdx >= 0) {
+            const prevEnd = nextIdx > 0 ? cues[nextIdx - 1]!.end : 0;
+            if (cues[nextIdx]!.start - prevEnd > 60) {
+              target = Math.max(0, cues[nextIdx]!.start + subOffset - 1);
+            }
+          }
+        }
+      }
+      setSkipTarget((prev) => (prev === target ? prev : target));
+    };
+    v.addEventListener("timeupdate", upd);
+    v.addEventListener("seeked", upd);
+    upd();
+    return () => {
+      v.removeEventListener("timeupdate", upd);
+      v.removeEventListener("seeked", upd);
+    };
+  }, [displayCues, subOffset]);
+  const onSkipGap = useCallback(() => {
+    const v = videoRef.current;
+    if (v && skipTarget != null) v.currentTime = skipTarget;
+  }, [skipTarget]);
+
   // Furigana on unknown kanji (settings toggle, default on). Maturity-based
   // hiding lives in TokenLine (shared by the overlay and the sidebar).
   const furiganaOn = settings.furigana !== false;
@@ -2083,6 +2140,15 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             />
             <div ref={densityMarkerRef} className="density-marker" />
           </>
+        )}
+        {skipTarget != null && (
+          <button
+            className="skip-pill"
+            onClick={onSkipGap}
+            title="No dialogue here — jump to the next line"
+          >
+            Skip →
+          </button>
         )}
       {popup && (
         <div
@@ -2306,6 +2372,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
               value={primaryId}
               onChange={(e) => {
                 if (e.target.value === "__generate") void onGenerateJa();
+                else if (e.target.value === "__condense") void onCondense();
                 else setPrimaryId(e.target.value);
               }}
             >
@@ -2317,6 +2384,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
               ))}
               {!hasJa && !whisperBusy && (
                 <option value="__generate">+ generate ja…</option>
+              )}
+              {hasJa && !condenseBusy && !whisperBusy && (
+                <option value="__condense">+ condensed audio…</option>
               )}
             </select>
           </div>
@@ -2370,6 +2440,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         </label>
 
         {translateBusy && <span className="spinner-line">Translating…</span>}
+        {condenseBusy && <span className="spinner-line">Condensing audio…</span>}
         {whisperBusy && (
           <>
             <div className="whisper-progress" title="Whisper transcription progress">

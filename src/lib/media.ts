@@ -1,12 +1,15 @@
 // Range-aware media serving + codec compatibility check via ffprobe.
 
-import { stat } from "node:fs/promises";
+import { stat, mkdir, mkdtemp, rm, rename } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
 import { probeStreams } from "./subs.ts";
 
 const CONTENT_TYPES: Record<string, string> = {
   ".mkv": "video/x-matroska",
   ".mp4": "video/mp4",
   ".webm": "video/webm",
+  ".mp3": "audio/mpeg",
 };
 
 export function contentTypeFor(path: string): string {
@@ -198,6 +201,123 @@ export async function cutAudio(
     throw new Error(`audio cut failed at ${start}-${end}`);
   }
   return buf;
+}
+
+// ---- condensed audio (all dialogue spans concatenated into one mp3) ----
+
+export interface AudioSpan {
+  start: number;
+  end: number;
+}
+
+/** Pad each span by `pad`s on both sides, then merge overlapping spans and
+ * spans whose gap is < `gap`s. Returns sorted, disjoint spans. */
+export function mergeAudioSpans(
+  spans: AudioSpan[],
+  pad = 0.2,
+  gap = 0.4,
+): AudioSpan[] {
+  const sorted = spans
+    .filter((s) => Number.isFinite(s.start) && Number.isFinite(s.end) && s.end > s.start)
+    .map((s) => ({ start: Math.max(0, s.start - pad), end: s.end + pad }))
+    .sort((a, b) => a.start - b.start);
+  const out: AudioSpan[] = [];
+  for (const s of sorted) {
+    const last = out[out.length - 1];
+    if (last && s.start - last.end < gap) {
+      if (s.end > last.end) last.end = s.end;
+    } else {
+      out.push({ ...s });
+    }
+  }
+  return out;
+}
+
+/** One ffmpeg run: atrim each span + concat filter → mp3 at outPath. */
+async function concatSpansToMp3(
+  file: string,
+  spans: AudioSpan[],
+  outPath: string,
+): Promise<void> {
+  const trims = spans.map(
+    (s, i) =>
+      `[0:a]atrim=start=${s.start.toFixed(3)}:end=${s.end.toFixed(3)},asetpts=PTS-STARTPTS[a${i}]`,
+  );
+  const fc =
+    trims.join(";") +
+    ";" +
+    spans.map((_, i) => `[a${i}]`).join("") +
+    `concat=n=${spans.length}:v=0:a=1[out]`;
+  const proc = Bun.spawn(
+    [
+      "ffmpeg", "-y", "-v", "error",
+      "-i", file,
+      "-filter_complex", fc,
+      "-map", "[out]",
+      "-vn", "-acodec", "libmp3lame", "-q:a", "4",
+      outPath,
+    ],
+    { stdout: "ignore", stderr: "pipe" },
+  );
+  const errText = await new Response(proc.stderr).text();
+  if ((await proc.exited) !== 0) {
+    throw new Error(`condense ffmpeg failed: ${errText.slice(0, 400)}`);
+  }
+}
+
+// Keep each filter_complex argument well under the per-arg limit; long
+// episodes are processed in chunks then joined with the concat demuxer.
+const CONDENSE_CHUNK = 150;
+
+/**
+ * Concatenate the given (already merged) audio spans of `file` into a single
+ * MP3 written to `outPath`. Returns the total duration in seconds.
+ */
+export async function condenseAudio(
+  file: string,
+  spans: AudioSpan[],
+  outPath: string,
+): Promise<number> {
+  if (spans.length === 0) throw new Error("no audio spans to condense");
+  await mkdir(dirname(outPath), { recursive: true });
+  // Build into a temp name and rename at the end: a failed/killed ffmpeg must
+  // not leave a partial mp3 at outPath (the GET endpoint only checks existence).
+  const work = `${outPath}.tmp-${process.pid}.mp3`;
+  try {
+    if (spans.length <= CONDENSE_CHUNK) {
+      await concatSpansToMp3(file, spans, work);
+    } else {
+      const tmp = await mkdtemp(join(tmpdir(), "zr-condense-"));
+      try {
+        const parts: string[] = [];
+        for (let i = 0; i < spans.length; i += CONDENSE_CHUNK) {
+          const part = join(tmp, `part${parts.length}.mp3`);
+          await concatSpansToMp3(file, spans.slice(i, i + CONDENSE_CHUNK), part);
+          parts.push(part);
+        }
+        const list = join(tmp, "list.txt");
+        await Bun.write(
+          list,
+          parts.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join("\n"),
+        );
+        const proc = Bun.spawn(
+          ["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", list, "-c", "copy", work],
+          { stdout: "ignore", stderr: "pipe" },
+        );
+        const errText = await new Response(proc.stderr).text();
+        if ((await proc.exited) !== 0) {
+          throw new Error(`condense concat failed: ${errText.slice(0, 400)}`);
+        }
+      } finally {
+        await rm(tmp, { recursive: true, force: true });
+      }
+    }
+    await rename(work, outPath);
+  } catch (e) {
+    await rm(work, { force: true });
+    throw e;
+  }
+  return spans.reduce((acc, s) => acc + (s.end - s.start), 0);
 }
 
 /** Grab one frame at `t` seconds, scaled to `width`, as JPEG bytes. */

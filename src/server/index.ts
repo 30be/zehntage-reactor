@@ -15,6 +15,8 @@ import {
   remuxToFmp4,
   captureFrame,
   cutAudio,
+  mergeAudioSpans,
+  condenseAudio,
 } from "../lib/media.ts";
 import {
   listEmbeddedSubTracks,
@@ -124,6 +126,15 @@ function sidecarPath(entry: LibraryEntry, lang: string): string {
   const base = basename(entry.absPath, extname(entry.absPath));
   return join(dirname(entry.absPath), "subs", `${base}.${lang}.srt`);
 }
+
+/** Output path for the condensed-audio mp3: <videodir>/subs/<base>.condensed.mp3 */
+function condensedPath(entry: LibraryEntry): string {
+  const base = basename(entry.absPath, extname(entry.absPath));
+  return join(dirname(entry.absPath), "subs", `${base}.condensed.mp3`);
+}
+
+// Per-media busy guard: condensing can take ~1 min; reject duplicates.
+const condenseBusy = new Set<string>();
 
 // --- batch jobs ---
 
@@ -409,6 +420,38 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
           return remuxToFmp4(entry.absPath, t, info);
         }
         return serveFileWithRange(entry.absPath, req.headers.get("Range"));
+      }
+
+      // --- condensed audio: concat all primary-ja dialogue spans to one mp3 ---
+      const condenseStart = path.match(/^\/api\/condense\/([a-f0-9]+)$/);
+      if (req.method === "POST" && condenseStart) {
+        const entry = library.get(condenseStart[1]!);
+        if (!entry) return err("not found", 404);
+        if (condenseBusy.has(entry.id)) return err("condense already running", 409);
+        condenseBusy.add(entry.id);
+        try {
+          const trackId = await bestJapaneseTrackId(entry);
+          if (!trackId) return err("no Japanese track", 400);
+          const cues = await cuesForTrack(entry, trackId);
+          const spans = mergeAudioSpans(
+            cues.map((c) => ({ start: c.start, end: c.end })),
+          );
+          if (spans.length === 0) return err("no dialogue cues", 400);
+          const out = condensedPath(entry);
+          const duration = await condenseAudio(entry.absPath, spans, out);
+          return json({ ok: true, path: out, duration });
+        } finally {
+          condenseBusy.delete(entry.id);
+        }
+      }
+
+      const condensedGet = path.match(/^\/media\/condensed\/([a-f0-9]+)$/);
+      if (req.method === "GET" && condensedGet) {
+        const entry = library.get(condensedGet[1]!);
+        if (!entry) return err("not found", 404);
+        const out = condensedPath(entry);
+        if (!(await stat(out).catch(() => null))) return err("not condensed yet", 404);
+        return serveFileWithRange(out, req.headers.get("Range"));
       }
 
       const mediaInfo = path.match(/^\/api\/media\/([a-f0-9]+)\/info$/);

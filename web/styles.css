@@ -571,3 +571,57 @@ textarea.prompt {
 .search-hit:hover { background: var(--muted-bg, rgba(255,255,255,0.06)); }
 .search-hit .search-meta { color: var(--muted); font-size: 12px; margin-right: 6px; }
 .search-hit mark { background: rgba(250, 204, 21, 0.35); color: inherit; border-radius: 2px; }
+
+/* ---- OP/ED skip pill (no dialogue gap) ---- */
+.skip-pill {
+  position: absolute;
+  right: 14px;
+  bottom: 56px;
+  z-index: 4;
+  padding: 4px 12px;
+  font: inherit;
+  font-size: 13px;
+  color: #ddd;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 999px;
+  cursor: pointer;
+  opacity: 0.6;
+}
+.skip-pill:hover { opacity: 1; }
+
+/* ---- stats page ---- */
+.stats-totals { display: flex; gap: 32px; margin: 6px 0 22px; }
+.stats-totals .stat { color: var(--muted, #a1a1aa); font-size: 14px; }
+.stats-totals .stat-num {
+  color: var(--fg, #e5e5e5);
+  font-size: 22px;
+  font-weight: 600;
+  margin-right: 7px;
+}
+.stats-list { display: flex; flex-direction: column; gap: 4px; max-width: 680px; }
+.stats-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.stats-row:hover { background: rgba(255, 255, 255, 0.05); }
+.stats-name {
+  flex: 0 0 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+}
+.stats-bar {
+  flex: 1;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.stats-fill { display: block; height: 100%; background: #6ee7b7; }
+.stats-cov { flex: 0 0 auto; color: var(--muted, #a1a1aa); font-size: 12px; }

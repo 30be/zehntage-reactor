@@ -199,6 +199,11 @@ export const api = {
   batchSubtitle: () => jpost<BatchStartResult>("/api/batch/subtitle", {}),
   batchTranslate: () => jpost<BatchStartResult>("/api/batch/translate", {}),
   batchStatus: () => jget<BatchStatus>("/api/batch/status"),
+  condense: (id: string) =>
+    jpost<{ ok: boolean; path: string; duration: number }>(
+      `/api/condense/${id}`,
+      {},
+    ),
   getSettings: () => jget<Record<string, unknown>>("/api/settings"),
   saveSettings: (patch: Record<string, unknown>) =>
     jpost<Record<string, unknown>>("/api/settings", patch),
@@ -206,4 +211,8 @@ export const api = {
 
 export function mediaUrl(id: string): string {
   return `/media/${id}`;
+}
+
+export function condensedUrl(id: string): string {
+  return `/media/condensed/${id}`;
 }
