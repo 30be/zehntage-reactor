@@ -19,6 +19,12 @@ beforeAll(async () => {
   await Bun.write(join(root, "season1", "ep01.mkv"), "fakevideo");
   await Bun.write(join(root, "season1", "ep01.ja.srt"), "1\n00:00:00,000 --> 00:00:01,000\nx\n");
   await Bun.write(join(root, "season1", "ep01.srt"), "");
+  await mkdir(join(root, "season1", "subs"));
+  await Bun.write(
+    join(root, "season1", "subs", "ep01.ru.srt"),
+    "1\n00:00:00,000 --> 00:00:01,000\ny\n",
+  );
+  await Bun.write(join(root, "season1", "subs", "stray.mkv"), "not a library video");
   await Bun.write(join(root, "movie.mp4"), "fake");
   await Bun.write(join(root, "notes.txt"), "ignored");
   await Bun.write(join(root, ".hidden.mkv"), "ignored");
@@ -47,7 +53,17 @@ describe("scanLibrary", () => {
     const entries = await scanLibrary(root);
     const ep = entries.find((e) => e.name === "ep01.mkv")!;
     const langs = ep.sidecarSubs.map((s) => s.lang).sort();
-    expect(langs).toEqual(["", "ja"]);
+    expect(langs).toEqual(["", "ja", "ru"]);
+  });
+
+  test("subs/ dir: subtitles are generated sidecars, videos in it are ignored", async () => {
+    const entries = await scanLibrary(root);
+    expect(entries.some((e) => e.name === "stray.mkv")).toBe(false);
+    const ep = entries.find((e) => e.name === "ep01.mkv")!;
+    const ru = ep.sidecarSubs.find((s) => s.lang === "ru")!;
+    expect(ru.origin).toBe("generated");
+    expect(ru.path).toBe(join(root, "season1", "subs", "ep01.ru.srt"));
+    expect(ep.sidecarSubs.find((s) => s.lang === "ja")!.origin).toBe("external");
   });
 });
 
@@ -68,8 +84,8 @@ describe("subLangsFor", () => {
     const entries = await scanLibrary(root);
     const ep = entries.find((e) => e.name === "ep01.mkv")!;
     const langs = (await subLangsFor(ep)).sort();
-    // fake mkv isn't probeable -> only sidecars ("" -> "und", "ja")
-    expect(langs).toEqual(["ja", "und"]);
+    // fake mkv isn't probeable -> only sidecars ("" -> "und", "ja", generated "ru")
+    expect(langs).toEqual(["ja", "ru", "und"]);
   });
   test("dedupes a sidecar+embedded same lang via Set semantics", async () => {
     const entry = {

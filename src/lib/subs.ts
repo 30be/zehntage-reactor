@@ -16,6 +16,8 @@ export interface SubTrack {
   title?: string;
   codec?: string;
   path?: string;
+  /** sidecar provenance: auto-generated (subs/ dir) vs user-provided file */
+  origin?: "generated" | "external";
   /** stream index for embedded tracks */
   index?: number;
   /** friendly UI label, e.g. "Japanese · Whisper" */
@@ -49,7 +51,7 @@ export function trackLabel(track: SubTrack): string {
     const title = track.title ?? "";
     source = /whisper/i.test(title) ? "Whisper" : "embedded";
   } else {
-    source = "file";
+    source = track.origin === "generated" ? "generated" : "file";
   }
   return `${languageName(track.lang)} · ${source}`;
 }

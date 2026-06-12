@@ -15,7 +15,15 @@ export interface LibraryEntry {
   name: string;
   size: number;
   /** Sidecar subtitle files: lang (or "" when unknown) → absolute path. */
-  sidecarSubs: { lang: string; path: string; ext: string }[];
+  sidecarSubs: SidecarSub[];
+}
+
+export interface SidecarSub {
+  lang: string;
+  path: string;
+  ext: string;
+  /** "generated" for files under a subs/ dir (whisper/Gemini output), "external" otherwise. */
+  origin: "generated" | "external";
 }
 
 /** Cache key for embedded-track probing: identity (path) + size + mtime. */
@@ -96,6 +104,9 @@ async function walk(root: string, dir: string, out: LibraryEntry[]): Promise<voi
   names.sort();
   const videos: string[] = [];
   const subs: string[] = [];
+  // Subtitle files inside a "subs/" subdir — auto-generated sidecars for
+  // videos in THIS dir; never scanned for videos.
+  const generatedSubs: string[] = [];
   for (const name of names) {
     if (name.startsWith(".")) continue;
     const full = join(dir, name);
@@ -106,7 +117,21 @@ async function walk(root: string, dir: string, out: LibraryEntry[]): Promise<voi
       continue;
     }
     if (st.isDirectory()) {
-      await walk(root, full, out);
+      if (name.toLowerCase() === "subs") {
+        let subNames: string[] = [];
+        try {
+          subNames = await readdir(full);
+        } catch {
+          // unreadable subs dir — ignore
+        }
+        for (const s of subNames.sort()) {
+          if (!s.startsWith(".") && SUBTITLE_EXTENSIONS.has(extname(s).toLowerCase())) {
+            generatedSubs.push(s);
+          }
+        }
+      } else {
+        await walk(root, full, out);
+      }
     } else if (VIDEO_EXTENSIONS.has(extname(name).toLowerCase())) {
       videos.push(name);
     } else if (SUBTITLE_EXTENSIONS.has(extname(name).toLowerCase())) {
@@ -117,14 +142,16 @@ async function walk(root: string, dir: string, out: LibraryEntry[]): Promise<voi
     const abs = join(dir, v);
     const st = await stat(abs);
     const base = v.slice(0, -extname(v).length);
-    const sidecarSubs = subs
-      .map((s) => {
-        const lang = sidecarLang(base, s);
-        return lang === null
-          ? null
-          : { lang, path: join(dir, s), ext: extname(s).toLowerCase() };
-      })
-      .filter((x): x is { lang: string; path: string; ext: string } => x !== null);
+    const toSidecar = (s: string, subDir: string, origin: SidecarSub["origin"]) => {
+      const lang = sidecarLang(base, s);
+      return lang === null
+        ? null
+        : { lang, path: join(subDir, s), ext: extname(s).toLowerCase(), origin };
+    };
+    const sidecarSubs = [
+      ...subs.map((s) => toSidecar(s, dir, "external")),
+      ...generatedSubs.map((s) => toSidecar(s, join(dir, "subs"), "generated")),
+    ].filter((x): x is SidecarSub => x !== null);
     const relPath = relative(root, abs).split("\\").join("/");
     out.push({
       id: idForRelPath(relPath),

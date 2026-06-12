@@ -1,6 +1,6 @@
 // zehntage-reactor HTTP server (Bun.serve).
 
-import { extname, join, dirname } from "node:path";
+import { extname, join, dirname, basename } from "node:path";
 import { Library, subLangsFor, type LibraryEntry } from "../lib/library.ts";
 import {
   serveFileWithRange,
@@ -38,10 +38,14 @@ function err(message: string, status = 500): Response {
 
 async function subTracksFor(entry: LibraryEntry): Promise<SubTrack[]> {
   const tracks: SubTrack[] = entry.sidecarSubs.map((s) => ({
-    id: `sidecar:${s.lang || "und"}`,
+    id:
+      s.origin === "generated"
+        ? `sidecar:gen:${s.lang || "und"}`
+        : `sidecar:${s.lang || "und"}`,
     kind: "sidecar",
     lang: s.lang || "und",
     path: s.path,
+    origin: s.origin,
   }));
   try {
     tracks.push(...(await listEmbeddedSubTracks(entry.absPath)));
@@ -53,8 +57,11 @@ async function subTracksFor(entry: LibraryEntry): Promise<SubTrack[]> {
 
 async function cuesForTrack(entry: LibraryEntry, trackId: string): Promise<Cue[]> {
   if (trackId.startsWith("sidecar:")) {
-    const lang = trackId.slice("sidecar:".length);
-    const sub = entry.sidecarSubs.find((s) => (s.lang || "und") === lang);
+    const generated = trackId.startsWith("sidecar:gen:");
+    const lang = trackId.slice(generated ? "sidecar:gen:".length : "sidecar:".length);
+    const sub = entry.sidecarSubs.find(
+      (s) => (s.lang || "und") === lang && (s.origin === "generated") === generated,
+    );
     if (!sub) throw new Error(`no sidecar track ${lang}`);
     return parseSubtitleText(await Bun.file(sub.path).text(), sub.ext);
   }
@@ -65,9 +72,11 @@ async function cuesForTrack(entry: LibraryEntry, trackId: string): Promise<Cue[]
   throw new Error(`bad track id: ${trackId}`);
 }
 
+/** Output path for AUTO-GENERATED sidecars: <videodir>/subs/<base>.<lang>.srt.
+ * Bun.write creates the subs/ dir as needed. */
 function sidecarPath(entry: LibraryEntry, lang: string): string {
-  const base = entry.absPath.slice(0, -extname(entry.absPath).length);
-  return `${base}.${lang}.srt`;
+  const base = basename(entry.absPath, extname(entry.absPath));
+  return join(dirname(entry.absPath), "subs", `${base}.${lang}.srt`);
 }
 
 export interface ServerHandle {
@@ -213,18 +222,25 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
         if (!entry) return err("not found", 404);
         const body = (await req.json().catch(() => ({}))) as { targetLang?: string };
         const targetLang = body.targetLang ?? "ru";
-        // Safety net: refuse to overwrite/duplicate an existing track (sidecar
-        // OR embedded) for the target language.
-        const existing = await subTracksFor(entry);
-        if (existing.some((t) => t.lang.toLowerCase() === targetLang.toLowerCase())) {
-          return err("track exists", 409);
-        }
+        // Safety net: refuse to overwrite an existing GENERATED sidecar for the
+        // target language. External/embedded tracks (often out of sync) don't
+        // block translation — a synced generated track is preferred.
+        const generatedExists = entry.sidecarSubs.some(
+          (s) =>
+            s.origin === "generated" &&
+            s.lang.toLowerCase() === targetLang.toLowerCase(),
+        );
+        if (generatedExists) return err("track exists", 409);
         const cues = await cuesForTrack(entry, decodeURIComponent(translate[2]!));
         const translated = await translateCues(cues, targetLang);
         const out = sidecarPath(entry, targetLang);
         await Bun.write(out, cuesToSrt(translated));
         await library.refresh();
-        return json({ ok: true, track: `sidecar:${targetLang}`, cueCount: translated.length });
+        return json({
+          ok: true,
+          track: `sidecar:gen:${targetLang}`,
+          cueCount: translated.length,
+        });
       }
 
       // --- Gemini word lookup ---

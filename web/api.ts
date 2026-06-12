@@ -19,6 +19,7 @@ export interface SubTrackInfo {
   kind: "sidecar" | "embedded";
   lang: string;
   label?: string; // friendly "Japanese · Whisper" (from backend)
+  origin?: "generated" | "external"; // sidecar provenance (subs/ dir vs user file)
   title?: string;
   codec?: string;
 }

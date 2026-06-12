@@ -163,6 +163,17 @@ export function Player({ entry, toast, settings }: Props) {
         ts.find((t) => t.lang === primLang) ??
         ts.find((t) => t.lang === "ja");
       const autoSec =
+        // Prefer a generated (synced) secondary over external/embedded ones.
+        ts.find(
+          (t) =>
+            t.id !== autoPrim?.id && t.origin === "generated" && t.lang === secLang,
+        ) ??
+        ts.find(
+          (t) =>
+            t.id !== autoPrim?.id &&
+            t.origin === "generated" &&
+            t.lang.startsWith("ru"),
+        ) ??
         ts.find((t) => t.id !== autoPrim?.id && t.lang === secLang) ??
         ts.find((t) => t.id !== autoPrim?.id && (t.lang === "ru" || t.lang === "ru".slice(0, 2))) ??
         ts.find((t) => t.id !== autoPrim?.id && t.lang.startsWith("ru")) ??
@@ -607,6 +618,7 @@ export function Player({ entry, toast, settings }: Props) {
               void api.subs(entry.id).then((ts) => {
                 setTracks(ts);
                 const ja =
+                  ts.find((t) => t.id === "sidecar:gen:ja") ??
                   ts.find((t) => t.id === "sidecar:ja") ??
                   ts.find((t) => isJaLang(t.lang));
                 if (ja) setPrimaryId(ja.id);
@@ -658,7 +670,9 @@ export function Player({ entry, toast, settings }: Props) {
   }, [entry.id, primaryId, toast]);
 
   const hasJa = tracks.some((t) => isJaLang(t.lang));
-  const hasRu = tracks.some((t) => isRuLang(t.lang));
+  // Only a GENERATED (synced) RU track hides the Translate button; external or
+  // embedded RU tracks are often out of sync with the JA track.
+  const hasGeneratedRu = tracks.some((t) => isRuLang(t.lang) && t.origin === "generated");
   const primaryTrackLang = tracks.find((t) => t.id === primaryId)?.lang ?? "";
 
   return (
@@ -825,7 +839,7 @@ export function Player({ entry, toast, settings }: Props) {
             </button>
           </>
         )}
-        {primaryId && isJaLang(primaryTrackLang) && !hasRu && (
+        {primaryId && isJaLang(primaryTrackLang) && !hasGeneratedRu && (
           <button
             className="btn"
             disabled={translateBusy}
