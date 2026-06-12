@@ -21,9 +21,11 @@ import { getTokenizer, isLexical, type KToken } from "./tokenizer.ts";
 import {
   buildWordIndex,
   matchFront,
+  progressBucket,
   progressColor,
   type WordIndex,
 } from "./progress.ts";
+import { kataToHira } from "./tokenizer.ts";
 
 interface Props {
   entry: LibraryEntry;
@@ -136,6 +138,14 @@ export function Player({ entry, toast, settings }: Props) {
   const [knownFronts, setKnownFronts] = useState<Set<string>>(new Set());
 
   const [popup, setPopup] = useState<PopupState | null>(null);
+  // Click-to-pin: a pinned panel ignores all hover-out close paths and only
+  // closes via Esc, clicking another word, clicking outside, or playback
+  // resuming (space / video controls).
+  const [pinned, setPinned] = useState(false);
+  const pinnedRef = useRef(false);
+  useEffect(() => {
+    pinnedRef.current = pinned;
+  }, [pinned]);
   const lookupRef = useRef<HTMLDivElement>(null);
   const [popupPos, setPopupPos] = useState<React.CSSProperties>({
     visibility: "hidden",
@@ -198,6 +208,11 @@ export function Player({ entry, toast, settings }: Props) {
     if (!v) return;
     const onPlay = () => {
       pausedByHoverRef.current = false;
+      // Playback resuming closes a pinned panel (space, video controls, …).
+      if (pinnedRef.current) {
+        setPinned(false);
+        setPopup(null);
+      }
     };
     v.addEventListener("play", onPlay);
     return () => v.removeEventListener("play", onPlay);
@@ -485,6 +500,7 @@ export function Player({ entry, toast, settings }: Props) {
           e.stopPropagation();
           clearCloseTimer();
           askFocusedRef.current = false;
+          setPinned(false);
           setPopup(null);
           resumeFromHover();
         }
@@ -627,45 +643,87 @@ export function Player({ entry, toast, settings }: Props) {
   // We only OPEN the popup (and fire the lookup) once the cursor RESTS on a
   // word for HOVER_OPEN_MS. Sliding across a sentence cancels pending opens,
   // so no lookup storm. The per-surface lookupCache keeps revisits instant.
+  const buildWordPopup = useCallback(
+    (tok: KToken, el: HTMLElement): PopupState => {
+      const surface = tok.surface_form;
+      const rect = el.getBoundingClientRect();
+      const ctx = contextAround(primaryCues, activeP) || primaryText;
+      return {
+        kind: "word",
+        surface,
+        reading: tok.reading,
+        x: rect.left + rect.width / 2,
+        y: rect.top,
+        anchorBottom: rect.bottom,
+        context: ctx,
+        dictForm:
+          tok.basic_form && tok.basic_form !== "*" && tok.basic_form !== surface
+            ? tok.basic_form
+            : undefined,
+        timestamp: videoRef.current?.currentTime ?? 0,
+      };
+    },
+    [primaryCues, activeP, primaryText],
+  );
+
   const onWordEnter = useCallback(
     (tok: KToken, e: React.MouseEvent) => {
+      if (pinnedRef.current) return; // pinned panel owns the screen
       clearCloseTimer();
       clearOpenTimer();
       const el = e.currentTarget as HTMLElement;
-      const surface = tok.surface_form;
-      const reading = tok.reading;
-      const dictForm =
-        tok.basic_form && tok.basic_form !== "*" && tok.basic_form !== surface
-          ? tok.basic_form
-          : undefined;
       openTimer.current = window.setTimeout(() => {
         openTimer.current = null;
         // Pause on hover so the learner can read at leisure; remember that WE
         // paused so closing the popup resumes playback.
         pauseForHover();
-        const rect = el.getBoundingClientRect();
-        const ctx = contextAround(primaryCues, activeP) || primaryText;
-        setPopup({
-          kind: "word",
-          surface,
-          reading,
-          x: rect.left + rect.width / 2,
-          y: rect.top,
-          anchorBottom: rect.bottom,
-          context: ctx,
-          dictForm,
-          timestamp: videoRef.current?.currentTime ?? 0,
-        });
+        setPopup(buildWordPopup(tok, el));
       }, HOVER_OPEN_MS);
     },
-    [primaryCues, activeP, primaryText, clearOpenTimer, clearCloseTimer, pauseForHover],
+    [buildWordPopup, clearOpenTimer, clearCloseTimer, pauseForHover],
   );
+
+  // Click a word: open immediately and PIN — no hover-out auto-close. Clicking
+  // another word retargets the pinned panel.
+  const onWordClick = useCallback(
+    (tok: KToken, e: React.MouseEvent) => {
+      e.stopPropagation();
+      clearOpenTimer();
+      clearCloseTimer();
+      pauseForHover();
+      setPopup(buildWordPopup(tok, e.currentTarget as HTMLElement));
+      setPinned(true);
+    },
+    [buildWordPopup, clearOpenTimer, clearCloseTimer, pauseForHover],
+  );
+
+  // Pinned panel: clicking anywhere outside the panel (and not on a word,
+  // which retargets instead) closes it and resumes if we paused.
+  useEffect(() => {
+    if (!pinned) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node | null;
+      if (t && lookupRef.current?.contains(t)) return;
+      if (t instanceof Element && t.closest(".tok")) return;
+      setPinned(false);
+      setPopup(null);
+      resumeFromHover();
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [pinned, resumeFromHover]);
+
+  // Safety: whenever the popup is gone, the pin is gone too.
+  useEffect(() => {
+    if (!popup) setPinned(false);
+  }, [popup]);
 
   // Leaving a word to empty space: cancel a pending open, and if a popup is
   // showing, schedule a hide with a short grace so the cursor can reach the
   // panel. Entering the panel cancels the hide; leaving the panel hides it.
   const onWordLeave = useCallback(() => {
     clearOpenTimer();
+    if (pinnedRef.current) return; // pinned: never auto-close on hover-out
     clearCloseTimer();
     closeTimer.current = window.setTimeout(() => {
       closeTimer.current = null;
@@ -680,6 +738,7 @@ export function Player({ entry, toast, settings }: Props) {
   }, [clearCloseTimer]);
   const onPanelLeave = useCallback(() => {
     clearCloseTimer();
+    if (pinnedRef.current) return; // pinned: never auto-close on hover-out
     if (askFocusedRef.current) return; // typing a follow-up — keep the panel
     setPopup(null);
     resumeFromHover();
@@ -688,6 +747,7 @@ export function Player({ entry, toast, settings }: Props) {
   const closePanel = useCallback(() => {
     clearCloseTimer();
     askFocusedRef.current = false;
+    setPinned(false);
     setPopup(null);
     resumeFromHover();
   }, [clearCloseTimer, resumeFromHover]);
@@ -1131,6 +1191,12 @@ export function Player({ entry, toast, settings }: Props) {
     }
   }, [entry.id, primaryId, toast]);
 
+  // Furigana on unknown kanji (settings toggle, default on). A word is
+  // "mature enough" to hide furigana at progress bucket >= 4 (of 0..5).
+  const furiganaOn = settings.furigana !== false;
+  const HAS_KANJI = /[一-龯々]/;
+  const MATURE_BUCKET = 4;
+
   const hasJa = tracks.some((t) => isJaLang(t.lang));
   // Only a GENERATED (synced) RU track hides the Translate button; external or
   // embedded RU tracks are often out of sync with the JA track.
@@ -1157,6 +1223,16 @@ export function Player({ entry, toast, settings }: Props) {
                   const color = known
                     ? progressColor(wordIndex.progress[front!])
                     : undefined;
+                  const mature =
+                    known &&
+                    progressBucket(
+                      wordIndex.progress[front!]?.interval ?? 0,
+                    ) >= MATURE_BUCKET;
+                  const showFuri =
+                    furiganaOn &&
+                    !mature &&
+                    !!tok.reading &&
+                    HAS_KANJI.test(tok.surface_form);
                   return (
                     <span
                       key={i}
@@ -1168,8 +1244,16 @@ export function Player({ entry, toast, settings }: Props) {
                       }
                       onMouseEnter={(e) => onWordEnter(tok, e)}
                       onMouseLeave={onWordLeave}
+                      onClick={(e) => onWordClick(tok, e)}
                     >
-                      {tok.surface_form}
+                      {showFuri ? (
+                        <ruby>
+                          {tok.surface_form}
+                          <rt>{kataToHira(tok.reading!)}</rt>
+                        </ruby>
+                      ) : (
+                        tok.surface_form
+                      )}
                     </span>
                   );
                 })
@@ -1205,7 +1289,7 @@ export function Player({ entry, toast, settings }: Props) {
       {popup && (
         <div
           ref={lookupRef}
-          className="lookup"
+          className={`lookup${pinned ? " pinned" : ""}`}
           style={popupPos}
           onMouseEnter={onPanelEnter}
           onMouseLeave={onPanelLeave}
@@ -1328,34 +1412,66 @@ export function Player({ entry, toast, settings }: Props) {
       )}
 
       <div className="controls">
-        <div className="track-pick">
-          <label>Primary</label>
-          <select
-            value={primaryId}
-            onChange={(e) => setPrimaryId(e.target.value)}
-          >
-            <option value="">— none —</option>
-            {tracks.map((t) => (
-              <option key={t.id} value={t.id}>
-                {langLabel(t)}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="track-pick">
-          <label>Secondary</label>
-          <select
-            value={secondaryId}
-            onChange={(e) => setSecondaryId(e.target.value)}
-          >
-            <option value="">— none —</option>
-            {tracks.map((t) => (
-              <option key={t.id} value={t.id}>
-                {langLabel(t)}
-              </option>
-            ))}
-          </select>
-        </div>
+        {/* Primary slot: a select when tracks exist (with "+ generate…" folded
+            in as the last option), otherwise the single relevant action. */}
+        {tracks.length > 0 ? (
+          <div className="track-pick">
+            <label>Primary</label>
+            <select
+              value={primaryId}
+              onChange={(e) => {
+                if (e.target.value === "__generate") void onGenerateJa();
+                else setPrimaryId(e.target.value);
+              }}
+            >
+              <option value="">— none —</option>
+              {tracks.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {langLabel(t)}
+                </option>
+              ))}
+              {!hasJa && !whisperBusy && (
+                <option value="__generate">+ generate ja…</option>
+              )}
+            </select>
+          </div>
+        ) : (
+          !whisperBusy && (
+            <button
+              className="btn"
+              onClick={onGenerateJa}
+              title="Transcribe the audio to Japanese subtitles with Whisper (saved as a track)"
+            >
+              Generate ja
+            </button>
+          )
+        )}
+        {/* Secondary slot: same pattern, "+ translate…" folded in. */}
+        {tracks.length > 0 && (
+          <div className="track-pick">
+            <label>Secondary</label>
+            <select
+              value={secondaryId}
+              onChange={(e) => {
+                if (e.target.value === "__translate") void onTranslateRu();
+                else setSecondaryId(e.target.value);
+              }}
+            >
+              <option value="">— none —</option>
+              {tracks.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {langLabel(t)}
+                </option>
+              ))}
+              {primaryId &&
+                isJaLang(primaryTrackLang) &&
+                !hasGeneratedRu &&
+                !translateBusy && (
+                  <option value="__translate">+ translate → ru…</option>
+                )}
+            </select>
+          </div>
+        )}
         <label
           className="switch inline"
           title="Pause automatically at the end of every subtitle (learning aid)"
@@ -1368,15 +1484,7 @@ export function Player({ entry, toast, settings }: Props) {
           Autopause
         </label>
 
-        {!hasJa && !whisperBusy && (
-          <button
-            className="btn primary"
-            onClick={onGenerateJa}
-            title="Transcribe the audio to Japanese subtitles with Whisper (saved as a track)"
-          >
-            Generate Japanese subtitles
-          </button>
-        )}
+        {translateBusy && <span className="spinner-line">Translating…</span>}
         {whisperBusy && (
           <>
             <div className="whisper-progress" title="Whisper transcription progress">
@@ -1402,16 +1510,6 @@ export function Player({ entry, toast, settings }: Props) {
               Cancel
             </button>
           </>
-        )}
-        {primaryId && isJaLang(primaryTrackLang) && !hasGeneratedRu && (
-          <button
-            className="btn"
-            disabled={translateBusy}
-            onClick={onTranslateRu}
-            title="Translate the Japanese subtitles to Russian with Gemini and save as a track"
-          >
-            {translateBusy ? "Translating…" : "Translate → RU"}
-          </button>
         )}
       </div>
     </div>

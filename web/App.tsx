@@ -284,6 +284,7 @@ function Settings({
   const [autoWhisper, setAutoWhisper] = useState(
     Boolean(settings.whisperAutoGenerate),
   );
+  const [furigana, setFurigana] = useState(settings.furigana !== false);
   const promptDefault = (settings.lookupPromptDefault as string) || "";
   const [lookupPrompt, setLookupPrompt] = useState(
     (settings.lookupPrompt as string) || promptDefault,
@@ -294,6 +295,7 @@ function Settings({
     setPrimaryLang((settings.targetLang as string) || "ja");
     setSecondaryLang((settings.knownLang as string) || "ru");
     setAutoWhisper(Boolean(settings.whisperAutoGenerate));
+    setFurigana(settings.furigana !== false);
     const def = (settings.lookupPromptDefault as string) || "";
     setLookupPrompt((settings.lookupPrompt as string) || def);
   }, [settings]);
@@ -305,6 +307,7 @@ function Settings({
         targetLang: primaryLang,
         knownLang: secondaryLang,
         whisperAutoGenerate: autoWhisper,
+        furigana,
         lookupPrompt,
       });
       setSettings(next);
@@ -349,6 +352,15 @@ function Settings({
             onChange={(e) => setAutoWhisper(e.target.checked)}
           />
           <label htmlFor="autoWhisper">Auto-generate Japanese subtitles</label>
+        </div>
+        <div className="switch">
+          <input
+            type="checkbox"
+            id="furigana"
+            checked={furigana}
+            onChange={(e) => setFurigana(e.target.checked)}
+          />
+          <label htmlFor="furigana">Furigana on unknown kanji</label>
         </div>
         <div className="field">
           <label>Word-lookup prompt (Gemini)</label>
