@@ -8,6 +8,8 @@ import {
   sidecarLang,
   embeddedCacheKey,
   subLangsFor,
+  sniffSubtitleLang,
+  migrateGeneratedSidecars,
   type LibraryEntry,
 } from "../src/lib/library.ts";
 
@@ -110,5 +112,63 @@ describe("sidecarLang", () => {
     expect(sidecarLang("ep01", "ep01.srt")).toBe("");
     expect(sidecarLang("ep01", "ep02.ja.srt")).toBeNull();
     expect(sidecarLang("ep01", "ep01.whatever.srt")).toBeNull();
+  });
+});
+
+describe("sniffSubtitleLang", () => {
+  test("detects kana-heavy content as ja", () => {
+    expect(
+      sniffSubtitleLang("1\n00:00:00,000 --> 00:00:01,000\nこんにちは、世界です\n"),
+    ).toBe("ja");
+  });
+  test("detects cyrillic content as ru", () => {
+    expect(
+      sniffSubtitleLang("1\n00:00:00,000 --> 00:00:01,000\nПривет, как дела?\n"),
+    ).toBe("ru");
+  });
+  test("latin or empty content is und", () => {
+    expect(sniffSubtitleLang("1\n00:00:00,000 --> 00:00:01,000\nHello world\n")).toBe("und");
+    expect(sniffSubtitleLang("")).toBe("und");
+  });
+});
+
+describe("migrateGeneratedSidecars", () => {
+  test("moves recent legacy sidecars into subs/ and renames untagged subs", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "zehntage-mig-"));
+    try {
+      await Bun.write(join(dir, "ep01.mkv"), "fake");
+      // recent generated sidecar next to video → should move
+      await Bun.write(
+        join(dir, "ep01.ja.srt"),
+        "1\n00:00:00,000 --> 00:00:01,000\nこんにちは\n",
+      );
+      // untagged subs/<base>.srt → should get sniffed+renamed
+      await mkdir(join(dir, "subs"), { recursive: true });
+      await Bun.write(
+        join(dir, "subs", "ep01.srt"),
+        "1\n00:00:00,000 --> 00:00:01,000\nПривет мир\n",
+      );
+      const actions = await migrateGeneratedSidecars(dir);
+      const kinds = actions.map((a) => `${a.kind}:${a.to.split("/").pop()}`).sort();
+      expect(kinds).toEqual(["moved:ep01.ja.srt", "renamed:ep01.ru.srt"]);
+      expect(await Bun.file(join(dir, "subs", "ep01.ja.srt")).exists()).toBe(true);
+      expect(await Bun.file(join(dir, "subs", "ep01.ru.srt")).exists()).toBe(true);
+      expect(await Bun.file(join(dir, "ep01.ja.srt")).exists()).toBe(false);
+      // idempotent: second run does nothing
+      expect(await migrateGeneratedSidecars(dir)).toEqual([]);
+      // collision safety: a new legacy file with an existing target is skipped
+      await Bun.write(join(dir, "ep01.ja.srt"), "other content");
+      const again = await migrateGeneratedSidecars(dir);
+      expect(again).toEqual([
+        {
+          from: join(dir, "ep01.ja.srt"),
+          to: join(dir, "subs", "ep01.ja.srt"),
+          kind: "skipped-collision",
+        },
+      ]);
+      expect(await Bun.file(join(dir, "ep01.ja.srt")).text()).toBe("other content");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

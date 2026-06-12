@@ -133,6 +133,11 @@ export interface BatchStartResult {
   skipped: string[];
 }
 
+export interface BatchAllResult {
+  started: { entryId: string; name: string; phase: "whisper" | "translate" }[];
+  skipped: string[];
+}
+
 export const api = {
   library: () => jget<LibraryEntry[]>("/api/library"),
   mediaInfo: (id: string) => jget<MediaInfo>(`/api/media/${id}/info`),
@@ -184,6 +189,12 @@ export const api = {
     jpost<{ ok: boolean; track: string; cueCount: number }>(
       `/api/translate/${id}/${encodeURIComponent(trackId)}`,
       { targetLang },
+    ),
+  batchAll: () => jpost<BatchAllResult>("/api/batch/all", {}),
+  batchAllOne: (id: string) =>
+    jpost<{ entryId: string; phase: "whisper" | "translate" | "skipped" }>(
+      `/api/batch/all/${id}`,
+      {},
     ),
   batchSubtitle: () => jpost<BatchStartResult>("/api/batch/subtitle", {}),
   batchTranslate: () => jpost<BatchStartResult>("/api/batch/translate", {}),

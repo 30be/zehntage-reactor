@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { readdir, stat } from "node:fs/promises";
-import { join, relative, basename, extname } from "node:path";
+import { readdir, stat, readFile, rename, mkdir } from "node:fs/promises";
+import { join, relative, basename, extname, dirname } from "node:path";
 import { listEmbeddedSubTracks } from "./subs.ts";
 
 export const VIDEO_EXTENSIONS = new Set([".mkv", ".mp4", ".webm"]);
@@ -67,6 +67,61 @@ export async function subLangsFor(entry: LibraryEntry): Promise<string[]> {
   for (const s of entry.sidecarSubs) langs.add(s.lang || "und");
   for (const l of await embeddedSubLangs(entry.absPath)) langs.add(l);
   return [...langs];
+}
+
+// --- subtitle language sniffing (for sidecars without a lang tag) ---
+
+/**
+ * Guess the language of subtitle TEXT content (timestamps/numbers stripped):
+ * >10% kana → "ja"; else if cyrillic dominates the remaining letters → "ru";
+ * else "und".
+ */
+export function sniffSubtitleLang(content: string): "ja" | "ru" | "und" {
+  const text = content
+    .split(/\r?\n/)
+    .filter((l) => !/-->/.test(l) && !/^\s*\d+\s*$/.test(l) && !/^\s*\d+:\d+/.test(l))
+    .join("\n")
+    // drop remaining digits, timestamps inside ASS event lines, tags
+    .replace(/\{[^}]*\}/g, "")
+    .replace(/[0-9.,:;()\[\]{}<>/\\|_+=~*&^%$#@!?"'-]/g, "");
+  let kana = 0;
+  let cyr = 0;
+  let letters = 0;
+  for (const ch of text) {
+    if (/\s/.test(ch)) continue;
+    letters++;
+    if (/[ぁ-ゟァ-ヶ]/.test(ch)) kana++;
+    else if (/[Ѐ-ӿ]/.test(ch)) cyr++;
+  }
+  if (letters === 0) return "und";
+  if (kana / letters > 0.1) return "ja";
+  if (cyr / letters > 0.5) return "ru";
+  return "und";
+}
+
+// Cache of sniffed langs for untagged sidecar files, keyed by path+size+mtime
+// (same scheme as the embedded-track cache) so refreshes don't re-read files.
+const sniffedLangCache = new Map<string, string>();
+
+/** Sniffed language for an untagged sidecar file, cached by path+size+mtime. */
+export async function sniffedSidecarLang(absPath: string): Promise<string> {
+  let key: string;
+  try {
+    const st = await stat(absPath);
+    key = embeddedCacheKey(absPath, st.size, st.mtimeMs);
+  } catch {
+    return "und";
+  }
+  const hit = sniffedLangCache.get(key);
+  if (hit !== undefined) return hit;
+  let lang = "und";
+  try {
+    lang = sniffSubtitleLang(await readFile(absPath, "utf-8"));
+  } catch {
+    // unreadable → und
+  }
+  sniffedLangCache.set(key, lang);
+  return lang;
 }
 
 /** Stable id: first 12 hex chars of sha1 of the relative path. */
@@ -152,6 +207,13 @@ async function walk(root: string, dir: string, out: LibraryEntry[]): Promise<voi
       ...subs.map((s) => toSidecar(s, dir, "external")),
       ...generatedSubs.map((s) => toSidecar(s, join(dir, "subs"), "generated")),
     ].filter((x): x is SidecarSub => x !== null);
+    // Untagged sidecars ("" lang): sniff the content instead of showing "und".
+    for (const s of sidecarSubs) {
+      if (s.lang === "") {
+        const sniffed = await sniffedSidecarLang(s.path);
+        if (sniffed !== "und") s.lang = sniffed;
+      }
+    }
     const relPath = relative(root, abs).split("\\").join("/");
     out.push({
       id: idForRelPath(relPath),
@@ -162,6 +224,121 @@ async function walk(root: string, dir: string, out: LibraryEntry[]): Promise<voi
       sidecarSubs,
     });
   }
+}
+
+// --- one-time data migration for legacy generated sidecars ---
+
+const MIGRATION_MAX_AGE_MS = 14 * 24 * 3600 * 1000;
+
+export interface MigrationAction {
+  from: string;
+  to: string;
+  kind: "moved" | "renamed" | "skipped-collision";
+}
+
+/**
+ * Idempotent migration, safe to run on every server start:
+ *  1. `<base>.<ja|ru>.srt` NEXT to a video, mtime < 14 days old (i.e. written
+ *     by an earlier app version, not by the torrent) → move into `subs/`.
+ *  2. `subs/<base>.srt` without a lang suffix → rename to `subs/<base>.<lang>.srt`
+ *     using content sniffing.
+ * Never overwrites: on collision the file stays put (logged as skipped).
+ */
+export async function migrateGeneratedSidecars(root: string): Promise<MigrationAction[]> {
+  const actions: MigrationAction[] = [];
+  await migrateDir(root, actions);
+  for (const a of actions) {
+    console.log(`[migrate] ${a.kind}: ${a.from} → ${a.to}`);
+  }
+  return actions;
+}
+
+async function migrateDir(dir: string, actions: MigrationAction[]): Promise<void> {
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return;
+  }
+  names.sort();
+  const videoBases: string[] = [];
+  const subdirs: string[] = [];
+  for (const name of names) {
+    if (name.startsWith(".")) continue;
+    const full = join(dir, name);
+    let st;
+    try {
+      st = await stat(full);
+    } catch {
+      continue;
+    }
+    if (st.isDirectory()) {
+      if (name.toLowerCase() !== "subs") subdirs.push(full);
+    } else if (VIDEO_EXTENSIONS.has(extname(name).toLowerCase())) {
+      videoBases.push(name.slice(0, -extname(name).length));
+    }
+  }
+
+  const now = Date.now();
+  const subsDir = join(dir, "subs");
+
+  const moveNoClobber = async (
+    from: string,
+    to: string,
+    kind: "moved" | "renamed",
+  ): Promise<void> => {
+    try {
+      await stat(to);
+      actions.push({ from, to, kind: "skipped-collision" });
+      return; // target exists — never overwrite
+    } catch {
+      // target free
+    }
+    try {
+      await mkdir(dirname(to), { recursive: true });
+      await rename(from, to);
+      actions.push({ from, to, kind });
+    } catch (e) {
+      console.warn(`[migrate] failed ${from} → ${to}: ${e}`);
+    }
+  };
+
+  // 1. <base>.<ja|ru>.srt next to a video, recently written → subs/
+  for (const base of videoBases) {
+    for (const lang of ["ja", "ru"]) {
+      const from = join(dir, `${base}.${lang}.srt`);
+      let st;
+      try {
+        st = await stat(from);
+      } catch {
+        continue;
+      }
+      if (now - st.mtimeMs > MIGRATION_MAX_AGE_MS) continue;
+      await moveNoClobber(from, join(subsDir, `${base}.${lang}.srt`), "moved");
+    }
+  }
+
+  // 2. subs/<base>.srt without lang suffix → sniff + rename
+  let subNames: string[] = [];
+  try {
+    subNames = await readdir(subsDir);
+  } catch {
+    subNames = [];
+  }
+  for (const s of subNames.sort()) {
+    if (s.startsWith(".") || extname(s).toLowerCase() !== ".srt") continue;
+    const stem = s.slice(0, -4);
+    // already has a lang tag?
+    if (/\.[A-Za-z]{2,3}(-[A-Za-z]{2,4})?$/.test(stem)) continue;
+    // only files that pair with a video in this dir
+    if (!videoBases.includes(stem)) continue;
+    const from = join(subsDir, s);
+    const lang = await sniffedSidecarLang(from);
+    if (lang === "und") continue;
+    await moveNoClobber(from, join(subsDir, `${stem}.${lang}.srt`), "renamed");
+  }
+
+  for (const sub of subdirs) await migrateDir(sub, actions);
 }
 
 /** In-memory library index, refreshable. */

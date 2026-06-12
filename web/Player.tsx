@@ -48,6 +48,47 @@ interface QaItem {
 
 const STORAGE_PREFIX = "zr.tracks.";
 
+// api.ts is owned by another agent — widen the call signatures locally to
+// thread the new optional context fields without editing it.
+const lookupApi = api.lookup as (p: {
+  word: string;
+  context: string;
+  source: string;
+  secondary?: string;
+  mediaId?: string;
+  timestamp?: number;
+  withFrame?: boolean;
+  noCache?: boolean;
+}) => Promise<WordLookup>;
+const explainApi = api.explain as (p: {
+  sentence: string;
+  secondary: string;
+  source: string;
+  context?: string;
+}) => Promise<ExplainResult>;
+
+/** prev/current/next cue texts with the current line marked, for Gemini. */
+function markedContext(cues: Cue[], i: number): string {
+  if (i < 0 || !cues[i]) return "";
+  const lines: string[] = [];
+  if (cues[i - 1]) lines.push(`(prev) ${cues[i - 1]!.text}`);
+  lines.push(`(current) ${cues[i]!.text}`);
+  if (cues[i + 1]) lines.push(`(next) ${cues[i + 1]!.text}`);
+  return lines.join("\n");
+}
+
+// Module-level Q/A history cache so the ask… thread survives popup close/
+// reopen, keyed by kind + word/sentence + context. FIFO-capped at ~100.
+const qaCache = new Map<string, QaItem[]>();
+const QA_CACHE_MAX = 100;
+function qaCachePut(key: string, items: QaItem[]): void {
+  if (!qaCache.has(key) && qaCache.size >= QA_CACHE_MAX) {
+    const oldest = qaCache.keys().next().value;
+    if (oldest !== undefined) qaCache.delete(oldest);
+  }
+  qaCache.set(key, items);
+}
+
 function readSavedTracks(
   mediaId: string,
 ): { primary?: string; secondary?: string } {
@@ -758,7 +799,10 @@ export function Player({ entry, toast, settings }: Props) {
       const surface = tok.surface_form;
       const rect = el.getBoundingClientRect();
       const ctx =
-        ctxOverride || contextAround(displayCues, activeP) || primaryText;
+        ctxOverride ||
+        markedContext(displayCues, activeP) ||
+        contextAround(displayCues, activeP) ||
+        primaryText;
       return {
         kind: "word",
         surface,
@@ -767,6 +811,8 @@ export function Player({ entry, toast, settings }: Props) {
         y: rect.top,
         anchorBottom: rect.bottom,
         context: ctx,
+        // matching known-language (RU) line, for disambiguation in lookups
+        secondary: secondaryText || undefined,
         dictForm:
           tok.basic_form && tok.basic_form !== "*" && tok.basic_form !== surface
             ? tok.basic_form
@@ -774,7 +820,7 @@ export function Player({ entry, toast, settings }: Props) {
         timestamp: videoRef.current?.currentTime ?? 0,
       };
     },
-    [displayCues, activeP, primaryText],
+    [displayCues, activeP, primaryText, secondaryText],
   );
 
   const onWordEnter = useCallback(
@@ -878,21 +924,32 @@ export function Player({ entry, toast, settings }: Props) {
         x: rect.left + rect.width / 2,
         y: rect.top,
         anchorBottom: rect.bottom,
-        context: primaryText,
+        context: markedContext(displayCues, activeP) || primaryText,
         secondary: secondaryText,
         timestamp: videoRef.current?.currentTime ?? 0,
       });
     },
-    [primaryText, secondaryText, clearOpenTimer, clearCloseTimer, pauseForHover],
+    [primaryText, secondaryText, displayCues, activeP, clearOpenTimer, clearCloseTimer, pauseForHover],
   );
 
-  // clear the follow-up Q/A session whenever the panel closes or retargets
+  // Restore (or clear) the follow-up Q/A session whenever the panel opens,
+  // closes or retargets. History is cached module-level so reopening the same
+  // popup brings the thread back; unanswered trailing items are dropped.
+  const qaKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    setQa([]);
+    const key = popup ? `${popup.kind}|${popup.surface}|${popup.context}` : null;
+    qaKeyRef.current = key;
+    const cached = key ? qaCache.get(key) : undefined;
+    setQa(cached ? cached.filter((i) => i.a != null) : []);
     setAskText("");
     setAskBusy(false);
     if (!popup) askFocusedRef.current = false;
-  }, [popup?.kind, popup?.surface]);
+  }, [popup?.kind, popup?.surface, popup?.context]);
+
+  // persist the Q/A thread for the currently-open popup
+  useEffect(() => {
+    if (qaKeyRef.current && qa.length > 0) qaCachePut(qaKeyRef.current, qa);
+  }, [qa]);
 
   // fetch the sentence explanation when a sentence panel opens (cached server-side)
   useEffect(() => {
@@ -903,12 +960,12 @@ export function Player({ entry, toast, settings }: Props) {
     let cancelled = false;
     setExplain(null);
     setExplainLoading(true);
-    void api
-      .explain({
-        sentence: popup.surface,
-        secondary: popup.secondary ?? "",
-        source: entry.name,
-      })
+    void explainApi({
+      sentence: popup.surface,
+      secondary: popup.secondary ?? "",
+      source: entry.name,
+      context: popup.context,
+    })
       .then((res) => {
         if (!cancelled) setExplain(res);
       })
@@ -917,7 +974,7 @@ export function Player({ entry, toast, settings }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [popup?.kind, popup?.surface]);
+  }, [popup?.kind, popup?.surface, popup?.context, popup?.secondary]);
 
   // fetch lookup when popup target changes (default: NO frame — saves latency)
   useEffect(() => {
@@ -948,8 +1005,12 @@ export function Player({ entry, toast, settings }: Props) {
       : popup.context;
     let p = inflight.current.get(cacheKey);
     if (!p) {
-      p = api
-        .lookup({ word: surface, context: ctx, source: entry.name })
+      p = lookupApi({
+        word: surface,
+        context: ctx,
+        source: entry.name,
+        secondary: popup.secondary,
+      })
         .then((res) => {
           lookupCache.current.set(cacheKey, res);
           return res;
@@ -973,9 +1034,10 @@ export function Player({ entry, toast, settings }: Props) {
     if (!popup) return;
     setFrameLoading(true);
     try {
-      const res = await api.lookup({
+      const res = await lookupApi({
         word: popup.surface,
         context: popup.context,
+        secondary: popup.secondary,
         source: entry.name,
         mediaId: entry.id,
         timestamp: popup.timestamp,
@@ -998,9 +1060,10 @@ export function Player({ entry, toast, settings }: Props) {
     setReloadLoading(true);
     setLookupLoading(true);
     try {
-      const res = await api.lookup({
+      const res = await lookupApi({
         word: popup.surface,
         context: popup.context,
+        secondary: popup.secondary,
         source: entry.name,
         noCache: true,
       });
@@ -1376,9 +1439,19 @@ export function Player({ entry, toast, settings }: Props) {
 
   return (
     <div className="player-wrap">
+      <div className="episode-title" title={entry.name}>
+        {entry.name.replace(/\.[^.]+$/, "")}
+      </div>
       <div className="stage-row">
       <div className="video-stage" ref={stageRef}>
-        <video ref={videoRef} src={mediaUrl(entry.id)} controls />
+        {/* nofullscreen: the native button would fullscreen the bare <video>,
+            hiding our subtitle overlay — users press `f` instead. */}
+        <video
+          ref={videoRef}
+          src={mediaUrl(entry.id)}
+          controls
+          controlsList="nofullscreen"
+        />
         <div className="sub-overlay">
           <div className="sub-primary">
             <TokenLine
@@ -1396,6 +1469,15 @@ export function Player({ entry, toast, settings }: Props) {
                 className="explain-q"
                 title="Explain sentence structure"
                 onClick={onExplainClick}
+                onMouseEnter={() => {
+                  // same hover-pause as words, so the line stays readable
+                  clearCloseTimer();
+                  pauseForHover();
+                }}
+                onMouseLeave={() => {
+                  // only resume if the panel didn't open (no click happened)
+                  if (!popupOpenRef.current) resumeFromHover();
+                }}
               >
                 ?
               </span>

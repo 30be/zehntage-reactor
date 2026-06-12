@@ -88,7 +88,9 @@ async function callGemini(
  * Built-in word-lookup prompt template. Placeholders {word} {context} {source}
  * are substituted. Exported so the settings page can prefill / restore it.
  */
-export const DEFAULT_LOOKUP_PROMPT = `The learner is a native Russian speaker, fluent in English, learning Japanese. They are studying the word "{word}", which appeared in the subtitle text below.
+export const DEFAULT_LOOKUP_PROMPT = `The learner is a native Russian speaker, fluent in English, learning Japanese. They are studying the word "{word}", which appeared in the subtitle lines below. The line containing the word may be marked "(current)", with the surrounding "(prev)"/"(next)" lines included for context; a translation of the current line into a language the learner knows may also be included.
+
+Important: the word may be a quoted loanword, a proper name, or wordplay rather than its ordinary dictionary sense (e.g. もっと quoted as the loanword "motto" = девиз). Use the surrounding lines and the known-language translation line to disambiguate. If the translation line conflicts with the dictionary meaning, prefer the contextual reading and note the dictionary meaning briefly.
 
 Provide four fields:
 - reading: if "{word}" is Japanese, its reading in kana (hiragana for native/Sino-Japanese words, katakana for loanwords). Otherwise an empty string.
@@ -133,10 +135,14 @@ export async function lookupWord(
   context: string,
   source: string,
   image?: GeminiImage,
+  secondary?: string,
 ): Promise<WordLookup> {
   const settings = await readSettings();
   const template = typeof settings.lookupPrompt === "string" ? settings.lookupPrompt : "";
-  const prompt = buildWordPrompt(word, context, source, template);
+  const ctx = secondary
+    ? `${context}\n(translation of the current line) ${secondary}`
+    : context;
+  const prompt = buildWordPrompt(word, ctx, source, template);
   return (await callGemini(prompt, WORD_SCHEMA, image)) as WordLookup;
 }
 
@@ -162,15 +168,18 @@ export function buildExplainPrompt(
   sentence: string,
   secondary: string,
   source: string,
+  context = "",
 ): string {
   return `The learner is a native Russian speaker, fluent in English, learning Japanese. Explain the structure of this Japanese subtitle sentence for them. Be compact — no filler.
+
+Note: words in the sentence may be quoted loanwords, names, or wordplay referenced from the surrounding lines — use the surrounding lines and any known-language translation to disambiguate; if the translation conflicts with a dictionary meaning, prefer the contextual reading and note the dictionary meaning briefly.
 
 Provide three fields:
 - breakdown: the sentence's grammar explained in short lines — grammar points, particle usage, conjugations and contractions (spell out what casual/contracted forms expand to, e.g. "〜ちゃった = 〜てしまった (completion/regret)"), plus a word gloss ONLY where non-obvious.
 - idioms: multiword idioms, set phrases, or collocations in the sentence with brief meanings; empty string if none.
 - translation: a natural Russian translation of the whole sentence.
 
-${secondary ? `An existing subtitle translation (may be loose): ${secondary}\n` : ""}Source: ${source}
+${context ? `Surrounding subtitle lines (the sentence is marked "(current)"):\n${context}\n\n` : ""}${secondary ? `An existing subtitle translation (may be loose): ${secondary}\n` : ""}Source: ${source}
 
 Sentence:
 ${sentence}`;
@@ -180,9 +189,10 @@ export async function explainSentence(
   sentence: string,
   secondary: string,
   source: string,
+  context = "",
 ): Promise<ExplainResult> {
   return (await callGemini(
-    buildExplainPrompt(sentence, secondary, source),
+    buildExplainPrompt(sentence, secondary, source, context),
     EXPLAIN_SCHEMA,
   )) as ExplainResult;
 }

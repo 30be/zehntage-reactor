@@ -1,7 +1,13 @@
 // zehntage-reactor HTTP server (Bun.serve).
 
 import { extname, join, dirname, basename } from "node:path";
-import { Library, subLangsFor, embeddedSubLangs, type LibraryEntry } from "../lib/library.ts";
+import {
+  Library,
+  subLangsFor,
+  embeddedSubLangs,
+  migrateGeneratedSidecars,
+  type LibraryEntry,
+} from "../lib/library.ts";
 import {
   serveFileWithRange,
   checkCodecs,
@@ -204,6 +210,63 @@ async function bestJapaneseTrackId(entry: LibraryEntry): Promise<string | null> 
   return null;
 }
 
+/** Does the entry already have a GENERATED Russian sidecar? */
+function hasGeneratedRu(entry: LibraryEntry): boolean {
+  return entry.sidecarSubs.some(
+    (s) => s.origin === "generated" && /^(ru|rus)(-|$)/i.test(s.lang),
+  );
+}
+
+function translateQueuedFor(entryId: string): boolean {
+  return translateBatch.some(
+    (i) => i.entryId === entryId && (i.status === "queued" || i.status === "running"),
+  );
+}
+
+function enqueueTranslate(library: Library, entryId: string, sourceTrack: string): void {
+  translateBatch.push({ entryId, sourceTrack, targetLang: "ru", status: "queued" });
+  void pumpTranslateBatch(library);
+}
+
+/**
+ * Full ja+ru chain for one entry:
+ *  - no ja track → whisper; when the job finishes, auto-enqueue ru translation
+ *    of the freshly generated ja sidecar;
+ *  - ja exists but no generated ru → straight to the translate queue;
+ *  - everything present → skipped.
+ */
+async function chainGenerateAll(
+  library: Library,
+  entry: LibraryEntry,
+): Promise<"whisper" | "translate" | "skipped"> {
+  if (!(await hasJapaneseTrack(entry))) {
+    if (whisperQueue.hasActiveFor(entry.absPath)) return "skipped";
+    const job = whisperQueue.enqueue(entry.absPath, "ja", sidecarPath(entry, "ja"));
+    const listener = (e: WhisperEvent) => {
+      if (e.type !== "status") return;
+      if (e.status === "done") {
+        job.listeners.delete(listener);
+        void (async () => {
+          await library.refresh();
+          const fresh = library.get(entry.id);
+          if (fresh && !hasGeneratedRu(fresh) && !translateQueuedFor(fresh.id)) {
+            enqueueTranslate(library, fresh.id, "sidecar:gen:ja");
+          }
+        })();
+      } else if (e.status === "error" || e.status === "canceled") {
+        job.listeners.delete(listener);
+      }
+    };
+    job.listeners.add(listener);
+    return "whisper";
+  }
+  if (hasGeneratedRu(entry) || translateQueuedFor(entry.id)) return "skipped";
+  const sourceTrack = await bestJapaneseTrackId(entry);
+  if (!sourceTrack) return "skipped";
+  enqueueTranslate(library, entry.id, sourceTrack);
+  return "translate";
+}
+
 export interface ServerHandle {
   port: number;
   url: string;
@@ -212,6 +275,11 @@ export interface ServerHandle {
 
 export async function startServer(root: string, preferredPort = 8417): Promise<ServerHandle> {
   const library = new Library(root);
+  // Idempotent: relocate legacy generated sidecars (renames are atomic, so
+  // this is safe even while the previous instance is still serving).
+  await migrateGeneratedSidecars(root).catch((e) =>
+    console.warn(`[migrate] failed: ${e}`),
+  );
   await library.refresh();
 
   const fetchHandler = async (req: Request): Promise<Response> => {
@@ -359,6 +427,30 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
       }
 
       // --- batch jobs ---
+      // One-button chain: whisper ja where missing (then auto-translate to ru),
+      // translate-only where ja already exists.
+      if (req.method === "POST" && path === "/api/batch/all") {
+        const entries = await library.refresh();
+        const started: { entryId: string; name: string; phase: string }[] = [];
+        const skipped: string[] = [];
+        for (const entry of entries) {
+          const phase = await chainGenerateAll(library, entry);
+          if (phase === "skipped") skipped.push(entry.id);
+          else started.push({ entryId: entry.id, name: entry.name, phase });
+        }
+        return json({ started, skipped });
+      }
+
+      // Same chain for a single entry (used by the player screen).
+      const batchAllOne = path.match(/^\/api\/batch\/all\/([a-f0-9]+)$/);
+      if (req.method === "POST" && batchAllOne) {
+        await library.refresh();
+        const entry = library.get(batchAllOne[1]!);
+        if (!entry) return err("not found", 404);
+        const phase = await chainGenerateAll(library, entry);
+        return json({ entryId: entry.id, phase });
+      }
+
       if (req.method === "POST" && path === "/api/batch/subtitle") {
         const entries = await library.refresh();
         const started: { entryId: string; name: string; jobId: string }[] = [];
@@ -466,15 +558,17 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
           sentence?: string;
           secondary?: string;
           source?: string;
+          context?: string;
         };
         if (!body.sentence) return err("sentence required", 400);
-        const cacheKey = `${body.sentence} ${body.secondary ?? ""} ${body.source ?? ""}`;
+        const cacheKey = `${body.sentence} ${body.secondary ?? ""} ${body.source ?? ""} ${body.context ?? ""}`;
         const cached = explainCache.get(cacheKey);
         if (cached) return json(cached);
         const res = await explainSentence(
           body.sentence,
           body.secondary ?? "",
           body.source ?? "",
+          body.context ?? "",
         );
         explainCachePut(cacheKey, res);
         return json(res);
@@ -506,6 +600,7 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
         const body = (await req.json()) as {
           word?: string;
           context?: string;
+          secondary?: string;
           source?: string;
           mediaId?: string;
           timestamp?: number;
@@ -526,7 +621,15 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
           }
         }
 
-        return json(await lookupWord(body.word, body.context ?? "", body.source ?? "", image));
+        return json(
+          await lookupWord(
+            body.word,
+            body.context ?? "",
+            body.source ?? "",
+            image,
+            body.secondary,
+          ),
+        );
       }
 
       // --- Anki ---

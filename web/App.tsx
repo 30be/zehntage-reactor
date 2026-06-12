@@ -150,31 +150,17 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
     };
   }, [active, refreshStatus, loadEntries]);
 
-  const onBatchSubtitle = async () => {
+  const onBatchAll = async () => {
     try {
-      const r = await api.batchSubtitle();
+      const r = await api.batchAll();
       toast(
         r.started.length > 0
-          ? `Queued whisper for ${r.started.length} file(s)`
-          : "Nothing to subtitle — all have Japanese tracks",
+          ? `Queued ${r.started.length} file(s) for ja + ru generation`
+          : "Nothing to do — all entries have ja + ru subs",
       );
       refreshStatus();
     } catch (e) {
-      toast(`Batch subtitle failed: ${e instanceof Error ? e.message : e}`);
-    }
-  };
-
-  const onBatchTranslate = async () => {
-    try {
-      const r = await api.batchTranslate();
-      toast(
-        r.started.length > 0
-          ? `Queued translation for ${r.started.length} file(s)`
-          : "Nothing to translate",
-      );
-      refreshStatus();
-    } catch (e) {
-      toast(`Batch translate failed: ${e instanceof Error ? e.message : e}`);
+      toast(`Generate all failed: ${e instanceof Error ? e.message : e}`);
     }
   };
 
@@ -186,11 +172,8 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
     <>
       <h1 className="h1">Library</h1>
       <div className="batchbar">
-        <button className="btn sm" onClick={() => void onBatchSubtitle()}>
-          Subtitle all (ja)
-        </button>
-        <button className="btn sm" onClick={() => void onBatchTranslate()}>
-          Translate all → ru
+        <button className="btn sm" onClick={() => void onBatchAll()}>
+          Generate all (ja + ru)
         </button>
       </div>
       <div className="grid">
