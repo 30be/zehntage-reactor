@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   type AnkiWordsResponse,
@@ -12,6 +12,13 @@ import { computeCoverage, readKnownWords, type Coverage } from "./coverage.ts";
 import { buildWordIndex } from "./progress.ts";
 import { kataToHira } from "./tokenizer.ts";
 import { tmEvent, tmStart } from "./telemetry.ts";
+import { loadFreq } from "./freq.ts";
+import {
+  filterCards,
+  type DateRange,
+  type Rarity,
+  type Stage,
+} from "./cardfilter.ts";
 
 type Route =
   | { name: "library" }
@@ -638,7 +645,11 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
         </div>
       )}
       <div className="batchbar">
-        <button className="btn sm" onClick={() => void onBatchAll()}>
+        <button
+          className="btn sm"
+          title="Whisper-transcribe ja subs where missing, then translate to ru — for every entry"
+          onClick={() => void onBatchAll()}
+        >
           Generate all (ja + ru)
         </button>
         <button
@@ -667,13 +678,18 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
               {(() => {
                 const p = savedPos(e.id);
                 return p != null ? (
-                  <span className="resume-hint"> · ▶ {fmtCueTime(p)}</span>
+                  <span className="resume-hint" title="resume position">
+                    {" "}· ▶ {fmtCueTime(p)}
+                  </span>
                 ) : null;
               })()}
               {(() => {
                 const c = coverage.get(e.id);
                 return c ? (
-                  <span className="cov-hint">
+                  <span
+                    className="cov-hint"
+                    title={`${c.pct}% of words in this episode you already know · ${c.newCount} new unique words`}
+                  >
                     {" "}· {c.pct}% · {c.newCount} new
                   </span>
                 ) : null;
@@ -699,7 +715,10 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
                 ) : null;
               })()}
               {sortMode === "known" && knownPct?.get(e.id) != null && (
-                <span className="badge known-pct">
+                <span
+                  className="badge known-pct"
+                  title="Share of word occurrences in this episode you already know"
+                >
                   {Math.round(knownPct.get(e.id)! * 100)}% known
                 </span>
               )}
@@ -830,6 +849,9 @@ function Stats({ go }: { go: (h: string) => void }) {
       </div>
 
       <h2 className="h2">Activity</h2>
+      <div className="section-intro muted">
+        Daily watch time over the last ~20 weeks — darker means more minutes.
+      </div>
       <ActivityGrid
         byDate={
           new Map((summary?.days ?? []).map((d) => [d.date, d.playSec]))
@@ -839,16 +861,29 @@ function Stats({ go }: { go: (h: string) => void }) {
       {summary && summary.days.length > 0 && (
         <>
           <h2 className="h2">Last 14 days</h2>
+          <div className="section-intro muted">
+            Watch time per day, with cards added and word lookups.
+          </div>
           <div className="daily-list">
-            {summary.days.slice(-14).reverse().map((d) => (
-              <div key={d.date} className="daily-row">
-                <span className="daily-date">{d.date}</span>
-                <span className="daily-min">{fmtMin(d.playSec)}</span>
-                <span className="daily-extra muted">
-                  {d.ankiAdds} cards · {d.lookups} lookups
-                </span>
-              </div>
-            ))}
+            {(() => {
+              const days = summary.days.slice(-14).reverse();
+              const max = Math.max(1, ...days.map((d) => d.playSec));
+              return days.map((d) => (
+                <div key={d.date} className="daily-row">
+                  <span className="daily-date">{d.date}</span>
+                  <span className="stats-bar">
+                    <span
+                      className="stats-fill dim"
+                      style={{ width: `${(d.playSec / max) * 100}%` }}
+                    />
+                  </span>
+                  <span className="daily-min">{fmtMin(d.playSec)}</span>
+                  <span className="daily-extra muted">
+                    {d.ankiAdds} cards · {d.lookups} lookups
+                  </span>
+                </div>
+              ));
+            })()}
           </div>
         </>
       )}
@@ -856,31 +891,42 @@ function Stats({ go }: { go: (h: string) => void }) {
       {summary && summary.media.length > 0 && (
         <>
           <h2 className="h2">Per episode (watch time)</h2>
-          <div className="daily-list">
-            {summary.media.slice(0, 20).map((m) => {
-              const e = entries?.find((x) => x.id === m.mediaId);
-              const name = (e?.name ?? m.mediaId).replace(/\.[^.]+$/, "");
-              const coef =
-                m.contentSec > 0 ? (m.wallSec / m.contentSec).toFixed(2) : "—";
-              return (
-                <div
-                  key={m.mediaId}
-                  className="daily-row media-row"
-                  onClick={() => go(`#/play/${m.mediaId}`)}
-                >
-                  <span className="daily-date">{name}</span>
-                  <span className="daily-min">{fmtMin(m.wallSec)}</span>
-                  <span className="daily-extra muted">
-                    ×{coef} · {m.ankiAdds} cards · {m.lookups} lookups
-                  </span>
-                </div>
-              );
-            })}
+          <div className="section-intro muted">
+            Total wall-clock time per episode. ×coef = wall / content time
+            (how much you pause and replay) — click a row to rewatch.
           </div>
-          <div className="hint stats-footnote">
-            ×coefficient = wall / content time. Content time is approximated
-            from playback-position advance between heartbeats (seeks excluded),
-            not from unique cue coverage.
+          <div className="daily-list">
+            {(() => {
+              const media = summary.media.slice(0, 20);
+              const max = Math.max(1, ...media.map((m) => m.wallSec));
+              return media.map((m) => {
+                const e = entries?.find((x) => x.id === m.mediaId);
+                const name = (e?.name ?? m.mediaId).replace(/\.[^.]+$/, "");
+                const coef =
+                  m.contentSec > 0 ? (m.wallSec / m.contentSec).toFixed(2) : "—";
+                return (
+                  <div
+                    key={m.mediaId}
+                    className="daily-row media-row"
+                    onClick={() => go(`#/play/${m.mediaId}`)}
+                  >
+                    <span className="daily-date ep-trunc" title={name}>
+                      {name}
+                    </span>
+                    <span className="stats-bar">
+                      <span
+                        className="stats-fill dim"
+                        style={{ width: `${(m.wallSec / max) * 100}%` }}
+                      />
+                    </span>
+                    <span className="daily-min">{fmtMin(m.wallSec)}</span>
+                    <span className="daily-extra muted">
+                      ×{coef} · {m.ankiAdds} cards · {m.lookups} lookups
+                    </span>
+                  </div>
+                );
+              });
+            })()}
           </div>
         </>
       )}
@@ -893,6 +939,10 @@ function Stats({ go }: { go: (h: string) => void }) {
               Export CSV
             </a>
           </h2>
+          <div className="section-intro muted">
+            One row per episode and day: solid bar = wall time, faint bar =
+            content covered. Rows are grouped by episode.
+          </div>
           <div className="ep-series">
             {(() => {
               // grouped by media, then chronological; cap at the last 60 rows
@@ -912,13 +962,17 @@ function Stats({ go }: { go: (h: string) => void }) {
                   Math.max(r.wallPlayingSec + r.wallPausedSec, r.contentSec),
                 ),
               );
-              return rows.map((r) => {
+              return rows.map((r, i) => {
                 const e = entries?.find((x) => x.id === r.mediaId);
                 const name = (e?.name ?? r.mediaId).replace(/\.[^.]+$/, "");
                 const wall = r.wallPlayingSec + r.wallPausedSec;
+                const newGroup = i > 0 && rows[i - 1]!.mediaId !== r.mediaId;
                 return (
-                  <div key={`${r.mediaId} ${r.date}`} className="ep-row">
-                    <span className="ep-name muted">
+                  <div
+                    key={`${r.mediaId} ${r.date}`}
+                    className={`ep-row${newGroup ? " ep-group-start" : ""}`}
+                  >
+                    <span className="ep-name muted" title={`${name} · ${r.date}`}>
                       {name} · {r.date}
                     </span>
                     <span className="ep-bars">
@@ -933,7 +987,10 @@ function Stats({ go }: { go: (h: string) => void }) {
                         style={{ width: `${(r.contentSec / max) * 100}%` }}
                       />
                     </span>
-                    <span className="ep-coef muted">
+                    <span
+                      className="ep-coef muted"
+                      title="wall / content time for this day"
+                    >
                       {r.coefficient != null
                         ? `×${r.coefficient.toFixed(2)}`
                         : "—"}
@@ -949,6 +1006,10 @@ function Stats({ go }: { go: (h: string) => void }) {
       {ov && (
         <>
           <h2 className="h2">Cards / min (30 days, 7d rolling)</h2>
+          <div className="section-intro muted">
+            Mining intensity: cards added per minute of watching, smoothed over
+            a 7-day window.
+          </div>
           <div className="cpm-chart">
             {(() => {
               const vals = ov.last30Days.map((d) =>
@@ -972,6 +1033,9 @@ function Stats({ go }: { go: (h: string) => void }) {
           {ov.ankiCumulative.length > 0 && (
             <>
               <h2 className="h2">Cumulative cards</h2>
+              <div className="section-intro muted">
+                Total deck size over time.
+              </div>
               <div className="cum-chart">
                 {(() => {
                   const max =
@@ -992,6 +1056,9 @@ function Stats({ go }: { go: (h: string) => void }) {
       )}
 
       <h2 className="h2">Coverage</h2>
+      <div className="section-intro muted">
+        Share of words in each episode you already know — click a row to watch.
+      </div>
       {entries == null && <div className="empty">Loading…</div>}
       {entries != null && withSubs.length === 0 && (
         <div className="empty">No episodes with subtitles.</div>
@@ -1034,12 +1101,19 @@ interface FullCard {
   back: string;
   notes: string;
   context: string;
+  noteId?: number;
 }
 
-/** <img src="..."> inside the context HTML, or null. */
+/** <img src="..."> inside the context HTML, or null. Bare Anki media
+ * filenames are rewritten to the /api/anki/media proxy. */
 function cardImgSrc(context: string): string | null {
   const m = context.match(/<img[^>]*\bsrc="([^"]+)"/i);
-  return m?.[1] ?? null;
+  const src = m?.[1];
+  if (!src) return null;
+  // absolute URL / data URI / server path → use as-is
+  if (/^(https?:|data:|blob:|\/)/i.test(src)) return src;
+  // bare Anki collection filename → local AnkiConnect media proxy
+  return `/api/anki/media/${encodeURIComponent(src)}`;
 }
 
 /** Parse "<episode name> @ mm:ss" out of the context HTML. */
@@ -1051,11 +1125,22 @@ function cardEpisodeRef(context: string): { name: string; sec: number } | null {
   return null;
 }
 
+const PAGE_SIZE = 50;
+
 function Cards({ go, toast }: { go: (h: string) => void; toast: (m: string) => void }) {
   const [cards, setCards] = useState<FullCard[] | null>(null);
   const [entries, setEntries] = useState<LibraryEntry[]>([]);
   // double-click-to-confirm delete: front of the card in "sure?" state
   const [confirmFront, setConfirmFront] = useState<string | null>(null);
+  // one progress map + one freq map for the whole list — no per-row fetches
+  const [intervals, setIntervals] = useState<Map<string, number>>(() => new Map());
+  const [freq, setFreq] = useState<Map<string, number> | null>(null);
+  // filters (laconic): text, date range, learning stage, rarity
+  const [q, setQ] = useState("");
+  const [range, setRange] = useState<DateRange>("all");
+  const [stage, setStage] = useState<Stage>("all");
+  const [rarity, setRarity] = useState<Rarity>("all");
+  const [visible, setVisible] = useState(PAGE_SIZE);
 
   useEffect(() => {
     void fetch("/api/anki/cards")
@@ -1063,9 +1148,34 @@ function Cards({ go, toast }: { go: (h: string) => void; toast: (m: string) => v
       .then(setCards)
       .catch(() => setCards([]));
     void api.library().then(setEntries).catch(() => {});
+    void api
+      .ankiWords()
+      .then((a) =>
+        setIntervals(
+          new Map(
+            Object.entries(a.progress).map(([front, p]) => [front, p.interval]),
+          ),
+        ),
+      )
+      .catch(() => {});
+    void loadFreq().then(setFreq).catch(() => {});
   }, []);
 
-  const frameCards = (cards ?? []).filter((c) => /<img/i.test(c.context));
+  // reset paging whenever a filter changes
+  useEffect(() => {
+    setVisible(PAGE_SIZE);
+  }, [q, range, stage, rarity]);
+
+  // The Cards tab shows cards mined from the player (their context carries a
+  // frame). Filtering + sorting is memoized and pure — smooth at 10k cards.
+  const frameCards = useMemo(
+    () => (cards ?? []).filter((c) => /<img/i.test(c.context)),
+    [cards],
+  );
+  const filtered = useMemo(
+    () => filterCards(frameCards, { q, range, stage, rarity, intervals, freq }),
+    [frameCards, q, range, stage, rarity, intervals, freq],
+  );
 
   const onDelete = async (front: string) => {
     if (confirmFront !== front) {
@@ -1085,12 +1195,65 @@ function Cards({ go, toast }: { go: (h: string) => void; toast: (m: string) => v
   return (
     <>
       <h1 className="h1">Cards</h1>
+      <div className="cards-filters">
+        <input
+          className="search-input cards-search"
+          type="text"
+          placeholder="search…"
+          title="Filter by front or translation text"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setQ("");
+          }}
+        />
+        <select
+          title="Filter by when the card was added (needs local Anki)"
+          value={range}
+          onChange={(e) => setRange(e.target.value as DateRange)}
+        >
+          <option value="all">any time</option>
+          <option value="today">today</option>
+          <option value="7d">7 days</option>
+          <option value="30d">30 days</option>
+        </select>
+        <select
+          title="Filter by learning stage (from the SRS interval)"
+          value={stage}
+          onChange={(e) => setStage(e.target.value as Stage)}
+        >
+          <option value="all">any stage</option>
+          <option value="new">new</option>
+          <option value="learning">learning</option>
+          <option value="mature">mature</option>
+        </select>
+        <select
+          title="Filter by word rarity (frequency tier)"
+          value={rarity}
+          onChange={(e) => setRarity(e.target.value as Rarity)}
+        >
+          <option value="all">any rarity</option>
+          <option value="top 1k">top 1k</option>
+          <option value="top 3k">top 3k</option>
+          <option value="top 10k">top 10k</option>
+          <option value="top 30k">top 30k</option>
+          <option value="rare">rare</option>
+        </select>
+        {cards != null && (
+          <span className="cards-count muted" title="Matching / total mined cards">
+            {filtered.length} / {frameCards.length}
+          </span>
+        )}
+      </div>
       {cards == null && <div className="empty">Loading…</div>}
       {cards != null && frameCards.length === 0 && (
         <div className="empty">No cards with frames yet.</div>
       )}
+      {cards != null && frameCards.length > 0 && filtered.length === 0 && (
+        <div className="empty">No cards match the filters.</div>
+      )}
       <div className="cards-list">
-        {frameCards.map((c) => {
+        {filtered.slice(0, visible).map((c) => {
           const img = cardImgSrc(c.context);
           const ref = cardEpisodeRef(c.context);
           const entry = ref ? entries.find((e) => e.name === ref.name) : undefined;
@@ -1128,6 +1291,15 @@ function Cards({ go, toast }: { go: (h: string) => void; toast: (m: string) => v
           );
         })}
       </div>
+      {filtered.length > visible && (
+        <button
+          className="btn sm cards-more"
+          title="Render the next 50 matching cards"
+          onClick={() => setVisible((v) => v + PAGE_SIZE)}
+        >
+          show more ({filtered.length - visible} left)
+        </button>
+      )}
     </>
   );
 }
@@ -1227,7 +1399,6 @@ function Settings({
   const [lookupPrompt, setLookupPrompt] = useState(
     (settings.lookupPrompt as string) || promptDefault,
   );
-  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     setPrimaryLang((settings.targetLang as string) || "ja");
@@ -1244,34 +1415,76 @@ function Settings({
     setLookupPrompt((settings.lookupPrompt as string) || def);
   }, [settings]);
 
-  const onSave = async () => {
-    setSaving(true);
+  // --- autosave: no Save button — every change saves (debounced), blur
+  // flushes immediately; a tiny "saved" toast confirms. ---
+  const latest = useRef({
+    primaryLang,
+    secondaryLang,
+    autoWhisper,
+    furigana,
+    prestudyMinutes,
+    shadowRepeats,
+    autopauseMode,
+    autopauseMinUnknown,
+    lookupPrompt,
+  });
+  latest.current = {
+    primaryLang,
+    secondaryLang,
+    autoWhisper,
+    furigana,
+    prestudyMinutes,
+    shadowRepeats,
+    autopauseMode,
+    autopauseMinUnknown,
+    lookupPrompt,
+  };
+  const saveTimer = useRef<number | null>(null);
+  const save = useCallback(async () => {
+    if (saveTimer.current != null) {
+      window.clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    const s = latest.current;
     try {
       const next = await api.saveSettings({
-        targetLang: primaryLang,
-        knownLang: secondaryLang,
-        whisperAutoGenerate: autoWhisper,
-        furigana,
+        targetLang: s.primaryLang,
+        knownLang: s.secondaryLang,
+        whisperAutoGenerate: s.autoWhisper,
+        furigana: s.furigana,
         prestudyMinutes: Math.max(
           1,
-          Math.min(120, Math.round(Number(prestudyMinutes)) || 10),
+          Math.min(120, Math.round(Number(s.prestudyMinutes)) || 10),
         ),
-        shadowRepeats: Math.max(0, Math.round(Number(shadowRepeats)) || 0),
-        autopauseMode,
+        shadowRepeats: Math.max(0, Math.round(Number(s.shadowRepeats)) || 0),
+        autopauseMode: s.autopauseMode,
         autopauseMinUnknown: Math.max(
           1,
-          Math.round(Number(autopauseMinUnknown)) || 1,
+          Math.round(Number(s.autopauseMinUnknown)) || 1,
         ),
-        lookupPrompt,
+        lookupPrompt: s.lookupPrompt,
       });
       setSettings(next);
-      toast("Settings saved");
+      toast("saved");
     } catch (e) {
       toast(`Save failed: ${e instanceof Error ? e.message : e}`);
-    } finally {
-      setSaving(false);
     }
-  };
+  }, [setSettings, toast]);
+  // Debounced save: typing in a field doesn't fire a request per keystroke.
+  const scheduleSave = useCallback(() => {
+    if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => void save(), 600);
+  }, [save]);
+  // flush a pending save on blur (and never leave a dangling timer on unmount)
+  const onBlurSave = useCallback(() => {
+    if (saveTimer.current != null) void save();
+  }, [save]);
+  useEffect(
+    () => () => {
+      if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
+    },
+    [],
+  );
 
   return (
     <>
@@ -1281,8 +1494,13 @@ function Settings({
           <label>Primary language (target)</label>
           <input
             type="text"
+            title="Language you're learning — preferred primary subtitle track (e.g. ja)"
             value={primaryLang}
-            onChange={(e) => setPrimaryLang(e.target.value)}
+            onChange={(e) => {
+              setPrimaryLang(e.target.value);
+              scheduleSave();
+            }}
+            onBlur={onBlurSave}
             placeholder="ja"
           />
         </div>
@@ -1290,26 +1508,43 @@ function Settings({
           <label>Secondary language (known)</label>
           <input
             type="text"
+            title="Language you already know — preferred translation track (e.g. ru)"
             value={secondaryLang}
-            onChange={(e) => setSecondaryLang(e.target.value)}
+            onChange={(e) => {
+              setSecondaryLang(e.target.value);
+              scheduleSave();
+            }}
+            onBlur={onBlurSave}
             placeholder="ru"
           />
         </div>
-        <div className="switch">
+        <div
+          className="switch"
+          title="Queue a Whisper transcription automatically for videos without Japanese subs"
+        >
           <input
             type="checkbox"
             id="autoWhisper"
             checked={autoWhisper}
-            onChange={(e) => setAutoWhisper(e.target.checked)}
+            onChange={(e) => {
+              setAutoWhisper(e.target.checked);
+              scheduleSave();
+            }}
           />
           <label htmlFor="autoWhisper">Auto-generate Japanese subtitles</label>
         </div>
-        <div className="switch">
+        <div
+          className="switch"
+          title="Show readings above kanji you haven't learned yet"
+        >
           <input
             type="checkbox"
             id="furigana"
             checked={furigana}
-            onChange={(e) => setFurigana(e.target.checked)}
+            onChange={(e) => {
+              setFurigana(e.target.checked);
+              scheduleSave();
+            }}
           />
           <label htmlFor="furigana">Furigana on unknown kanji</label>
         </div>
@@ -1320,8 +1555,13 @@ function Settings({
             type="number"
             min={1}
             max={120}
+            title="How many minutes of upcoming dialogue the pre-study panel (w) scans for unknown words"
             value={prestudyMinutes}
-            onChange={(e) => setPrestudyMinutes(e.target.value)}
+            onChange={(e) => {
+              setPrestudyMinutes(e.target.value);
+              scheduleSave();
+            }}
+            onBlur={onBlurSave}
           />
         </div>
         <div className="field">
@@ -1331,16 +1571,25 @@ function Settings({
             type="number"
             min={0}
             max={99}
+            title="How many times the s-loop repeats one line; 0 = endless"
             value={shadowRepeats}
-            onChange={(e) => setShadowRepeats(e.target.value)}
+            onChange={(e) => {
+              setShadowRepeats(e.target.value);
+              scheduleSave();
+            }}
+            onBlur={onBlurSave}
           />
         </div>
         <div className="field">
           <label htmlFor="autopauseMode">Autopause mode</label>
           <select
             id="autopauseMode"
+            title="Pause at the end of every subtitle, or only on lines containing unknown words"
             value={autopauseMode}
-            onChange={(e) => setAutopauseMode(e.target.value)}
+            onChange={(e) => {
+              setAutopauseMode(e.target.value);
+              scheduleSave();
+            }}
           >
             <option value="every">every cue</option>
             <option value="unknown">cues with unknown words</option>
@@ -1355,8 +1604,13 @@ function Settings({
             type="number"
             min={1}
             max={20}
+            title="In 'unknown' mode, only pause when a line has at least this many unknown words"
             value={autopauseMinUnknown}
-            onChange={(e) => setAutopauseMinUnknown(e.target.value)}
+            onChange={(e) => {
+              setAutopauseMinUnknown(e.target.value);
+              scheduleSave();
+            }}
+            onBlur={onBlurSave}
           />
         </div>
         <div className="field">
@@ -1364,8 +1618,13 @@ function Settings({
           <textarea
             className="prompt"
             rows={12}
+            title="Prompt template used for word lookups; changes save automatically"
             value={lookupPrompt}
-            onChange={(e) => setLookupPrompt(e.target.value)}
+            onChange={(e) => {
+              setLookupPrompt(e.target.value);
+              scheduleSave();
+            }}
+            onBlur={onBlurSave}
             placeholder={promptDefault}
           />
           <div className="hint">
@@ -1376,17 +1635,17 @@ function Settings({
             <button
               type="button"
               className="btn sm"
-              onClick={() => setLookupPrompt(promptDefault)}
+              title="Restore the built-in lookup prompt"
+              onClick={() => {
+                setLookupPrompt(promptDefault);
+                scheduleSave();
+              }}
             >
               Reset to default
             </button>
           </div>
         </div>
-        <div>
-          <button className="btn primary" disabled={saving} onClick={onSave}>
-            {saving ? "Saving…" : "Save"}
-          </button>
-        </div>
+        <div className="hint">Changes save automatically.</div>
       </div>
     </>
   );

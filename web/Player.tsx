@@ -31,6 +31,8 @@ import {
   VolumeXIcon,
   MaximizeIcon,
   RotateCwIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
 } from "./icons.tsx";
 
 interface Props {
@@ -230,6 +232,12 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   useEffect(() => {
     wordIndexRef.current = wordIndex;
   }, [wordIndex]);
+  // front -> full card, so a popup for a word already in the deck can be
+  // filled from the existing card instead of calling Gemini.
+  const deckCardsRef = useRef<Map<string, { front: string; back: string; notes: string }>>(
+    new Map(),
+  );
+  const [lookupFromDeck, setLookupFromDeck] = useState(false);
 
   // --- frequency ranks (lazy-loaded /freq.json) for the popup tag + pre-study ---
   const [freqMap, setFreqMap] = useState<Map<string, number> | null>(null);
@@ -306,9 +314,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   // mediaId+timestamp so the server captures a frame per card (slower).
   const [preFrames, setPreFrames] = useState(() => {
     try {
-      return localStorage.getItem("zr.prestudyFrames") === "1";
+      return localStorage.getItem("zr.prestudyFrames") !== "0"; // default ON
     } catch {
-      return false;
+      return true;
     }
   });
   const togglePreFrames = useCallback(() => {
@@ -542,7 +550,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     // keep the flag so ITS mouseleave performs the resume.
     if (secondaryHoveredRef.current) return;
     pausedByHoverRef.current = false;
-    void videoRef.current?.play();
+    void videoRef.current?.play().catch(() => {});
   }, []);
   // Any play not initiated by us (user clicks the video, presses its controls)
   // means the user took over — never auto-resume on top of that.
@@ -654,6 +662,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       setTracks(ts);
       setWordIndex(buildWordIndex(anki.words, anki.progress));
       setKnownFronts(new Set(anki.words.map((w) => w.front)));
+      deckCardsRef.current = new Map(anki.words.map((w) => [w.front, w]));
 
       // Auto-select sensible defaults: prefer a Japanese primary, ru/en secondary.
       const primLang = (settings.targetLang as string) || "ja";
@@ -948,6 +957,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   useEffect(() => {
     primaryCuesRef.current = displayCues;
   }, [displayCues]);
+  const secondaryCuesRef = useRef<Cue[]>([]);
+  useEffect(() => {
+    secondaryCuesRef.current = secondaryCues;
+  }, [secondaryCues]);
 
   // popup-open flag for the hotkey handler (Escape closes the lookup panel)
   const popupOpenRef = useRef(false);
@@ -1104,6 +1117,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       return false;
     };
     const onKey = (e: KeyboardEvent) => {
+      // Browser-level combos (Ctrl+L, Cmd+R, Alt+…) are never ours.
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
       const v = videoRef.current;
       if (!v) return;
       const active = document.activeElement;
@@ -1153,7 +1168,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       switch (e.key) {
         case " ":
           pausedByHoverRef.current = false; // user took control
-          if (v.paused) void v.play();
+          if (v.paused) void v.play().catch(() => {});
           else v.pause();
           break;
         case "f":
@@ -1391,6 +1406,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     if (!anki) return;
     setWordIndex(buildWordIndex(anki.words, anki.progress));
     setKnownFronts(new Set(anki.words.map((w) => w.front)));
+    deckCardsRef.current = new Map(anki.words.map((w) => [w.front, w]));
   }, []);
 
   // Pre-study bulk add: text-only lookup then a LIGHT Anki add (no mediaId /
@@ -1409,6 +1425,15 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       // Close) or the Player unmounted — don't keep firing lookups/adds
       // into the void. Words already added stay added.
       if (!mountedRef.current || !preStudyOpenRef.current) break;
+      // OPTIMISTIC: mark the lemma known right away (underline flips
+      // instantly); reverted below if the add fails.
+      setKnownFronts((prev) => new Set(prev).add(it.lemma));
+      // matching secondary (RU) cue at the word's first occurrence, if any
+      const sIdx = activeCueIndex(
+        secondaryCuesRef.current,
+        it.time,
+      );
+      const sText = sIdx >= 0 ? secondaryCuesRef.current[sIdx]!.text : undefined;
       try {
         const lk = await lookupApi({
           word: it.lemma,
@@ -1424,6 +1449,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           translation: lk.translation,
           notes: lk.notes,
           context: it.context,
+          ...(sText ? { sentenceTranslation: sText } : {}),
           ...(preFrames ? { mediaId: entry.id, timestamp: it.time } : {}),
         });
         // optimistic known-marking (front format matches the server's card)
@@ -1440,6 +1466,12 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             : prev,
         );
       } catch {
+        // revert the optimistic known-marking for this lemma
+        setKnownFronts((prev) => {
+          const next = new Set(prev);
+          next.delete(it.lemma);
+          return next;
+        });
         failed++;
       }
       done++;
@@ -1677,6 +1709,28 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     setFrameAdded(false);
     setFrameLoading(false);
     sessLookupsRef.current += 1; // session-summary counter
+    // Word already in the deck? Fill the popup from the existing card —
+    // no Gemini call. The Regenerate button still forces a fresh lookup.
+    const matched = matchFront(
+      wordIndexRef.current,
+      popup.surface,
+      popup.reading,
+      popup.dictForm,
+    );
+    const deckCard = matched ? deckCardsRef.current.get(matched) : undefined;
+    if (deckCard) {
+      const m = deckCard.front.match(/^(.+?)\s*\[(.+?)\]\s*$/);
+      setLookup({
+        reading: m?.[2] ?? "",
+        translation: deckCard.back,
+        notes: deckCard.notes ?? "",
+        context: "",
+      });
+      setLookupFromDeck(true);
+      setLookupLoading(false);
+      return;
+    }
+    setLookupFromDeck(false);
     // Cache key includes the cue context so the same word in a NEW sentence
     // gets a fresh, context-correct answer instead of a stale cached one.
     const cacheKey = `${popup.surface} ${popup.context}`;
@@ -1762,6 +1816,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       });
       lookupCache.current.set(`${popup.surface} ${popup.context}`, res);
       setLookup(res);
+      setLookupFromDeck(false);
     } catch (e) {
       toast(`Regenerate failed: ${e instanceof Error ? e.message : e}`);
     } finally {
@@ -1836,6 +1891,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         translation: lookup.translation,
         notes: lookup.notes,
         context: primaryText,
+        ...(popup.secondary ? { sentenceTranslation: popup.secondary } : {}),
         mediaId: entry.id,
         timestamp: v?.currentTime ?? 0,
         ...cueBoundsAt(popup.timestamp),
@@ -1871,7 +1927,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         reading: "",
         translation: explain.translation,
         notes: [explain.breakdown, explain.idioms].filter(Boolean).join("\n\n"),
-        context: popup.secondary ?? "",
+        context: "",
+        ...(popup.secondary ? { sentenceTranslation: popup.secondary } : {}),
         mediaId: entry.id,
         timestamp: v?.currentTime ?? popup.timestamp,
         ...cueBoundsAt(popup.timestamp),
@@ -2348,7 +2405,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     const v = videoRef.current;
     if (!v) return;
     pausedByHoverRef.current = false; // user took control
-    if (v.paused) void v.play();
+    if (v.paused) void v.play().catch(() => {});
     else v.pause();
   }, []);
 
@@ -2415,8 +2472,26 @@ export function Player({ entry, startAt, toast, settings }: Props) {
 
   return (
     <div className="player-wrap">
-      <div className="episode-title" title={entry.name}>
-        {entry.name.replace(/\.[^.]+$/, "")}
+      <div className="episode-title-row">
+        <button
+          className="btn icon ep-nav"
+          title="previous episode (p)"
+          aria-label="Previous episode"
+          onClick={() => void gotoEpisode(-1)}
+        >
+          <ChevronLeftIcon size={16} />
+        </button>
+        <div className="episode-title" title={entry.name}>
+          {entry.name.replace(/\.[^.]+$/, "")}
+        </div>
+        <button
+          className="btn icon ep-nav"
+          title="next episode (n)"
+          aria-label="Next episode"
+          onClick={() => void gotoEpisode(1)}
+        >
+          <ChevronRightIcon size={16} />
+        </button>
       </div>
       <div className="stage-row">
       <div
@@ -2506,7 +2581,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
               <canvas
                 ref={densityCanvasRef}
                 className="density-strip"
-                title="Dialogue density"
+                title="Dialogue density — click to seek"
               />
             )}
             <div ref={playedRef} className="seek-played" />
@@ -2560,6 +2635,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
               value={muted ? 0 : volume}
               tabIndex={-1}
               aria-label="Volume"
+              title="Volume (↑/↓)"
               onChange={(e) => {
                 const v = videoRef.current;
                 if (!v) return;
@@ -2658,8 +2734,19 @@ export function Player({ entry, startAt, toast, settings }: Props) {
               <span className="reading">{lookup?.reading || popup.reading}</span>
             )}
             {freqMap && (
-              <span className="freq-tag">
+              <span
+                className="freq-tag"
+                title="How common this word is (rank in a 30k frequency list)"
+              >
                 {freqTier(freqRankOf(freqMap, popup.surface, popup.dictForm))}
+              </span>
+            )}
+            {lookupFromDeck && (
+              <span
+                className="deck-tag"
+                title="Filled from your existing Anki card — no AI call. Use ⟳ to regenerate."
+              >
+                from your deck
               </span>
             )}
             {knownWords.has(popup.dictForm ?? popup.surface) && (
@@ -2786,7 +2873,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         <div className="lookup prestudy">
           <div className="prestudy-head">
             <span className="word">pre-study</span>
-            <span className="prestudy-sub">
+            <span
+              className="prestudy-sub"
+              title="Unknown words in the upcoming playback window, most common first"
+            >
               next {prestudyMin} min
               {!preStudy.loading && ` · ${preStudy.items.length} new`}
             </span>
@@ -2823,7 +2913,12 @@ export function Player({ entry, startAt, toast, settings }: Props) {
                 {it.reading && it.reading !== it.lemma && (
                   <span className="ps-reading">{it.reading}</span>
                 )}
-                <span className="freq-tag">{freqTier(it.rank)}</span>
+                <span
+                  className="freq-tag"
+                  title="How common this word is (rank in a 30k frequency list)"
+                >
+                  {freqTier(it.rank)}
+                </span>
                 {it.added && <span className="ps-added">✓</span>}
               </label>
             ))}
@@ -2835,6 +2930,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
                 <button
                   className="btn"
                   disabled={preBusy || todo.length === 0}
+                  title="Create one Anki card per checked word (sequentially)"
                   onClick={() => void onBulkAdd()}
                 >
                   {preBusy
@@ -2875,6 +2971,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           <div className="track-pick">
             <label>Primary</label>
             <select
+              title="Primary subtitle track (the language you're learning)"
               value={primaryId}
               onChange={(e) => {
                 if (e.target.value === "__generate") void onGenerateJa();
@@ -2912,6 +3009,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           <div className="track-pick">
             <label>Secondary</label>
             <select
+              title="Secondary subtitle track (translation, blurred until hovered)"
               value={secondaryId}
               onChange={(e) => {
                 if (e.target.value === "__translate") void onTranslateRu();

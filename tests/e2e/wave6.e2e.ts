@@ -82,12 +82,12 @@ test("stats page v2 renders pace bars, charts and the CSV link", async ({ page }
   await expect(page.locator(".cum-chart .cum-col").first()).toBeAttached();
 });
 
-test("smart autopause settings roundtrip", async ({ page }) => {
+test("smart autopause settings roundtrip (autosave)", async ({ page }) => {
   await page.goto("/#/settings");
   await page.locator("#autopauseMode").selectOption("unknown");
   await page.locator("#autopauseMinUnknown").fill("3");
-  await page.getByRole("button", { name: "Save" }).click();
-  await expect(page.locator(".toast")).toContainText("Settings saved");
+  await page.locator("#autopauseMinUnknown").blur(); // blur flushes the autosave
+  await expect(page.locator(".toast")).toContainText("saved");
   // fresh load — values come back from the server
   await page.goto("/#/settings");
   await page.reload();
@@ -96,8 +96,8 @@ test("smart autopause settings roundtrip", async ({ page }) => {
   // restore the default so other autopause specs keep their semantics
   await page.locator("#autopauseMode").selectOption("every");
   await page.locator("#autopauseMinUnknown").fill("1");
-  await page.getByRole("button", { name: "Save" }).click();
-  await expect(page.locator(".toast")).toContainText("Settings saved");
+  await page.locator("#autopauseMinUnknown").blur();
+  await expect(page.locator(".toast")).toContainText("saved");
 });
 
 test("session summary overlay appears on ended and a key dismisses it", async ({ page }) => {

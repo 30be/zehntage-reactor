@@ -48,6 +48,9 @@ import {
   uploadImage,
   uploadMedia,
   resolveMediaName,
+  ankiLocalAvailable,
+  storeMedia,
+  retrieveMedia,
 } from "../lib/anki.ts";
 import { readSettings, writeSettings } from "../lib/settings.ts";
 import {
@@ -917,8 +920,39 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
             back: c.back ?? "",
             notes: c.notes ?? "",
             context: c.context ?? "",
+            ...(typeof c.noteId === "number" ? { noteId: c.noteId } : {}),
           })),
         );
+      }
+
+      // Media proxy: serve files from the LOCAL Anki collection (AnkiConnect
+      // retrieveMediaFile, base64 → bytes). Lets the Cards tab render card
+      // images whose <img> srcs are bare Anki media filenames.
+      const ankiMedia = path.match(/^\/api\/anki\/media\/([^/]+)$/);
+      if (req.method === "GET" && ankiMedia) {
+        const name = decodeURIComponent(ankiMedia[1]!);
+        if (name.includes("/") || name.includes("..")) return err("bad name", 400);
+        const bytes = await retrieveMedia(name);
+        if (!bytes) return err("media not found", 404);
+        const types: Record<string, string> = {
+          ".jpg": "image/jpeg",
+          ".jpeg": "image/jpeg",
+          ".png": "image/png",
+          ".gif": "image/gif",
+          ".webp": "image/webp",
+          ".svg": "image/svg+xml",
+          ".mp3": "audio/mpeg",
+          ".ogg": "audio/ogg",
+          ".wav": "audio/wav",
+          ".m4a": "audio/mp4",
+          ".webm": "video/webm",
+        };
+        return new Response(bytes, {
+          headers: {
+            "Content-Type": types[extname(name).toLowerCase()] ?? "application/octet-stream",
+            "Cache-Control": "max-age=300",
+          },
+        });
       }
 
       if (req.method === "POST" && path === "/api/anki/add") {
@@ -932,11 +966,20 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
           timestamp?: number;
           cueStart?: number;
           cueEnd?: number;
+          /** RU translation of the sentence (matching secondary cue), optional. */
+          sentenceTranslation?: string;
         };
         if (!body.word || !body.translation) return err("word and translation required", 400);
 
-        let context = body.context ?? "";
-        const extras: string[] = [];
+        // Context format (lines joined with <br>):
+        //   (1) JP sentence  (2) image  (3) RU sentence translation
+        //   (4) [sound:...]  (5) source "file @ mm:ss" LAST.
+        // On the remote anki-mcp path the image travels via the `image`
+        // param instead (the remote server controls its placement).
+        const useLocal = await ankiLocalAvailable();
+        let imgLine: string | undefined;
+        let soundLine: string | undefined;
+        let sourceLine: string | undefined;
         let image: string | undefined;
         if (body.mediaId !== undefined && body.timestamp !== undefined) {
           const entry = library.get(body.mediaId);
@@ -944,19 +987,27 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
             const ts = Math.max(0, body.timestamp);
             const mm = Math.floor(ts / 60);
             const ss = Math.floor(ts % 60);
-            extras.push(`${entry.name} @ ${mm}:${String(ss).padStart(2, "0")}`);
+            sourceLine = `${entry.name} @ ${mm}:${String(ss).padStart(2, "0")}`;
+            const stamp = `${mm}m${String(ss).padStart(2, "0")}s`;
+            const slug = basename(entry.name, extname(entry.name))
+              .replace(/[^\w.-]+/g, "_")
+              .slice(0, 60);
             try {
               const frame = await captureFrame(entry.absPath, ts, 320);
-              // Upload the frame as a real Anki media file instead of inlining
-              // a base64 JPEG into context (which bloated /zehntage/list).
-              image = await uploadImage(frame, "image/jpeg");
+              if (useLocal) {
+                // Real filename straight into the local collection.
+                const name = await storeMedia(frame, `zr-${slug}-${stamp}.jpg`);
+                imgLine = `<img src="${name}">`;
+              } else {
+                // Upload the frame as a real Anki media file instead of
+                // inlining a base64 JPEG into context.
+                image = await uploadImage(frame, "image/jpeg");
+              }
             } catch {
               // no frame — card still goes through
             }
-            // Sentence audio: cut the cue's audio, upload it, resolve its
-            // Anki media name, and reference it via [sound:...] in context.
-            // Any failure along the way is non-fatal — the card still goes
-            // through without audio.
+            // Sentence audio: cut the cue's audio and reference it via
+            // [sound:...]. Any failure along the way is non-fatal.
             if (
               typeof body.cueStart === "number" &&
               typeof body.cueEnd === "number" &&
@@ -964,16 +1015,29 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
             ) {
               try {
                 const audio = await cutAudio(entry.absPath, body.cueStart, body.cueEnd);
-                const path = await uploadMedia(audio, "audio/mpeg", "sentence.mp3");
-                const mediaName = await resolveMediaName(path);
-                if (mediaName) extras.push(`[sound:${mediaName}]`);
+                if (useLocal) {
+                  const name = await storeMedia(audio, `zr-${slug}-${stamp}.mp3`);
+                  soundLine = `[sound:${name}]`;
+                } else {
+                  const path = await uploadMedia(audio, "audio/mpeg", "sentence.mp3");
+                  const mediaName = await resolveMediaName(path);
+                  if (mediaName) soundLine = `[sound:${mediaName}]`;
+                }
               } catch {
                 // no audio — card still goes through
               }
             }
           }
         }
-        if (extras.length) context = [context, ...extras].filter(Boolean).join("<br>");
+        const context = [
+          body.context ?? "",
+          imgLine,
+          body.sentenceTranslation,
+          soundLine,
+          sourceLine,
+        ]
+          .filter((s): s is string => Boolean(s && s.trim()))
+          .join("<br>");
 
         const front = body.reading ? `${body.word} [${body.reading}]` : body.word;
         await addCard({

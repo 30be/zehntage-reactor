@@ -9,13 +9,16 @@ import { startServer } from "./server/index.ts";
 import { whisperQueue } from "./lib/whisper.ts";
 import { parseSrt, cuesToSrt } from "./lib/subs.ts";
 import { translateCues } from "./lib/gemini.ts";
+import { createBackup, listBackups, defaultBackupDir } from "./lib/backup.ts";
 
 function usage(): never {
   console.error(
     `Usage:
   zehntage-reactor [<file.mkv|dir>]                  start player server
                                                      (no arg: settings.mediaRoot, then cwd)
-  zehntage-reactor subtitle <lang> [<lang2>] <file>  generate sidecar subtitles`,
+  zehntage-reactor subtitle <lang> [<lang2>] <file>  generate sidecar subtitles
+  zehntage-reactor backup [<dir>]                    create a backup archive
+  zehntage-reactor backups                           list backup archives`,
   );
   process.exit(1);
 }
@@ -99,6 +102,26 @@ async function runServer(arg?: string): Promise<void> {
   }
 }
 
+async function runBackup(args: string[]): Promise<void> {
+  if (args.length > 1) usage();
+  const destDir = args[0] ? resolve(args[0]) : undefined;
+  const { path, manifest } = await createBackup(destDir);
+  console.log(`Backup written: ${path}`);
+  console.log(`  ${manifest.files.length} files, version ${manifest.version}`);
+}
+
+async function runBackupsList(): Promise<void> {
+  const backups = await listBackups();
+  if (backups.length === 0) {
+    console.log(`No backups in ${defaultBackupDir()}`);
+    return;
+  }
+  for (const b of backups) {
+    const date = new Date(b.mtimeMs).toISOString().slice(0, 19).replace("T", " ");
+    console.log(`${date}  ${String(b.size).padStart(10)}  ${b.path}`);
+  }
+}
+
 const argv = process.argv.slice(2);
 
 if (argv.length === 0) {
@@ -109,6 +132,21 @@ if (argv.length === 0) {
   });
 } else if (argv[0] === "subtitle") {
   runSubtitle(argv.slice(1))
+    .then(() => process.exit(0))
+    .catch((e) => {
+      console.error(e instanceof Error ? e.message : String(e));
+      process.exit(1);
+    });
+} else if (argv[0] === "backup") {
+  runBackup(argv.slice(1))
+    .then(() => process.exit(0))
+    .catch((e) => {
+      console.error(e instanceof Error ? e.message : String(e));
+      process.exit(1);
+    });
+} else if (argv[0] === "backups") {
+  if (argv.length !== 1) usage();
+  runBackupsList()
     .then(() => process.exit(0))
     .catch((e) => {
       console.error(e instanceof Error ? e.message : String(e));

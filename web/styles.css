@@ -1084,3 +1084,76 @@ textarea.prompt {
 .badge.due { border: 1px solid currentColor; }
 .badge.known-pct { font-weight: 600; }
 .batchbar .sort-toggle { margin-left: 8px; }
+
+/* ---- feedback batch (appended) ---- */
+
+/* episode title row with prev/next chevron buttons */
+.episode-title-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: -6px; /* sit tight above the stage (was on .episode-title) */
+}
+.episode-title-row .episode-title { margin-bottom: 0; min-width: 0; }
+.ep-nav {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 4px;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+}
+.ep-nav:hover { color: var(--fg); }
+.ep-nav svg { display: block; }
+
+/* "from your deck" tag in the word popup */
+.deck-tag {
+  font-size: 10px;
+  color: #71717a;
+  border: 1px solid #3f3f46;
+  border-radius: 999px;
+  padding: 1px 7px;
+  margin-left: 8px;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+/* stats: dim one-line explainer under each section heading */
+.section-intro {
+  font-size: 12px;
+  max-width: 640px;
+  margin: -4px 0 10px;
+  line-height: 1.5;
+}
+
+/* stats rows: name (truncated) | bar | value | dim extra */
+.daily-row { align-items: center; }
+.daily-row .stats-bar { flex: 1; min-width: 60px; }
+.daily-row .daily-min { min-width: 56px; text-align: right; }
+.daily-list { max-width: 680px; }
+.stats-fill.dim { background: #71717a; }
+.ep-trunc { font-variant-numeric: normal; }
+
+/* episode pace: visual gap between media groups */
+.ep-row.ep-group-start { margin-top: 10px; }
+
+/* cards tab: filters row + pagination */
+.cards-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.cards-filters .cards-search { max-width: 220px; margin: 0; }
+.cards-filters select {
+  background: var(--muted-bg, #18181b);
+  color: var(--fg);
+  border: 1px solid var(--border, #3f3f46);
+  border-radius: 6px;
+  font-size: 13px;
+  padding: 4px 8px;
+}
+.cards-count { font-size: 12px; }
+.cards-more { margin-top: 10px; }

@@ -1,11 +1,12 @@
-// Minimal inline SVG icons (lucide-style strokes, currentColor). B/W only.
+// Exact lucide icon paths (24x24 viewBox, stroke-based). B/W only.
+// Default size 18px (vbar); the fullscreen button passes 20.
 
 interface IconProps {
   size?: number;
   className?: string;
 }
 
-function Svg({ size = 16, className, children }: IconProps & { children: React.ReactNode }) {
+function Svg({ size = 18, className, children }: IconProps & { children: React.ReactNode }) {
   return (
     <svg
       width={size}
@@ -24,23 +25,26 @@ function Svg({ size = 16, className, children }: IconProps & { children: React.R
   );
 }
 
+/** lucide "play" */
 export function PlayIcon(p: IconProps) {
   return (
     <Svg {...p}>
-      <polygon points="6 3 20 12 6 21 6 3" fill="currentColor" stroke="none" />
+      <polygon points="6 3 20 12 6 21 6 3" />
     </Svg>
   );
 }
 
+/** lucide "pause" */
 export function PauseIcon(p: IconProps) {
   return (
     <Svg {...p}>
-      <rect x="6" y="4" width="4" height="16" fill="currentColor" stroke="none" />
-      <rect x="14" y="4" width="4" height="16" fill="currentColor" stroke="none" />
+      <rect x="14" y="4" width="4" height="16" rx="1" />
+      <rect x="6" y="4" width="4" height="16" rx="1" />
     </Svg>
   );
 }
 
+/** lucide "volume-2" */
 export function VolumeIcon(p: IconProps) {
   return (
     <Svg {...p}>
@@ -51,6 +55,7 @@ export function VolumeIcon(p: IconProps) {
   );
 }
 
+/** lucide "volume-x" */
 export function VolumeXIcon(p: IconProps) {
   return (
     <Svg {...p}>
@@ -61,6 +66,7 @@ export function VolumeXIcon(p: IconProps) {
   );
 }
 
+/** lucide "maximize" */
 export function MaximizeIcon(p: IconProps) {
   return (
     <Svg {...p}>
@@ -72,11 +78,30 @@ export function MaximizeIcon(p: IconProps) {
   );
 }
 
+/** lucide "rotate-cw" */
 export function RotateCwIcon(p: IconProps) {
   return (
     <Svg {...p}>
-      <polyline points="23 4 23 10 17 10" />
-      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+      <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+      <path d="M21 3v5h-5" />
+    </Svg>
+  );
+}
+
+/** lucide "chevron-left" */
+export function ChevronLeftIcon(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <polyline points="15 18 9 12 15 6" />
+    </Svg>
+  );
+}
+
+/** lucide "chevron-right" */
+export function ChevronRightIcon(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <polyline points="9 18 15 12 9 6" />
     </Svg>
   );
 }

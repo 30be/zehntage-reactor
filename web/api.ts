@@ -266,6 +266,8 @@ export const api = {
     /** cue audio bounds in FILE time (offset-corrected), for [sound:] capture */
     cueStart?: number;
     cueEnd?: number;
+    /** matching secondary (RU) cue text, shown as its own context line */
+    sentenceTranslation?: string;
   }) => jpost<{ ok: boolean }>("/api/anki/add", p),
   ankiDelete: (front: string) => jpost<{ ok: boolean }>("/api/anki/delete", { front }),
   whisperStart: (id: string, lang: string) =>
