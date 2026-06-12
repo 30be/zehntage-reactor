@@ -99,6 +99,34 @@ async function jpost<T>(path: string, body: unknown): Promise<T> {
   return (await r.json()) as T;
 }
 
+export interface BatchWhisperJob {
+  jobId: string;
+  entryId: string | null;
+  lang: string;
+  status: "queued" | "extracting" | "running" | "done" | "error" | "canceled";
+  lastCue: number | null;
+  error: string | null;
+}
+
+export interface BatchTranslateItem {
+  entryId: string;
+  sourceTrack: string;
+  targetLang: string;
+  status: "queued" | "running" | "done" | "error";
+  error: string | null;
+}
+
+export interface BatchStatus {
+  active: boolean;
+  whisper: BatchWhisperJob[];
+  translate: BatchTranslateItem[];
+}
+
+export interface BatchStartResult {
+  started: { entryId: string; name: string }[];
+  skipped: string[];
+}
+
 export const api = {
   library: () => jget<LibraryEntry[]>("/api/library"),
   mediaInfo: (id: string) => jget<MediaInfo>(`/api/media/${id}/info`),
@@ -135,6 +163,9 @@ export const api = {
       `/api/translate/${id}/${encodeURIComponent(trackId)}`,
       { targetLang },
     ),
+  batchSubtitle: () => jpost<BatchStartResult>("/api/batch/subtitle", {}),
+  batchTranslate: () => jpost<BatchStartResult>("/api/batch/translate", {}),
+  batchStatus: () => jget<BatchStatus>("/api/batch/status"),
   getSettings: () => jget<Record<string, unknown>>("/api/settings"),
   saveSettings: (patch: Record<string, unknown>) =>
     jpost<Record<string, unknown>>("/api/settings", patch),

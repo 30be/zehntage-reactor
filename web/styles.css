@@ -253,3 +253,37 @@ textarea.prompt {
 .btn.icon { padding: 4px 8px; min-width: 0; font-size: 15px; line-height: 1; }
 .switch.inline { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: #444; cursor: pointer; }
 .switch.inline input { margin: 0; }
+
+/* --- Library batch actions & job status (appended; do not edit rules above) --- */
+.batchbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.badge.jobstatus {
+  background: #000;
+  color: #fff;
+  border: 1px solid #000;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- whisper streaming progress (Player controls) ---- */
+.whisper-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 220px;
+}
+.whisper-progress .spinner-line { margin-top: 0; font-variant-numeric: tabular-nums; }
+.progress-track {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--muted-bg);
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}

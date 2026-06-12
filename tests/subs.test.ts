@@ -8,6 +8,7 @@ import {
   cuesToSrt,
   languageName,
   trackLabel,
+  parseSidecarTrackId,
   type SubTrack,
 } from "../src/lib/subs.ts";
 
@@ -124,5 +125,43 @@ describe("srt roundtrip", () => {
   });
   test("formatSrtTimestamp", () => {
     expect(formatSrtTimestamp(3723.456)).toBe("01:02:03,456");
+  });
+});
+
+describe("parseSidecarTrackId", () => {
+  test("new ids with extension", () => {
+    expect(parseSidecarTrackId("sidecar:ru.srt")).toEqual({
+      generated: false,
+      lang: "ru",
+      ext: "srt",
+    });
+    expect(parseSidecarTrackId("sidecar:ru.ass")).toEqual({
+      generated: false,
+      lang: "ru",
+      ext: "ass",
+    });
+    expect(parseSidecarTrackId("sidecar:ja-jp.vtt")).toEqual({
+      generated: false,
+      lang: "ja-jp",
+      ext: "vtt",
+    });
+  });
+
+  test("legacy ids without extension", () => {
+    expect(parseSidecarTrackId("sidecar:ru")).toEqual({ generated: false, lang: "ru" });
+    expect(parseSidecarTrackId("sidecar:und")).toEqual({ generated: false, lang: "und" });
+  });
+
+  test("generated ids", () => {
+    expect(parseSidecarTrackId("sidecar:gen:ja")).toEqual({ generated: true, lang: "ja" });
+    expect(parseSidecarTrackId("sidecar:gen:ru.srt")).toEqual({
+      generated: true,
+      lang: "ru",
+      ext: "srt",
+    });
+  });
+
+  test("non-sidecar ids return null", () => {
+    expect(parseSidecarTrackId("embedded:2")).toBeNull();
   });
 });

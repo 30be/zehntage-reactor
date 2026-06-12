@@ -74,6 +74,13 @@ function langLabel(t: SubTrackInfo): string {
 const HOVER_OPEN_MS = 200; // hover-intent: rest this long before opening/looking up
 const HOVER_CLOSE_MS = 120; // grace after leaving the word before hiding
 
+const fmtTime = (s: number): string => {
+  if (!Number.isFinite(s) || s < 0) s = 0;
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${String(sec).padStart(2, "0")}`;
+};
+
 const isJaLang = (l: string) => l === "ja" || l === "jpn" || l.startsWith("ja");
 const isRuLang = (l: string) => l === "ru" || l === "rus" || l.startsWith("ru");
 
@@ -91,6 +98,15 @@ export function Player({ entry, toast, settings }: Props) {
   const [autopause, setAutopause] = useState(false);
   const autopauseRef = useRef(false);
   const prevActiveP = useRef(-1);
+  // Autopause loop-guard: index of the cue we already autopaused on. We don't
+  // pause again for that cue until playback naturally enters the next one.
+  const lastAutopausedIdx = useRef(-1);
+  // True while WE are performing the autopause seek-back, so the user-seek
+  // detector below doesn't treat it as a manual seek.
+  const internalSeekRef = useRef(false);
+  // True when the video was paused by a hover (word or secondary subtitle),
+  // so closing the popup / leaving the line auto-resumes playback.
+  const pausedByHoverRef = useRef(false);
   useEffect(() => {
     autopauseRef.current = autopause;
   }, [autopause]);
@@ -134,8 +150,44 @@ export function Player({ entry, toast, settings }: Props) {
     }
   }, []);
 
+  // --- hover-pause: pause while a popup / secondary line is being read, and
+  // resume only if WE were the ones who paused (not the user). ---
+  const pauseForHover = useCallback(() => {
+    const v = videoRef.current;
+    if (v && !v.paused) {
+      pausedByHoverRef.current = true;
+      v.pause();
+    }
+  }, []);
+  const resumeFromHover = useCallback(() => {
+    if (!pausedByHoverRef.current) return;
+    pausedByHoverRef.current = false;
+    void videoRef.current?.play();
+  }, []);
+  // Any play not initiated by us (user clicks the video, presses its controls)
+  // means the user took over — never auto-resume on top of that.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const onPlay = () => {
+      pausedByHoverRef.current = false;
+    };
+    v.addEventListener("play", onPlay);
+    return () => v.removeEventListener("play", onPlay);
+  }, []);
+
   const [whisperBusy, setWhisperBusy] = useState(false);
   const [whisperStatus, setWhisperStatus] = useState<string>("");
+  const [whisperLastEnd, setWhisperLastEnd] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const onMeta = () => setVideoDuration(v.duration || 0);
+    v.addEventListener("loadedmetadata", onMeta);
+    onMeta();
+    return () => v.removeEventListener("loadedmetadata", onMeta);
+  }, [entry.id]);
   const [translateBusy, setTranslateBusy] = useState(false);
   const whisperJobRef = useRef<string | null>(null);
   const whisperEsRef = useRef<EventSource | null>(null);
@@ -238,78 +290,134 @@ export function Player({ entry, toast, settings }: Props) {
     const onTime = () => {
       const t = v.currentTime;
       const idx = activeCueIndex(primaryCues, t);
-      // Autopause: when we leave a primary cue (its subtitle ends), pause —
-      // useful for shadowing/learning. Skip while seeking to avoid stray pauses.
-      if (
-        autopauseRef.current &&
-        !v.seeking &&
-        !v.paused &&
-        prevActiveP.current >= 0 &&
-        idx !== prevActiveP.current
-      ) {
-        v.pause();
+      // Autopause: pause exactly at the END of the cue the user just heard.
+      // By the time `idx` changes the next subtitle would already be shown, so
+      // we seek back to just before the finished cue's end — it stays rendered
+      // while paused. lastAutopausedIdx prevents re-triggering in a loop.
+      const prev = prevActiveP.current;
+      if (autopauseRef.current && !v.seeking && !v.paused) {
+        const prevCue = prev >= 0 ? primaryCues[prev] : undefined;
+        const leftCue =
+          prevCue != null && (idx !== prev || t >= prevCue.end);
+        if (leftCue && lastAutopausedIdx.current !== prev) {
+          lastAutopausedIdx.current = prev;
+          v.pause();
+          internalSeekRef.current = true;
+          v.currentTime = Math.max(prevCue!.start, prevCue!.end - 0.08);
+          // keep the finished cue active/rendered
+          prevActiveP.current = prev;
+          setActiveP(prev);
+          setActiveS(activeCueIndex(secondaryCues, v.currentTime));
+          return;
+        }
+      }
+      // Once playback naturally moves into a NEW cue, allow autopausing again.
+      if (idx >= 0 && idx !== prev && idx !== lastAutopausedIdx.current) {
+        lastAutopausedIdx.current = -1;
       }
       prevActiveP.current = idx;
       setActiveP(idx);
       setActiveS(activeCueIndex(secondaryCues, t));
     };
+    // Manual seeks reset the autopause guard and must not trigger a pause.
+    const onSeeking = () => {
+      if (internalSeekRef.current) {
+        internalSeekRef.current = false;
+        return;
+      }
+      lastAutopausedIdx.current = -1;
+      prevActiveP.current = activeCueIndex(primaryCues, v.currentTime);
+    };
     v.addEventListener("timeupdate", onTime);
+    v.addEventListener("seeking", onSeeking);
     onTime();
-    return () => v.removeEventListener("timeupdate", onTime);
+    return () => {
+      v.removeEventListener("timeupdate", onTime);
+      v.removeEventListener("seeking", onSeeking);
+    };
   }, [primaryCues, secondaryCues]);
 
   // --- global hotkeys: work regardless of focus (except real text inputs) ---
   useEffect(() => {
     const FRAME = 1 / 24; // ~one frame at 23.976/24 fps
+    const HANDLED = new Set([
+      " ", "f", "F",
+      "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
+      ",", "<", ".", ">",
+    ]);
+    const isTextInput = (el: Element | null): boolean => {
+      if (!el) return false;
+      if (el.tagName === "TEXTAREA") return true;
+      if ((el as HTMLElement).isContentEditable) return true;
+      if (el.tagName === "INPUT") {
+        const type = (el as HTMLInputElement).type;
+        // checkboxes etc. are not text inputs — hotkeys still apply
+        return !["checkbox", "radio", "button", "range", "submit"].includes(type);
+      }
+      return false;
+    };
     const onKey = (e: KeyboardEvent) => {
       const v = videoRef.current;
       if (!v) return;
-      const tgt = e.target as HTMLElement | null;
-      if (tgt && (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA")) return;
+      const active = document.activeElement;
+      // Real text inputs keep their native behavior entirely.
+      if (isTextInput(active) || isTextInput(e.target as Element | null)) return;
+      if (!HANDLED.has(e.key)) return;
+      // Avoid double-toggle on key auto-repeat for toggling keys.
+      if (e.repeat && (e.key === " " || e.key === "f" || e.key === "F")) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      // We fully own these keys: kill the native activation (Space on a
+      // focused button/checkbox/video would otherwise ALSO toggle → double).
+      e.preventDefault();
+      e.stopPropagation();
+      if (
+        active instanceof HTMLElement &&
+        active !== document.body &&
+        !isTextInput(active)
+      ) {
+        active.blur();
+      }
       switch (e.key) {
         case " ":
-          e.preventDefault();
+          pausedByHoverRef.current = false; // user took control
           if (v.paused) void v.play();
           else v.pause();
           break;
         case "f":
         case "F":
-          e.preventDefault();
           if (document.fullscreenElement) void document.exitFullscreen();
           else void v.requestFullscreen?.();
           break;
         case "ArrowLeft":
-          e.preventDefault();
           v.currentTime = Math.max(0, v.currentTime - 5);
           break;
         case "ArrowRight":
-          e.preventDefault();
           v.currentTime = Math.min(v.duration || Infinity, v.currentTime + 5);
           break;
         case "ArrowUp":
-          e.preventDefault();
           v.volume = Math.min(1, v.volume + 0.1);
           break;
         case "ArrowDown":
-          e.preventDefault();
           v.volume = Math.max(0, v.volume - 0.1);
           break;
         case ",":
         case "<":
-          e.preventDefault();
           v.pause();
           v.currentTime = Math.max(0, v.currentTime - FRAME);
           break;
         case ".":
         case ">":
-          e.preventDefault();
           v.pause();
           v.currentTime = Math.min(v.duration || Infinity, v.currentTime + FRAME);
           break;
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // capture phase: run before any focused element's own key handling
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, []);
 
   const primaryText = activeP >= 0 ? primaryCues[activeP]!.text : "";
@@ -356,8 +464,9 @@ export function Player({ entry, toast, settings }: Props) {
       const reading = tok.reading;
       openTimer.current = window.setTimeout(() => {
         openTimer.current = null;
-        // Pause on hover (unconditional) so the learner can read at leisure.
-        videoRef.current?.pause();
+        // Pause on hover so the learner can read at leisure; remember that WE
+        // paused so closing the popup resumes playback.
+        pauseForHover();
         const rect = el.getBoundingClientRect();
         const ctx = contextAround(primaryCues, activeP) || primaryText;
         setPopup({
@@ -371,7 +480,7 @@ export function Player({ entry, toast, settings }: Props) {
         });
       }, HOVER_OPEN_MS);
     },
-    [primaryCues, activeP, primaryText, clearOpenTimer, clearCloseTimer],
+    [primaryCues, activeP, primaryText, clearOpenTimer, clearCloseTimer, pauseForHover],
   );
 
   // Leaving a word to empty space: cancel a pending open, and if a popup is
@@ -383,8 +492,9 @@ export function Player({ entry, toast, settings }: Props) {
     closeTimer.current = window.setTimeout(() => {
       closeTimer.current = null;
       setPopup(null);
+      resumeFromHover();
     }, HOVER_CLOSE_MS);
-  }, [clearOpenTimer, clearCloseTimer]);
+  }, [clearOpenTimer, clearCloseTimer, resumeFromHover]);
 
   const onPanelEnter = useCallback(() => {
     clearCloseTimer();
@@ -392,7 +502,8 @@ export function Player({ entry, toast, settings }: Props) {
   const onPanelLeave = useCallback(() => {
     clearCloseTimer();
     setPopup(null);
-  }, [clearCloseTimer]);
+    resumeFromHover();
+  }, [clearCloseTimer, resumeFromHover]);
 
   // fetch lookup when popup target changes (default: NO frame — saves latency)
   useEffect(() => {
@@ -566,6 +677,7 @@ export function Player({ entry, toast, settings }: Props) {
   const onGenerateJa = useCallback(async () => {
     setWhisperBusy(true);
     setWhisperStatus("starting…");
+    setWhisperLastEnd(0);
     try {
       const { jobId } = await api.whisperStart(entry.id, "ja");
       whisperJobRef.current = jobId;
@@ -580,6 +692,7 @@ export function Player({ entry, toast, settings }: Props) {
         if (!dirty) return;
         dirty = false;
         setPrimaryCues(liveCues.slice());
+        setWhisperLastEnd(liveCues.length ? liveCues[liveCues.length - 1]!.end : 0);
       };
       const scheduleFlush = () => {
         dirty = true;
@@ -715,8 +828,14 @@ export function Player({ entry, toast, settings }: Props) {
           {secondaryText && (
             <div
               className={`sub-secondary${secShow ? " show" : ""}`}
-              onMouseEnter={() => setSecShow(true)}
-              onMouseLeave={() => setSecShow(false)}
+              onMouseEnter={() => {
+                setSecShow(true);
+                pauseForHover();
+              }}
+              onMouseLeave={() => {
+                setSecShow(false);
+                resumeFromHover();
+              }}
             >
               {secondaryText}
             </div>
@@ -833,7 +952,25 @@ export function Player({ entry, toast, settings }: Props) {
         )}
         {whisperBusy && (
           <>
-            <span className="spinner-line">Whisper: {whisperStatus}…</span>
+            <div className="whisper-progress" title="Whisper transcription progress">
+              <span className="spinner-line">
+                Generating ja subs… {fmtTime(whisperLastEnd)}
+                {videoDuration > 0 ? ` / ${fmtTime(videoDuration)}` : ""}
+                {whisperStatus && whisperStatus !== "running" ? ` (${whisperStatus})` : ""}
+              </span>
+              <div className="progress-track">
+                <div
+                  className="progress-fill"
+                  style={{
+                    width: `${
+                      videoDuration > 0
+                        ? Math.min(100, (whisperLastEnd / videoDuration) * 100)
+                        : 0
+                    }%`,
+                  }}
+                />
+              </div>
+            </div>
             <button className="btn sm" onClick={onCancelWhisper} title="Stop transcription">
               Cancel
             </button>

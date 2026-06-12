@@ -1,7 +1,7 @@
 // zehntage-reactor HTTP server (Bun.serve).
 
 import { extname, join, dirname, basename } from "node:path";
-import { Library, subLangsFor, type LibraryEntry } from "../lib/library.ts";
+import { Library, subLangsFor, embeddedSubLangs, type LibraryEntry } from "../lib/library.ts";
 import {
   serveFileWithRange,
   checkCodecs,
@@ -15,6 +15,8 @@ import {
   parseSrt,
   cuesToSrt,
   trackLabel,
+  languageName,
+  parseSidecarTrackId,
   type Cue,
   type SubTrack,
 } from "../lib/subs.ts";
@@ -37,16 +39,34 @@ function err(message: string, status = 500): Response {
 }
 
 async function subTracksFor(entry: LibraryEntry): Promise<SubTrack[]> {
-  const tracks: SubTrack[] = entry.sidecarSubs.map((s) => ({
-    id:
-      s.origin === "generated"
-        ? `sidecar:gen:${s.lang || "und"}`
-        : `sidecar:${s.lang || "und"}`,
-    kind: "sidecar",
-    lang: s.lang || "und",
-    path: s.path,
-    origin: s.origin,
-  }));
+  // Count external sidecars per lang so duplicate-language files get
+  // distinct labels ("Russian · file (.ass)").
+  const externalPerLang = new Map<string, number>();
+  for (const s of entry.sidecarSubs) {
+    if (s.origin !== "generated") {
+      const lang = s.lang || "und";
+      externalPerLang.set(lang, (externalPerLang.get(lang) ?? 0) + 1);
+    }
+  }
+  const tracks: SubTrack[] = entry.sidecarSubs.map((s) => {
+    const lang = s.lang || "und";
+    const t: SubTrack = {
+      // Include the extension in external sidecar ids so two files of the
+      // same language (e.g. .srt + .ass) get unique, unambiguous ids.
+      id:
+        s.origin === "generated"
+          ? `sidecar:gen:${lang}`
+          : `sidecar:${lang}${s.ext}`,
+      kind: "sidecar",
+      lang,
+      path: s.path,
+      origin: s.origin,
+    };
+    if (s.origin !== "generated" && (externalPerLang.get(lang) ?? 0) > 1) {
+      t.label = `${languageName(lang)} · file (${s.ext})`;
+    }
+    return t;
+  });
   try {
     tracks.push(...(await listEmbeddedSubTracks(entry.absPath)));
   } catch {
@@ -56,13 +76,16 @@ async function subTracksFor(entry: LibraryEntry): Promise<SubTrack[]> {
 }
 
 async function cuesForTrack(entry: LibraryEntry, trackId: string): Promise<Cue[]> {
-  if (trackId.startsWith("sidecar:")) {
-    const generated = trackId.startsWith("sidecar:gen:");
-    const lang = trackId.slice(generated ? "sidecar:gen:".length : "sidecar:".length);
-    const sub = entry.sidecarSubs.find(
-      (s) => (s.lang || "und") === lang && (s.origin === "generated") === generated,
+  const ref = parseSidecarTrackId(trackId);
+  if (ref) {
+    const matches = entry.sidecarSubs.filter(
+      (s) =>
+        (s.lang || "und") === ref.lang && (s.origin === "generated") === ref.generated,
     );
-    if (!sub) throw new Error(`no sidecar track ${lang}`);
+    // New ids carry the extension; legacy "sidecar:<lang>" ids fall back to
+    // the first match for that language.
+    const sub = ref.ext ? matches.find((s) => s.ext === `.${ref.ext}`) : matches[0];
+    if (!sub) throw new Error(`no sidecar track ${ref.lang}`);
     return parseSubtitleText(await Bun.file(sub.path).text(), sub.ext);
   }
   if (trackId.startsWith("embedded:")) {
@@ -77,6 +100,80 @@ async function cuesForTrack(entry: LibraryEntry, trackId: string): Promise<Cue[]
 function sidecarPath(entry: LibraryEntry, lang: string): string {
   const base = basename(entry.absPath, extname(entry.absPath));
   return join(dirname(entry.absPath), "subs", `${base}.${lang}.srt`);
+}
+
+// --- batch jobs ---
+
+/** "ja", "jpn", "ja-JP", … */
+function isJapaneseLang(lang: string): boolean {
+  return /^(ja|jpn)(-|$)/i.test(lang);
+}
+
+/** Sidecar/embedded/generated — does this entry have ANY Japanese track? */
+async function hasJapaneseTrack(entry: LibraryEntry): Promise<boolean> {
+  if (entry.sidecarSubs.some((s) => isJapaneseLang(s.lang))) return true;
+  return (await embeddedSubLangs(entry.absPath)).some(isJapaneseLang);
+}
+
+export type TranslateBatchStatus = "queued" | "running" | "done" | "error";
+
+interface TranslateBatchItem {
+  entryId: string;
+  sourceTrack: string;
+  targetLang: string;
+  status: TranslateBatchStatus;
+  error?: string;
+}
+
+// Module-level so status survives across requests; processed sequentially to
+// avoid hammering Gemini.
+const translateBatch: TranslateBatchItem[] = [];
+let translatePumpRunning = false;
+
+async function pumpTranslateBatch(library: Library): Promise<void> {
+  if (translatePumpRunning) return;
+  translatePumpRunning = true;
+  try {
+    for (;;) {
+      const item = translateBatch.find((i) => i.status === "queued");
+      if (!item) break;
+      item.status = "running";
+      try {
+        const entry = library.get(item.entryId);
+        if (!entry) throw new Error("entry no longer in library");
+        const cues = await cuesForTrack(entry, item.sourceTrack);
+        const translated = await translateCues(cues, item.targetLang);
+        await Bun.write(sidecarPath(entry, item.targetLang), cuesToSrt(translated));
+        await library.refresh();
+        item.status = "done";
+      } catch (e) {
+        item.status = "error";
+        item.error = e instanceof Error ? e.message : String(e);
+      }
+    }
+  } finally {
+    translatePumpRunning = false;
+  }
+}
+
+/** Best Japanese source track id: generated sidecar → external sidecar → embedded. */
+async function bestJapaneseTrackId(entry: LibraryEntry): Promise<string | null> {
+  const gen = entry.sidecarSubs.find(
+    (s) => s.origin === "generated" && isJapaneseLang(s.lang),
+  );
+  if (gen) return `sidecar:gen:${gen.lang}`;
+  const ext = entry.sidecarSubs.find(
+    (s) => s.origin === "external" && isJapaneseLang(s.lang),
+  );
+  if (ext) return `sidecar:${ext.lang}${ext.ext}`;
+  try {
+    const embedded = await listEmbeddedSubTracks(entry.absPath);
+    const ja = embedded.find((t) => isJapaneseLang(t.lang));
+    if (ja) return ja.id;
+  } catch {
+    // unprobeable
+  }
+  return null;
 }
 
 export interface ServerHandle {
@@ -144,7 +241,10 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
         if (!entry) return err("not found", 404);
         const tracks = await subTracksFor(entry);
         return json(
-          tracks.map(({ path: _p, ...rest }) => ({ ...rest, label: trackLabel(rest) })),
+          tracks.map(({ path: _p, ...rest }) => ({
+            ...rest,
+            label: rest.label ?? trackLabel(rest),
+          })),
         );
       }
 
@@ -213,6 +313,80 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
         return whisperQueue.cancel(whisperCancel[1]!)
           ? json({ ok: true })
           : err("job not found", 404);
+      }
+
+      // --- batch jobs ---
+      if (req.method === "POST" && path === "/api/batch/subtitle") {
+        const entries = await library.refresh();
+        const started: { entryId: string; name: string; jobId: string }[] = [];
+        const skipped: string[] = [];
+        for (const entry of entries) {
+          if ((await hasJapaneseTrack(entry)) || whisperQueue.hasActiveFor(entry.absPath)) {
+            skipped.push(entry.id);
+            continue;
+          }
+          const job = whisperQueue.enqueue(entry.absPath, "ja", sidecarPath(entry, "ja"));
+          started.push({ entryId: entry.id, name: entry.name, jobId: job.id });
+        }
+        return json({ started, skipped });
+      }
+
+      if (req.method === "POST" && path === "/api/batch/translate") {
+        const entries = await library.refresh();
+        const started: { entryId: string; name: string; sourceTrack: string }[] = [];
+        const skipped: string[] = [];
+        for (const entry of entries) {
+          const hasGenRu = entry.sidecarSubs.some(
+            (s) => s.origin === "generated" && /^(ru|rus)(-|$)/i.test(s.lang),
+          );
+          const alreadyQueued = translateBatch.some(
+            (i) =>
+              i.entryId === entry.id &&
+              (i.status === "queued" || i.status === "running"),
+          );
+          if (hasGenRu || alreadyQueued) {
+            skipped.push(entry.id);
+            continue;
+          }
+          const sourceTrack = await bestJapaneseTrackId(entry);
+          if (!sourceTrack) {
+            skipped.push(entry.id);
+            continue;
+          }
+          translateBatch.push({
+            entryId: entry.id,
+            sourceTrack,
+            targetLang: "ru",
+            status: "queued",
+          });
+          started.push({ entryId: entry.id, name: entry.name, sourceTrack });
+        }
+        void pumpTranslateBatch(library);
+        return json({ started, skipped });
+      }
+
+      if (req.method === "GET" && path === "/api/batch/status") {
+        const byPath = new Map(library.list().map((e) => [e.absPath, e.id]));
+        const whisper = whisperQueue.list().map((j) => ({
+          jobId: j.id,
+          entryId: byPath.get(j.mediaPath) ?? null,
+          lang: j.lang,
+          status: j.status,
+          lastCue: j.cues.length > 0 ? j.cues[j.cues.length - 1]!.end : null,
+          error: j.error ?? null,
+        }));
+        const translate = translateBatch.map((i) => ({
+          entryId: i.entryId,
+          sourceTrack: i.sourceTrack,
+          targetLang: i.targetLang,
+          status: i.status,
+          error: i.error ?? null,
+        }));
+        const active =
+          whisper.some(
+            (j) => j.status === "queued" || j.status === "extracting" || j.status === "running",
+          ) || translate.some((i) => i.status === "queued" || i.status === "running");
+        return json({ active, whisper, translate });
       }
 
       // --- translate track ---

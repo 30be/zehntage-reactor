@@ -52,6 +52,24 @@ class WhisperQueue {
     return this.jobs.get(id);
   }
 
+  /** All jobs ever enqueued (insertion order), for status reporting. */
+  list(): WhisperJob[] {
+    return [...this.jobs.values()];
+  }
+
+  /** True if a non-finished job exists for this media path. */
+  hasActiveFor(mediaPath: string): boolean {
+    for (const j of this.jobs.values()) {
+      if (
+        j.mediaPath === mediaPath &&
+        (j.status === "queued" || j.status === "extracting" || j.status === "running")
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   enqueue(mediaPath: string, lang: string, outPath: string): WhisperJob {
     const job: WhisperJob = {
       id: `w${++this.counter}-${Date.now().toString(36)}`,

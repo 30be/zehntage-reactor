@@ -56,6 +56,30 @@ export function trackLabel(track: SubTrack): string {
   return `${languageName(track.lang)} · ${source}`;
 }
 
+// --- sidecar track ids ---
+
+export interface SidecarTrackRef {
+  generated: boolean;
+  lang: string;
+  /** extension without dot, e.g. "srt"; undefined for legacy ids like "sidecar:ru" */
+  ext?: string;
+}
+
+/**
+ * Parse a sidecar track id.
+ *   "sidecar:ru.srt"  → { generated: false, lang: "ru", ext: "srt" }
+ *   "sidecar:ru"      → { generated: false, lang: "ru" }   (legacy, pre-ext ids)
+ *   "sidecar:gen:ja"  → { generated: true, lang: "ja" }
+ */
+export function parseSidecarTrackId(id: string): SidecarTrackRef | null {
+  if (!id.startsWith("sidecar:")) return null;
+  const generated = id.startsWith("sidecar:gen:");
+  const rest = id.slice(generated ? "sidecar:gen:".length : "sidecar:".length);
+  const m = rest.match(/^(.+)\.(srt|vtt|ass|ssa)$/i);
+  if (m) return { generated, lang: m[1]!, ext: m[2]!.toLowerCase() };
+  return { generated, lang: rest };
+}
+
 // --- timestamp helpers ---
 
 export function parseTimestamp(ts: string): number {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, type LibraryEntry } from "./api.ts";
+import { api, type BatchStatus, type LibraryEntry } from "./api.ts";
 import { Player } from "./Player.tsx";
 
 type Route =
@@ -61,7 +61,7 @@ export function App() {
       </header>
 
       <main className="container">
-        {route.name === "library" && <Library go={go} />}
+        {route.name === "library" && <Library go={go} toast={toast} />}
         {route.name === "settings" && (
           <Settings settings={settings} setSettings={setSettings} toast={toast} go={go} />
         )}
@@ -75,16 +75,91 @@ export function App() {
   );
 }
 
-function Library({ go }: { go: (h: string) => void }) {
+function fmtCueTime(t: number): string {
+  const m = Math.floor(t / 60);
+  const s = Math.floor(t % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+/** Per-entry status badge text from the batch status, or null. */
+function entryBadge(status: BatchStatus | null, entryId: string): string | null {
+  if (!status) return null;
+  const jobs = status.whisper.filter((j) => j.entryId === entryId);
+  const w = jobs[jobs.length - 1];
+  const t = status.translate
+    .filter((i) => i.entryId === entryId)
+    .slice(-1)[0];
+  if (w?.status === "running")
+    return w.lastCue !== null ? `whisper ${fmtCueTime(w.lastCue)}…` : "whisper…";
+  if (w?.status === "extracting") return "whisper…";
+  if (w?.status === "queued") return "whisper queued";
+  if (t?.status === "running") return "translating…";
+  if (t?.status === "queued") return "translate queued";
+  if (w?.status === "error" || t?.status === "error") return "error";
+  if (w?.status === "done" || t?.status === "done") return "✓";
+  return null;
+}
+
+function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) => void }) {
   const [entries, setEntries] = useState<LibraryEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<BatchStatus | null>(null);
 
-  useEffect(() => {
+  const loadEntries = useCallback(() => {
     void api
       .library()
       .then(setEntries)
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, []);
+
+  const refreshStatus = useCallback(() => {
+    void api.batchStatus().then(setStatus).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    loadEntries();
+    refreshStatus();
+  }, [loadEntries, refreshStatus]);
+
+  // Poll every 3s while anything is active; refresh entries when work settles
+  // (new sidecar langs appear on the cards).
+  const active = status?.active ?? false;
+  useEffect(() => {
+    if (!active) return;
+    const t = window.setInterval(refreshStatus, 3000);
+    return () => {
+      window.clearInterval(t);
+      loadEntries();
+    };
+  }, [active, refreshStatus, loadEntries]);
+
+  const onBatchSubtitle = async () => {
+    try {
+      const r = await api.batchSubtitle();
+      toast(
+        r.started.length > 0
+          ? `Queued whisper for ${r.started.length} file(s)`
+          : "Nothing to subtitle — all have Japanese tracks",
+      );
+      refreshStatus();
+    } catch (e) {
+      toast(`Batch subtitle failed: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  const onBatchTranslate = async () => {
+    try {
+      const r = await api.batchTranslate();
+      toast(
+        r.started.length > 0
+          ? `Queued translation for ${r.started.length} file(s)`
+          : "Nothing to translate",
+      );
+      refreshStatus();
+    } catch (e) {
+      toast(`Batch translate failed: ${e instanceof Error ? e.message : e}`);
+    }
+  };
 
   if (error) return <div className="empty">Failed to load library: {error}</div>;
   if (!entries) return <div className="empty">Loading library…</div>;
@@ -93,6 +168,14 @@ function Library({ go }: { go: (h: string) => void }) {
   return (
     <>
       <h1 className="h1">Library</h1>
+      <div className="batchbar">
+        <button className="btn sm" onClick={() => void onBatchSubtitle()}>
+          Subtitle all (ja)
+        </button>
+        <button className="btn sm" onClick={() => void onBatchTranslate()}>
+          Translate all → ru
+        </button>
+      </div>
       <div className="grid">
         {entries.map((e) => (
           <div key={e.id} className="card" onClick={() => go(`#/play/${e.id}`)}>
@@ -107,6 +190,10 @@ function Library({ go }: { go: (h: string) => void }) {
                   {l}
                 </span>
               ))}
+              {(() => {
+                const b = entryBadge(status, e.id);
+                return b ? <span className="badge jobstatus">{b}</span> : null;
+              })()}
             </div>
           </div>
         ))}
