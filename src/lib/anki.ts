@@ -13,6 +13,8 @@ export interface AnkiCard {
   image_field?: string;
   /** Anki note id (= creation timestamp ms); only from the local path. */
   noteId?: number;
+  /** Note tags ("zehntage" marks cards mined by this app); local path only. */
+  tags?: string[];
   [key: string]: unknown;
 }
 
@@ -105,6 +107,7 @@ function acFieldMap(): Promise<AcFieldMap> {
 
 interface AcNoteInfo {
   noteId: number;
+  tags?: string[];
   fields: Record<string, { value: string; order: number }>;
 }
 
@@ -121,6 +124,7 @@ async function acListCards(): Promise<AnkiCard[]> {
     notes: fm.notes ? n.fields[fm.notes]?.value ?? "" : "",
     context: fm.context ? n.fields[fm.context]?.value ?? "" : "",
     noteId: n.noteId,
+    tags: Array.isArray(n.tags) ? n.tags : [],
   }));
 }
 
@@ -175,6 +179,7 @@ async function acAddCard(card: AnkiCard): Promise<void> {
       deckName: AC_DECK,
       modelName: AC_MODEL,
       fields,
+      tags: Array.isArray(card.tags) ? card.tags : [],
       options: { allowDuplicate: false, duplicateScope: "deck" },
     },
   });

@@ -33,11 +33,13 @@ import {
   VolumeIcon,
   VolumeXIcon,
   MaximizeIcon,
+  CaptionsIcon,
   RotateCwIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   BookOpenIcon,
 } from "./icons.tsx";
+import { useAnkiWordsLive } from "./ankicache.ts";
 
 // Module-level cue-token cache: tokenization results survive popup churn AND
 // episode changes (the kuromoji instance already does — getTokenizer() memos
@@ -192,8 +194,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   const [secondaryCues, setSecondaryCues] = useState<Cue[]>([]);
   const [activeP, setActiveP] = useState(-1);
   const [activeS, setActiveS] = useState(-1);
-  const [secShow, setSecShow] = useState(false);
-  // RU-blur: hold `b` = temporary unblur; quick double-press `b` = session toggle.
+  // Translation tooltip (the dim "?" at the JP line's right edge) is open
+  // because the cursor rests on the hint.
+  const [secTipOpen, setSecTipOpen] = useState(false);
+  // RU reveal: hold `b` = temporary tooltip; quick double-press `b` = session toggle.
   const [secHold, setSecHold] = useState(false);
   const [blurOff, setBlurOff] = useState(false);
   const blurOffRef = useRef(false);
@@ -290,6 +294,17 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     new Map(),
   );
   const [lookupFromDeck, setLookupFromDeck] = useState(false);
+
+  // Live deck (web/ankicache.ts): background ETag revalidations and optimistic
+  // add/delete write-throughs re-render the known-word underlines without an
+  // explicit refreshAnki() roundtrip.
+  const liveAnki = useAnkiWordsLive();
+  useEffect(() => {
+    if (!liveAnki) return;
+    setWordIndex(buildWordIndex(liveAnki.words, liveAnki.progress));
+    setKnownFronts(new Set(liveAnki.words.map((w) => w.front)));
+    deckCardsRef.current = new Map(liveAnki.words.map((w) => [w.front, w]));
+  }, [liveAnki]);
 
   // --- frequency ranks (lazy-loaded /freq.json) for the popup tag + pre-study ---
   const [freqMap, setFreqMap] = useState<Map<string, number> | null>(null);
@@ -1217,7 +1232,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       " ", "f", "F",
       "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
       ",", "<", ".", ">",
-      "a", "A", "-", "=", "[", "]", "\\",
+      "a", "A", "r", "R", "-", "=", "[", "]", "\\",
       "l", "L", "k", "K",
       "Tab", "s", "S", "h", "H", "u", "U", "w", "W",
       "b", "B", "i", "I", "x", "X",
@@ -1318,7 +1333,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           v.currentTime = Math.min(v.duration || Infinity, v.currentTime + FRAME);
           break;
         case "a":
-        case "A": {
+        case "A":
+        case "r":
+        case "R": {
           // Replay: jump to the start of the current primary cue; if within
           // the first 0.3s (or between cues), step back to the previous one —
           // tapping `a` repeatedly walks backward cue by cue.
@@ -2484,6 +2501,37 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     return () => v.removeEventListener("volumechange", upd);
   }, [entry.id]);
 
+  // --- CC popover (track selection + contextual actions), anchored above the
+  // vbar. Esc / click-away closes; opening pins the HUD visible. ---
+  const [ccOpen, setCcOpen] = useState(false);
+  const ccOpenRef = useRef(false);
+  useEffect(() => {
+    ccOpenRef.current = ccOpen;
+  }, [ccOpen]);
+  const ccRef = useRef<HTMLDivElement>(null);
+  const ccBtnRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!ccOpen) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node | null;
+      if (t && (ccRef.current?.contains(t) || ccBtnRef.current?.contains(t)))
+        return;
+      setCcOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      setCcOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, [ccOpen]);
+
   // Autohide: fade the bar (and the cursor) after 2.5s without mouse movement
   // while playing. Reappears on mousemove / pause. The bar OVERLAYS the video,
   // so the subtitle overlay never shifts when it hides.
@@ -2496,7 +2544,13 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     hudTimerRef.current = window.setTimeout(() => {
       hudTimerRef.current = null;
       const v = videoRef.current;
-      if (v && !v.paused && !scrubbingRef.current && !barHoverRef.current)
+      if (
+        v &&
+        !v.paused &&
+        !scrubbingRef.current &&
+        !barHoverRef.current &&
+        !ccOpenRef.current
+      )
         setHudHidden(true);
     }, 2500);
   }, []);
@@ -2523,7 +2577,13 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     if (hudTimerRef.current != null) window.clearTimeout(hudTimerRef.current);
     hudTimerRef.current = null;
     const v = videoRef.current;
-    if (v && !v.paused && !scrubbingRef.current && !barHoverRef.current)
+    if (
+      v &&
+      !v.paused &&
+      !scrubbingRef.current &&
+      !barHoverRef.current &&
+      !ccOpenRef.current
+    )
       setHudHidden(true);
   }, []);
   const onStageMouseMove = useCallback(
@@ -2634,14 +2694,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         <div className="episode-title" title={entry.name}>
           {entry.name.replace(/\.[^.]+$/, "")}
         </div>
-        <a
-          className="btn icon ep-nav read-link"
-          title="reading mode"
-          aria-label="Reading mode"
-          href={`#/read/${entry.id}`}
-        >
-          <BookOpenIcon size={16} />
-        </a>
         <button
           className="btn icon ep-nav"
           title="next episode (shift+→)"
@@ -2650,6 +2702,14 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         >
           <ChevronRightIcon size={16} />
         </button>
+        <a
+          className="btn icon ep-nav read-link"
+          title="reading mode"
+          aria-label="Reading mode"
+          href={`#/read/${entry.id}`}
+        >
+          <BookOpenIcon size={16} />
+        </a>
       </div>
       <div className="stage-row">
       <div
@@ -2712,24 +2772,29 @@ export function Player({ entry, startAt, toast, settings }: Props) {
                 ?
               </span>
             )}
+            {primaryText && secondaryText && (
+              <span
+                className={`sec-hint${secTipOpen || secHold || blurOff ? " open" : ""}`}
+                title="Translation — hover to peek (or hold b)"
+                onMouseEnter={() => {
+                  secondaryHoveredRef.current = true;
+                  clearCloseTimer();
+                  setSecTipOpen(true);
+                  pauseForHover();
+                }}
+                onMouseLeave={() => {
+                  secondaryHoveredRef.current = false;
+                  setSecTipOpen(false);
+                  resumeFromHover();
+                }}
+              >
+                ?
+                {(secTipOpen || secHold || blurOff) && (
+                  <span className="sec-tip">{secondaryText}</span>
+                )}
+              </span>
+            )}
           </div>
-          {secondaryText && (
-            <div
-              className={`sub-secondary${secShow || secHold || blurOff ? " show" : ""}`}
-              onMouseEnter={() => {
-                secondaryHoveredRef.current = true;
-                setSecShow(true);
-                pauseForHover();
-              }}
-              onMouseLeave={() => {
-                secondaryHoveredRef.current = false;
-                setSecShow(false);
-                resumeFromHover();
-              }}
-            >
-              {secondaryText}
-            </div>
-          )}
         </div>
         <div className="vbar">
           <div
@@ -2779,6 +2844,16 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             </span>
             <span className="vbar-spacer" />
             <button
+              ref={ccBtnRef}
+              className={`vbar-btn vbar-cc${ccOpen ? " on" : ""}`}
+              tabIndex={-1}
+              onClick={() => setCcOpen((o) => !o)}
+              title="Subtitle tracks"
+              aria-label="Subtitle tracks"
+            >
+              <CaptionsIcon />
+            </button>
+            <button
               className="vbar-btn vbar-mute"
               tabIndex={-1}
               onClick={() => {
@@ -2817,6 +2892,108 @@ export function Player({ entry, startAt, toast, settings }: Props) {
               <MaximizeIcon size={20} />
             </button>
           </div>
+          {ccOpen && (
+            <div className="cc-pop" ref={ccRef} role="dialog" aria-label="Subtitle tracks">
+              <div className="cc-group" role="radiogroup" aria-label="Subtitles">
+                <div className="cc-title">Subtitles</div>
+                <label className="cc-row">
+                  <input
+                    type="radio"
+                    name="cc-primary"
+                    value=""
+                    checked={primaryId === ""}
+                    onChange={() => setPrimaryId("")}
+                  />
+                  <span className="cc-label">off</span>
+                </label>
+                {tracks.map((t) => (
+                  <label key={t.id} className="cc-row">
+                    <input
+                      type="radio"
+                      name="cc-primary"
+                      value={t.id}
+                      checked={primaryId === t.id}
+                      onChange={() => setPrimaryId(t.id)}
+                    />
+                    <span className="cc-label">{langLabel(t)}</span>
+                  </label>
+                ))}
+              </div>
+              <div className="cc-group" role="radiogroup" aria-label="Translation">
+                <div className="cc-title">Translation</div>
+                <label className="cc-row">
+                  <input
+                    type="radio"
+                    name="cc-secondary"
+                    value=""
+                    checked={secondaryId === ""}
+                    onChange={() => setSecondaryId("")}
+                  />
+                  <span className="cc-label">off</span>
+                </label>
+                {tracks.map((t) => (
+                  <label key={t.id} className="cc-row">
+                    <input
+                      type="radio"
+                      name="cc-secondary"
+                      value={t.id}
+                      checked={secondaryId === t.id}
+                      onChange={() => setSecondaryId(t.id)}
+                    />
+                    <span className="cc-label">{langLabel(t)}</span>
+                  </label>
+                ))}
+              </div>
+              {((!hasJa && !whisperBusy) ||
+                (primaryId &&
+                  isJaLang(primaryTrackLang) &&
+                  !hasGeneratedRu &&
+                  !translateBusy) ||
+                (hasJa && !condenseBusy && !whisperBusy)) && (
+                <div className="cc-actions">
+                  {!hasJa && !whisperBusy && (
+                    <button
+                      className="cc-action"
+                      title="Transcribe the audio to Japanese subtitles with Whisper"
+                      onClick={() => {
+                        setCcOpen(false);
+                        void onGenerateJa();
+                      }}
+                    >
+                      + generate ja…
+                    </button>
+                  )}
+                  {primaryId &&
+                    isJaLang(primaryTrackLang) &&
+                    !hasGeneratedRu &&
+                    !translateBusy && (
+                      <button
+                        className="cc-action"
+                        title="Translate the primary track to Russian (saved as a track)"
+                        onClick={() => {
+                          setCcOpen(false);
+                          void onTranslateRu();
+                        }}
+                      >
+                        + translate → ru…
+                      </button>
+                    )}
+                  {hasJa && !condenseBusy && !whisperBusy && (
+                    <button
+                      className="cc-action"
+                      title="Concatenate all dialogue audio into one mp3"
+                      onClick={() => {
+                        setCcOpen(false);
+                        void onCondense();
+                      }}
+                    >
+                      + condensed audio…
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
         {skipTarget != null && (
           <button
@@ -3134,6 +3311,30 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           })()}
         </div>
       )}
+
+      {/* `l` in fullscreen: same cue list as a translucent overlay INSIDE the
+          stage (the fullscreened element is the stage, so a sibling sidebar
+          would be invisible). */}
+      {sidebarOpen && isFullscreen && (
+        <div className="fs-sidebar">
+          <Sidebar
+            cues={displayCues}
+            secondaryCues={secondaryCues}
+            activeIdx={activeP}
+            subOffset={subOffset}
+            onSeek={sidebarSeek}
+            wordIndex={wordIndex}
+            knownWords={knownWords}
+            blacklist={blacklist}
+            furiganaOn={furiganaOn}
+            accents={accents}
+            pitchAccentOn={pitchOn}
+            onWordEnter={onWordEnter}
+            onWordLeave={onWordLeave}
+            onWordClick={onWordClick}
+          />
+        </div>
+      )}
       </div>
 
       {sidebarOpen && !isFullscreen && (
@@ -3156,73 +3357,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       )}
       </div>
 
+      {/* Track selection lives in the CC popover (vbar). This row only
+          surfaces long-running job progress — absent otherwise. */}
+      {(translateBusy || condenseBusy || whisperBusy) && (
       <div className="controls">
-        {/* Primary slot: a select when tracks exist (with "+ generate…" folded
-            in as the last option), otherwise the single relevant action. */}
-        {tracks.length > 0 ? (
-          <div className="track-pick">
-            <select
-              aria-label="Primary subtitle track"
-              title="Primary subtitle track (the language you're learning)"
-              value={primaryId}
-              onChange={(e) => {
-                if (e.target.value === "__generate") void onGenerateJa();
-                else if (e.target.value === "__condense") void onCondense();
-                else setPrimaryId(e.target.value);
-              }}
-            >
-              <option value="">— none —</option>
-              {tracks.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {langLabel(t)}
-                </option>
-              ))}
-              {!hasJa && !whisperBusy && (
-                <option value="__generate">+ generate ja…</option>
-              )}
-              {hasJa && !condenseBusy && !whisperBusy && (
-                <option value="__condense">+ condensed audio…</option>
-              )}
-            </select>
-          </div>
-        ) : (
-          !whisperBusy && (
-            <button
-              className="btn"
-              onClick={onGenerateJa}
-              title="Transcribe the audio to Japanese subtitles with Whisper (saved as a track)"
-            >
-              Generate ja
-            </button>
-          )
-        )}
-        {/* Secondary slot: same pattern, "+ translate…" folded in. */}
-        {tracks.length > 0 && (
-          <div className="track-pick">
-            <select
-              aria-label="Secondary subtitle track"
-              title="Secondary subtitle track (translation, blurred until hovered)"
-              value={secondaryId}
-              onChange={(e) => {
-                if (e.target.value === "__translate") void onTranslateRu();
-                else setSecondaryId(e.target.value);
-              }}
-            >
-              <option value="">— none —</option>
-              {tracks.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {langLabel(t)}
-                </option>
-              ))}
-              {primaryId &&
-                isJaLang(primaryTrackLang) &&
-                !hasGeneratedRu &&
-                !translateBusy && (
-                  <option value="__translate">+ translate → ru…</option>
-                )}
-            </select>
-          </div>
-        )}
         {translateBusy && <span className="spinner-line">Translating…</span>}
         {condenseBusy && <span className="spinner-line">Condensing audio…</span>}
         {whisperBusy && (
@@ -3252,6 +3390,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           </>
         )}
       </div>
+      )}
     </div>
   );
 }

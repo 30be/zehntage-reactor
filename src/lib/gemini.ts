@@ -177,13 +177,12 @@ export interface ExplainResult {
   translation: string;
 }
 
-export function buildExplainPrompt(
-  sentence: string,
-  secondary: string,
-  source: string,
-  context = "",
-): string {
-  return `The learner is a native Russian speaker, fluent in English, learning Japanese. Explain the structure of this Japanese subtitle sentence for them. Be compact — no filler.
+/**
+ * Built-in sentence-explain prompt template. Placeholders {sentence} {context}
+ * {secondary} {source} are substituted. Exported so the settings page can
+ * prefill / restore it (same pattern as DEFAULT_LOOKUP_PROMPT).
+ */
+export const DEFAULT_EXPLAIN_PROMPT = `The learner is a native Russian speaker, fluent in English, learning Japanese. Explain the structure of this Japanese subtitle sentence for them. Be compact — no filler.
 
 Note: words in the sentence may be quoted loanwords, names, or wordplay referenced from the surrounding lines — use the surrounding lines and any known-language translation to disambiguate; if the translation conflicts with a dictionary meaning, prefer the contextual reading and note the dictionary meaning briefly.
 
@@ -192,10 +191,28 @@ Provide three fields:
 - idioms: multiword idioms, set phrases, or collocations in the sentence with brief meanings; empty string if none.
 - translation: a natural Russian translation of the whole sentence.
 
-${context ? `Surrounding subtitle lines (the sentence is marked "(current)"):\n${context}\n\n` : ""}${secondary ? `An existing subtitle translation (may be loose): ${secondary}\n` : ""}Source: ${source}
+Surrounding subtitle lines (the sentence is marked "(current)", may be empty):
+{context}
+
+An existing subtitle translation (may be loose or empty): {secondary}
+Source: {source}
 
 Sentence:
-${sentence}`;
+{sentence}`;
+
+export function buildExplainPrompt(
+  sentence: string,
+  secondary: string,
+  source: string,
+  context = "",
+  template?: string,
+): string {
+  const tpl = template && template.trim() ? template : DEFAULT_EXPLAIN_PROMPT;
+  return tpl
+    .replaceAll("{sentence}", sentence)
+    .replaceAll("{context}", context)
+    .replaceAll("{secondary}", secondary)
+    .replaceAll("{source}", source);
 }
 
 export async function explainSentence(
@@ -212,8 +229,11 @@ export async function explainSentence(
       translation: `fake-перевод(${sentence})`,
     };
   }
+  const settings = await readSettings();
+  const template =
+    typeof settings.explainPrompt === "string" ? settings.explainPrompt : "";
   return (await callGemini(
-    buildExplainPrompt(sentence, secondary, source, context),
+    buildExplainPrompt(sentence, secondary, source, context, template),
     EXPLAIN_SCHEMA,
   )) as ExplainResult;
 }

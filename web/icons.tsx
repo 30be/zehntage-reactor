@@ -5,6 +5,7 @@
 
 import {
   BookOpen,
+  Captions,
   ChartNoAxesColumn,
   ChevronLeft,
   ChevronRight,
@@ -38,6 +39,7 @@ export const PauseIcon = wrap(Pause, 18);
 export const VolumeIcon = wrap(Volume2, 18);
 export const VolumeXIcon = wrap(VolumeX, 18);
 export const MaximizeIcon = wrap(Maximize, 18);
+export const CaptionsIcon = wrap(Captions, 20);
 export const RotateCwIcon = wrap(RotateCw, 16);
 export const ChevronLeftIcon = wrap(ChevronLeft, 16);
 export const ChevronRightIcon = wrap(ChevronRight, 16);

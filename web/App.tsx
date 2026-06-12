@@ -270,7 +270,7 @@ const HOTKEYS: [string, string][] = [
   ["f", "fullscreen"],
   ["← →", "prev / next cue (seek)"],
   ["↑ ↓", "volume"],
-  ["a", "replay current cue"],
+  ["a / r", "replay current cue"],
   ["s", "shadowing loop current cue (count: Settings)"],
   ["Tab / Shift+Tab", "cycle subtitle tracks"],
   ["Shift+→ / Shift+←", "next / previous episode"],
@@ -279,7 +279,7 @@ const HOTKEYS: [string, string][] = [
   ["k", "mark hovered word known"],
   ["l", "toggle cue-list sidebar"],
   ["w", "pre-study panel (upcoming words)"],
-  ["b", "hold to unblur translation"],
+  ["b", "hold to peek at the translation"],
   ["i", "toggle furigana"],
   ["- / =", "playback speed"],
   ["[ / ] / \\", "subtitle offset − / + / reset"],
@@ -1602,6 +1602,10 @@ function Settings({
   const [lookupPrompt, setLookupPrompt] = useState(
     (settings.lookupPrompt as string) || promptDefault,
   );
+  const explainDefault = (settings.explainPromptDefault as string) || "";
+  const [explainPrompt, setExplainPrompt] = useState(
+    (settings.explainPrompt as string) || explainDefault,
+  );
 
   useEffect(() => {
     setPrimaryLang((settings.targetLang as string) || "ja");
@@ -1617,6 +1621,8 @@ function Settings({
     );
     const def = (settings.lookupPromptDefault as string) || "";
     setLookupPrompt((settings.lookupPrompt as string) || def);
+    const exDef = (settings.explainPromptDefault as string) || "";
+    setExplainPrompt((settings.explainPrompt as string) || exDef);
   }, [settings]);
 
   // --- autosave: no Save button — every change saves (debounced), blur
@@ -1632,6 +1638,7 @@ function Settings({
     autopauseMode,
     autopauseMinUnknown,
     lookupPrompt,
+    explainPrompt,
   });
   latest.current = {
     primaryLang,
@@ -1644,6 +1651,7 @@ function Settings({
     autopauseMode,
     autopauseMinUnknown,
     lookupPrompt,
+    explainPrompt,
   };
   const saveTimer = useRef<number | null>(null);
   const save = useCallback(async () => {
@@ -1670,6 +1678,7 @@ function Settings({
           Math.round(Number(s.autopauseMinUnknown)) || 1,
         ),
         lookupPrompt: s.lookupPrompt,
+        explainPrompt: s.explainPrompt,
       });
       setSettings(next);
       toast("saved");
@@ -1874,6 +1883,39 @@ function Settings({
                 title="Restore the built-in lookup prompt"
                 onClick={() => {
                   setLookupPrompt(promptDefault);
+                  scheduleSave();
+                }}
+              >
+                Reset to default
+              </button>
+            </div>
+          </div>
+          <div className="field">
+            <label>Sentence explanation prompt (Gemini)</label>
+            <textarea
+              className="prompt"
+              rows={10}
+              title="Prompt template used for sentence-structure explanations; changes save automatically"
+              value={explainPrompt}
+              onChange={(e) => {
+                setExplainPrompt(e.target.value);
+                scheduleSave();
+              }}
+              onBlur={onBlurSave}
+              placeholder={explainDefault}
+            />
+            <div className="hint">
+              Placeholders <code>{"{sentence}"}</code> <code>{"{context}"}</code>{" "}
+              <code>{"{secondary}"}</code> <code>{"{source}"}</code> are
+              substituted at explain time.
+            </div>
+            <div>
+              <button
+                type="button"
+                className="btn sm"
+                title="Restore the built-in explanation prompt"
+                onClick={() => {
+                  setExplainPrompt(explainDefault);
                   scheduleSave();
                 }}
               >

@@ -38,6 +38,7 @@ import {
   explainSentence,
   askQuestion,
   DEFAULT_LOOKUP_PROMPT,
+  DEFAULT_EXPLAIN_PROMPT,
   type ExplainResult,
 } from "../lib/gemini.ts";
 import {
@@ -1011,8 +1012,15 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       }
 
       // Fuller card info for the Cards browser tab (front/back/notes/context).
+      // OURS ONLY: the deck may also hold unrelated cards (chemistry, German…)
+      // — keep a card when it carries our "zehntage" tag (local AnkiConnect)
+      // or its context contains our source line ("<episode>.mkv @ mm:ss").
       if (req.method === "GET" && path === "/api/anki/cards") {
-        const cards = await listWords();
+        const cards = (await listWords()).filter(
+          (c) =>
+            (Array.isArray(c.tags) && c.tags.includes("zehntage")) ||
+            /\.(mkv|mp4)\s*@\s*\d+:\d{2}/i.test(c.context ?? ""),
+        );
         return json(
           cards.map((c) => ({
             front: c.front ?? "",
@@ -1144,6 +1152,10 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
           back: body.translation,
           notes: body.notes ?? "",
           context,
+          // Marks the card as ours for the Cards tab filter. Local AnkiConnect
+          // sets it as a real note tag; the remote anki-mcp may ignore the
+          // field, in which case the context source-line pattern still matches.
+          tags: ["zehntage"],
           ...(image ? { image, image_field: "context" } : {}),
         });
         bustAnkiWordsCache();
@@ -1398,7 +1410,11 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       if (path === "/api/settings") {
         if (req.method === "GET") {
           const settings = await readSettings();
-          return json({ ...settings, lookupPromptDefault: DEFAULT_LOOKUP_PROMPT });
+          return json({
+            ...settings,
+            lookupPromptDefault: DEFAULT_LOOKUP_PROMPT,
+            explainPromptDefault: DEFAULT_EXPLAIN_PROMPT,
+          });
         }
         if (req.method === "POST") {
           const patch = (await req.json()) as Record<string, unknown>;

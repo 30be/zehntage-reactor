@@ -1289,3 +1289,168 @@ textarea.prompt {
   overflow-y: auto;
   overscroll-behavior: contain;
 }
+
+/* ---- wave 10 (appended): translation tooltip, CC popover, centered title,
+   fullscreen sidebar overlay, stats polish ---- */
+
+/* translation hint: dim circle-less "?" at the JP line's right edge.
+   (Distinct from .explain-q, the CIRCLED ? for sentence-structure explain.)
+   Hidden until the JP line is hovered; brightens under the cursor. */
+.sec-hint {
+  position: relative;
+  display: inline-block;
+  margin-left: 0.45em;
+  font-size: 0.55em;
+  font-weight: 600;
+  line-height: 1;
+  color: #fff;
+  opacity: 0;
+  cursor: pointer;
+  vertical-align: middle;
+  transition: opacity 0.12s;
+  user-select: none;
+  padding: 0.2em 0.3em; /* forgiving hover target */
+}
+.sub-primary:hover .sec-hint { opacity: 0.35; }
+.sec-hint:hover, .sec-hint.open { opacity: 0.9; }
+
+/* the tooltip itself: minimal dark pill above the "?" — instant, unblurred */
+.sec-tip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: -0.3em;
+  width: max-content;
+  max-width: min(60vw, 480px);
+  padding: 6px 10px;
+  background: rgba(0, 0, 0, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  color: #e5e5e5;
+  font-size: clamp(13px, 1.4vw, 16px);
+  font-weight: 400;
+  line-height: 1.45;
+  text-align: left;
+  text-shadow: none;
+  white-space: normal;
+  pointer-events: none;
+  z-index: 6;
+}
+
+/* CC button + popover (track selection moved off the page into the vbar) */
+.vbar-cc.on { opacity: 1; background: rgba(255, 255, 255, 0.14); }
+.cc-pop {
+  position: absolute;
+  right: 10px;
+  bottom: 46px;
+  z-index: 7;
+  width: 240px;
+  max-height: min(60vh, 420px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: rgba(10, 10, 10, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: #e5e5e5;
+  font-size: 13px;
+}
+.cc-group + .cc-group { margin-top: 10px; }
+.cc-title {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #a1a1aa;
+  margin-bottom: 4px;
+  user-select: none;
+}
+.cc-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.cc-row:hover .cc-label { color: #fff; }
+.cc-row input[type="radio"] {
+  margin: 0;
+  accent-color: #fff;
+  width: 12px;
+  height: 12px;
+  flex: none;
+}
+.cc-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cc-actions {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.cc-action {
+  background: none;
+  border: none;
+  padding: 3px 0;
+  font: inherit;
+  font-size: 13px;
+  color: #a1a1aa;
+  text-align: left;
+  cursor: pointer;
+}
+.cc-action:hover { color: #fff; }
+
+/* episode title row: centered title with chevrons either side, reading-mode
+   icon at the end — one quiet line */
+.episode-title-row { justify-content: center; }
+.episode-title-row .episode-title {
+  flex: 0 1 auto;
+  text-align: center;
+}
+
+/* `l` in fullscreen: cue sidebar as a right-side overlay inside the stage */
+.fs-sidebar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 340px;
+  z-index: 6;
+  display: none; /* only meaningful while the stage is fullscreen */
+}
+.video-stage:fullscreen .fs-sidebar { display: block; }
+.fs-sidebar .cue-sidebar {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  border: none;
+  border-radius: 0;
+  background: rgba(0, 0, 0, 0.85);
+  color: #e5e5e5;
+}
+.fs-sidebar .cue-row.active {
+  background: rgba(255, 255, 255, 0.08);
+  border-left-color: #fff;
+}
+.fs-sidebar .cue-row .cue-time { color: #a1a1aa; }
+.fs-sidebar .cue-row .cue-time:hover { color: #fff; }
+.fs-sidebar .tok:hover { background: rgba(255, 255, 255, 0.18); }
+.fs-sidebar .cue-row .cue-sec { color: #a1a1aa; }
+
+/* stats polish: one consistent content width, monochrome bars, breathing
+   room between sections */
+.stats-list,
+.daily-list,
+.ep-series,
+.cpm-chart,
+.cum-chart { max-width: 680px; }
+.stats-fill { background: #71717a; } /* was green — keep the page b/w */
+.cpm-chart,
+.cum-chart { margin-bottom: 22px; }
+.ep-series { margin-bottom: 22px; }
+.stats-list { margin-bottom: 22px; }
+.activity-grid { margin-bottom: 28px; }

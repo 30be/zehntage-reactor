@@ -34,13 +34,23 @@ test("a replays the current cue (currentTime jumps back to cue start)", async ({
   expect(t).toBeLessThan(6.5);
 });
 
+test("r replays the current cue (alias of a)", async ({ page }) => {
+  await openPlayer(page, "clip.mp4");
+  await seekTo(page, 8); // inside cue 2 (6–9s)
+  await waitForTokens(page);
+  await page.keyboard.press("r");
+  const t = await page.evaluate(() => document.querySelector("video")!.currentTime);
+  expect(t).toBeGreaterThanOrEqual(5.9);
+  expect(t).toBeLessThan(6.5);
+});
+
 test("-/= change playbackRate, [/] show offset toast", async ({ page }) => {
   await openPlayer(page, "clip.mp4");
   // Wait for the track auto-selection to settle: the per-track offset restore
   // (keyed by primaryId) would otherwise reset an offset set mid-load.
-  await expect(
-    page.locator(".track-pick select").first(),
-  ).toHaveValue(/sidecar|embedded/);
+  // Cue text rendering implies the primary track is selected and loaded.
+  await seekTo(page, 3);
+  await expect(page.locator(".sub-primary")).toContainText("勉強");
   await page.keyboard.press("=");
   await expect(video(page)).toHaveJSProperty("playbackRate", 1.25);
   await expect(page.locator(".toast")).toContainText("speed 1.25×");

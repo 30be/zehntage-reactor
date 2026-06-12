@@ -12,9 +12,11 @@ test("condensed-audio option runs ffmpeg, saves the mp3 and streams it", async (
   // a leftover from a previous run would mask a broken condense
   rmSync(CONDENSED, { force: true });
   const id = await openPlayer(page, "clip.mp4");
-  const select = page.getByLabel("Primary subtitle track");
-  await expect(select.locator("option", { hasText: "+ condensed audio…" })).toHaveCount(1);
-  await select.selectOption("__condense");
+  await page.locator(".vbar-cc").click();
+  const action = page.locator(".cc-action", { hasText: "+ condensed audio…" });
+  await expect(action).toBeVisible();
+  await action.click();
+  await expect(page.locator(".cc-pop")).toHaveCount(0); // popover closes
   // progress toast, then a completion toast naming where the file landed
   await expect(page.locator(".toast")).toContainText(/condens/i);
   await expect(page.locator(".toast")).toContainText("clip.condensed.mp3", {

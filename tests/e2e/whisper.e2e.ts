@@ -3,9 +3,12 @@ import { openPlayer } from "./helpers.ts";
 
 test("whisper generate: progress UI streams, completes, ja track appears", async ({ page }) => {
   await openPlayer(page, "bare.mp4");
-  const generate = page.locator("button", { hasText: "Generate ja" });
+  // "+ generate ja…" lives in the CC popover now
+  await page.locator(".vbar-cc").click();
+  const generate = page.locator(".cc-action", { hasText: "+ generate ja…" });
   await expect(generate).toBeVisible();
   await generate.click();
+  await expect(page.locator(".cc-pop")).toHaveCount(0); // popover closes
 
   const progress = page.locator(".whisper-progress");
   await expect(progress).toBeVisible();
@@ -17,7 +20,11 @@ test("whisper generate: progress UI streams, completes, ja track appears", async
     timeout: 15_000,
   });
   await expect(progress).toHaveCount(0);
-  const primary = page.getByLabel("Primary subtitle track");
-  await expect(primary).toHaveValue("sidecar:gen:ja");
-  await expect(primary.locator("option[value='sidecar:gen:ja']")).toContainText("Japanese");
+  // the freshly generated ja track is auto-selected as primary
+  await page.locator(".vbar-cc").click();
+  const pop = page.locator(".cc-pop");
+  await expect(
+    pop.locator('input[name="cc-primary"][value="sidecar:gen:ja"]'),
+  ).toBeChecked();
+  await expect(pop).toContainText("Japanese");
 });

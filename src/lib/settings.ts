@@ -14,6 +14,12 @@ export interface Settings {
    * built-in default" (see gemini.ts DEFAULT_LOOKUP_PROMPT).
    */
   lookupPrompt: string;
+  /**
+   * Override template for the sentence-explain prompt. Placeholders
+   * {sentence} {context} {secondary} {source} are substituted. Empty string
+   * means "use the built-in default" (gemini.ts DEFAULT_EXPLAIN_PROMPT).
+   */
+  explainPrompt: string;
   [key: string]: unknown;
 }
 
@@ -22,6 +28,7 @@ const DEFAULTS: Settings = {
   knownLang: "ru",
   blurSecondary: true,
   lookupPrompt: "",
+  explainPrompt: "",
 };
 
 // ZR_CONFIG_DIR override keeps tests away from the user's real settings.
