@@ -272,8 +272,23 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
         if (!entry) return err("not found", 404);
         const body = (await req.json().catch(() => ({}))) as { lang?: string };
         const lang = body.lang ?? "ja";
+        // Dedup: an active/queued job for the same file+lang is returned as-is
+        // instead of enqueuing a duplicate 20-minute transcription.
+        const existing = whisperQueue.activeFor(entry.absPath, lang);
+        if (existing) return json({ jobId: existing.id, status: existing.status });
         const job = whisperQueue.enqueue(entry.absPath, lang, sidecarPath(entry, lang));
         return json({ jobId: job.id, status: job.status });
+      }
+
+      // Active whisper job for a media id, so the UI can reattach after reload.
+      if (req.method === "GET" && path === "/api/whisper/active") {
+        const mediaId = url.searchParams.get("mediaId") ?? "";
+        const entry = library.get(mediaId);
+        if (!entry) return err("not found", 404);
+        const job = whisperQueue.activeFor(entry.absPath);
+        return json(
+          job ? { jobId: job.id, status: job.status, lang: job.lang } : { jobId: null },
+        );
       }
 
       const whisperEvents = path.match(/^\/api\/whisper\/job\/([\w-]+)\/events$/);

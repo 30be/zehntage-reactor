@@ -40,6 +40,7 @@ interface PopupState {
   anchorBottom: number; // bottom edge of the anchored word
   context: string;
   secondary?: string; // RU cue text shown at the same time (sentence panels)
+  dictForm?: string; // basic_form when it differs from the surface (e.g. 食べる)
   timestamp: number;
 }
 
@@ -118,6 +119,12 @@ export function Player({ entry, toast, settings }: Props) {
   useEffect(() => {
     autopauseRef.current = autopause;
   }, [autopause]);
+
+  // Primary-subtitle timing offset (seconds). Positive = subs appear later.
+  // Persisted per media+track; applied client-side when computing active cues.
+  const [subOffset, setSubOffset] = useState(0);
+  const subOffsetRef = useRef(0);
+  const primaryCuesRef = useRef<Cue[]>([]);
 
   const [tokens, setTokens] = useState<KToken[] | null>(null);
   const tokenizerReady = useRef(false);
@@ -303,12 +310,87 @@ export function Player({ entry, toast, settings }: Props) {
     };
   }, [entry.id, secondaryId]);
 
+  // --- subtitle offset: restore per media+track; adjust via [ / ] / \ ---
+  useEffect(() => {
+    let v = 0;
+    try {
+      v =
+        parseFloat(
+          localStorage.getItem(`zr.offset.${entry.id}.${primaryId}`) ?? "0",
+        ) || 0;
+    } catch {
+      /* ignore */
+    }
+    subOffsetRef.current = v;
+    setSubOffset(v);
+  }, [entry.id, primaryId]);
+
+  const changeOffset = useCallback(
+    (delta: number | null) => {
+      const next =
+        delta == null ? 0 : Math.round((subOffsetRef.current + delta) * 10) / 10;
+      subOffsetRef.current = next;
+      setSubOffset(next);
+      try {
+        const key = `zr.offset.${entry.id}.${primaryId}`;
+        if (next === 0) localStorage.removeItem(key);
+        else localStorage.setItem(key, String(next));
+      } catch {
+        /* ignore */
+      }
+      toast(`subs ${next >= 0 ? "+" : ""}${next.toFixed(1)}s`);
+    },
+    [entry.id, primaryId, toast],
+  );
+
+  // --- resume position: save throttled while playing, restore on metadata ---
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const posKey = `zr.pos.${entry.id}`;
+    let lastSave = 0;
+    const onTime = () => {
+      if (v.paused) return;
+      const now = Date.now();
+      if (now - lastSave < 5000) return;
+      lastSave = now;
+      try {
+        localStorage.setItem(posKey, String(v.currentTime));
+      } catch {
+        /* ignore */
+      }
+    };
+    const onMeta = () => {
+      try {
+        const saved = parseFloat(localStorage.getItem(posKey) ?? "");
+        if (
+          Number.isFinite(saved) &&
+          saved > 15 &&
+          v.duration > 0 &&
+          saved < v.duration - 30
+        ) {
+          v.currentTime = saved;
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+    v.addEventListener("timeupdate", onTime);
+    v.addEventListener("loadedmetadata", onMeta);
+    if (v.readyState >= 1) onMeta();
+    return () => {
+      v.removeEventListener("timeupdate", onTime);
+      v.removeEventListener("loadedmetadata", onMeta);
+    };
+  }, [entry.id]);
+
   // --- active cue tracking via timeupdate (+ autopause at each cue end) ---
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
     const onTime = () => {
-      const t = v.currentTime;
+      // Track-time for the PRIMARY track: subtract the user's sync offset.
+      const t = v.currentTime - subOffset;
       const idx = activeCueIndex(primaryCues, t);
       // Autopause: pause exactly at the END of the cue the user just heard.
       // By the time `idx` changes the next subtitle would already be shown, so
@@ -323,7 +405,7 @@ export function Player({ entry, toast, settings }: Props) {
           lastAutopausedIdx.current = prev;
           v.pause();
           internalSeekRef.current = true;
-          v.currentTime = Math.max(prevCue!.start, prevCue!.end - 0.08);
+          v.currentTime = Math.max(prevCue!.start, prevCue!.end - 0.08) + subOffset;
           // keep the finished cue active/rendered
           prevActiveP.current = prev;
           setActiveP(prev);
@@ -337,7 +419,7 @@ export function Player({ entry, toast, settings }: Props) {
       }
       prevActiveP.current = idx;
       setActiveP(idx);
-      setActiveS(activeCueIndex(secondaryCues, t));
+      setActiveS(activeCueIndex(secondaryCues, v.currentTime));
     };
     // Manual seeks reset the autopause guard and must not trigger a pause.
     const onSeeking = () => {
@@ -346,7 +428,7 @@ export function Player({ entry, toast, settings }: Props) {
         return;
       }
       lastAutopausedIdx.current = -1;
-      prevActiveP.current = activeCueIndex(primaryCues, v.currentTime);
+      prevActiveP.current = activeCueIndex(primaryCues, v.currentTime - subOffset);
     };
     v.addEventListener("timeupdate", onTime);
     v.addEventListener("seeking", onSeeking);
@@ -355,15 +437,28 @@ export function Player({ entry, toast, settings }: Props) {
       v.removeEventListener("timeupdate", onTime);
       v.removeEventListener("seeking", onSeeking);
     };
-  }, [primaryCues, secondaryCues]);
+  }, [primaryCues, secondaryCues, subOffset]);
+
+  // keep refs in sync for the (deps-stable) hotkey handler
+  useEffect(() => {
+    primaryCuesRef.current = primaryCues;
+  }, [primaryCues]);
+
+  // popup-open flag for the hotkey handler (Escape closes the lookup panel)
+  const popupOpenRef = useRef(false);
+  useEffect(() => {
+    popupOpenRef.current = popup != null;
+  }, [popup]);
 
   // --- global hotkeys: work regardless of focus (except real text inputs) ---
   useEffect(() => {
     const FRAME = 1 / 24; // ~one frame at 23.976/24 fps
+    const RATES = [0.5, 0.75, 1, 1.25, 1.5];
     const HANDLED = new Set([
       " ", "f", "F",
       "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
       ",", "<", ".", ">",
+      "a", "A", "-", "=", "[", "]", "\\",
     ]);
     const isTextInput = (el: Element | null): boolean => {
       if (!el) return false;
@@ -382,6 +477,19 @@ export function Player({ entry, toast, settings }: Props) {
       const active = document.activeElement;
       // Real text inputs keep their native behavior entirely.
       if (isTextInput(active) || isTextInput(e.target as Element | null)) return;
+      // Escape closes the lookup panel; otherwise leave it to native handling
+      // (exit fullscreen etc.) — never eat it for nothing.
+      if (e.key === "Escape") {
+        if (popupOpenRef.current) {
+          e.preventDefault();
+          e.stopPropagation();
+          clearCloseTimer();
+          askFocusedRef.current = false;
+          setPopup(null);
+          resumeFromHover();
+        }
+        return;
+      }
       if (!HANDLED.has(e.key)) return;
       // Avoid double-toggle on key auto-repeat for toggling keys.
       if (e.repeat && (e.key === " " || e.key === "f" || e.key === "F")) {
@@ -433,12 +541,56 @@ export function Player({ entry, toast, settings }: Props) {
           v.pause();
           v.currentTime = Math.min(v.duration || Infinity, v.currentTime + FRAME);
           break;
+        case "a":
+        case "A": {
+          // Replay: jump to the start of the current primary cue; if within
+          // the first 0.3s (or between cues), step back to the previous one —
+          // tapping `a` repeatedly walks backward cue by cue.
+          const off = subOffsetRef.current;
+          const cues = primaryCuesRef.current;
+          if (cues.length === 0) break;
+          const tt = v.currentTime - off;
+          let i = activeCueIndex(cues, tt);
+          if (i < 0) {
+            for (let k = cues.length - 1; k >= 0; k--) {
+              if (cues[k]!.start <= tt) {
+                i = k;
+                break;
+              }
+            }
+          } else if (tt - cues[i]!.start < 0.3 && i > 0) {
+            i -= 1;
+          }
+          if (i >= 0) v.currentTime = Math.max(0, cues[i]!.start + off);
+          break;
+        }
+        case "-":
+        case "=": {
+          let i = RATES.indexOf(v.playbackRate);
+          if (i === -1) i = RATES.indexOf(1);
+          i =
+            e.key === "="
+              ? (i + 1) % RATES.length
+              : (i + RATES.length - 1) % RATES.length;
+          v.playbackRate = RATES[i]!;
+          toast(`speed ${RATES[i]}×`);
+          break;
+        }
+        case "[":
+          changeOffset(-0.1);
+          break;
+        case "]":
+          changeOffset(+0.1);
+          break;
+        case "\\":
+          changeOffset(null);
+          break;
       }
     };
     // capture phase: run before any focused element's own key handling
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, []);
+  }, [changeOffset, toast, clearCloseTimer, resumeFromHover]);
 
   const primaryText = activeP >= 0 ? primaryCues[activeP]!.text : "";
   const secondaryText = activeS >= 0 ? secondaryCues[activeS]!.text : "";
@@ -482,6 +634,10 @@ export function Player({ entry, toast, settings }: Props) {
       const el = e.currentTarget as HTMLElement;
       const surface = tok.surface_form;
       const reading = tok.reading;
+      const dictForm =
+        tok.basic_form && tok.basic_form !== "*" && tok.basic_form !== surface
+          ? tok.basic_form
+          : undefined;
       openTimer.current = window.setTimeout(() => {
         openTimer.current = null;
         // Pause on hover so the learner can read at leisure; remember that WE
@@ -497,6 +653,7 @@ export function Player({ entry, toast, settings }: Props) {
           y: rect.top,
           anchorBottom: rect.bottom,
           context: ctx,
+          dictForm,
           timestamp: videoRef.current?.currentTime ?? 0,
         });
       }, HOVER_OPEN_MS);
@@ -609,10 +766,14 @@ export function Player({ entry, toast, settings }: Props) {
     // De-dup concurrent/repeat requests for the same word: share one in-flight
     // promise so sliding away and back never fires a second Gemini call.
     const surface = popup.surface;
+    // Give Gemini the dictionary form when the token is conjugated.
+    const ctx = popup.dictForm
+      ? `${popup.context}\n(dictionary form: ${popup.dictForm})`
+      : popup.context;
     let p = inflight.current.get(surface);
     if (!p) {
       p = api
-        .lookup({ word: surface, context: popup.context, source: entry.name })
+        .lookup({ word: surface, context: ctx, source: entry.name })
         .then((res) => {
           lookupCache.current.set(surface, res);
           return res;
@@ -830,13 +991,10 @@ export function Player({ entry, toast, settings }: Props) {
     }
   }, [popupFront, refreshAnki, toast]);
 
-  // --- whisper generate JP ---
-  const onGenerateJa = useCallback(async () => {
-    setWhisperBusy(true);
-    setWhisperStatus("starting…");
-    setWhisperLastEnd(0);
-    try {
-      const { jobId } = await api.whisperStart(entry.id, "ja");
+  // Attach the SSE stream of a whisper job (new or rediscovered after reload)
+  // and drive the progress UI + live cues from it.
+  const attachWhisper = useCallback(
+    (jobId: string) => {
       whisperJobRef.current = jobId;
       const liveCues: Cue[] = [];
       // Coalesce the per-cue state updates: whisper streams hundreds of cues
@@ -907,11 +1065,45 @@ export function Player({ entry, toast, settings }: Props) {
         whisperEsRef.current = null;
         setWhisperBusy(false);
       };
+    },
+    [entry.id, toast],
+  );
+
+  // --- whisper generate JP ---
+  const onGenerateJa = useCallback(async () => {
+    setWhisperBusy(true);
+    setWhisperStatus("starting…");
+    setWhisperLastEnd(0);
+    try {
+      // Server dedups: an already-active job for this file returns its id.
+      const { jobId } = await api.whisperStart(entry.id, "ja");
+      attachWhisper(jobId);
     } catch (e) {
       setWhisperBusy(false);
       toast(`Whisper start failed: ${e instanceof Error ? e.message : e}`);
     }
-  }, [entry.id, toast]);
+  }, [entry.id, toast, attachWhisper]);
+
+  // Rediscover a running whisper job after a page reload and reattach its SSE
+  // so the progress UI resumes instead of offering a duplicate Generate.
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .whisperActive(entry.id)
+      .then((r) => {
+        if (cancelled || !r.jobId) return;
+        setWhisperBusy(true);
+        setWhisperStatus(r.status ?? "running");
+        setWhisperLastEnd(0);
+        attachWhisper(r.jobId);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      whisperEsRef.current?.close();
+      whisperEsRef.current = null;
+    };
+  }, [entry.id, attachWhisper]);
 
   const onCancelWhisper = useCallback(async () => {
     if (whisperJobRef.current) await api.whisperCancel(whisperJobRef.current);
@@ -959,6 +1151,7 @@ export function Player({ entry, toast, settings }: Props) {
                     wordIndex,
                     tok.surface_form,
                     tok.reading,
+                    tok.basic_form,
                   );
                   const known = front != null;
                   const color = known

@@ -170,6 +170,10 @@ export const api = {
   ankiDelete: (front: string) => jpost<{ ok: boolean }>("/api/anki/delete", { front }),
   whisperStart: (id: string, lang: string) =>
     jpost<{ jobId: string; status: string }>(`/api/whisper/${id}`, { lang }),
+  whisperActive: (id: string) =>
+    jget<{ jobId: string | null; status?: string; lang?: string }>(
+      `/api/whisper/active?mediaId=${id}`,
+    ),
   whisperCancel: (jobId: string) =>
     jpost<{ ok: boolean }>(`/api/whisper/job/${jobId}/cancel`, {}),
   whisperEventsUrl: (jobId: string) => `/api/whisper/job/${jobId}/events`,

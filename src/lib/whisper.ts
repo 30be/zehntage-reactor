@@ -57,17 +57,24 @@ class WhisperQueue {
     return [...this.jobs.values()];
   }
 
-  /** True if a non-finished job exists for this media path. */
-  hasActiveFor(mediaPath: string): boolean {
+  /** The active (queued/extracting/running) job for this media path, if any.
+   * Optionally narrowed to a language. */
+  activeFor(mediaPath: string, lang?: string): WhisperJob | undefined {
     for (const j of this.jobs.values()) {
       if (
         j.mediaPath === mediaPath &&
+        (lang == null || j.lang === lang) &&
         (j.status === "queued" || j.status === "extracting" || j.status === "running")
       ) {
-        return true;
+        return j;
       }
     }
-    return false;
+    return undefined;
+  }
+
+  /** True if a non-finished job exists for this media path. */
+  hasActiveFor(mediaPath: string): boolean {
+    return this.activeFor(mediaPath) !== undefined;
   }
 
   enqueue(mediaPath: string, lang: string, outPath: string): WhisperJob {

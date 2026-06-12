@@ -26,11 +26,14 @@ export function buildWordIndex(
   return { byKey, progress };
 }
 
-/** Find the matching Anki front for a surface form (+ optional reading). */
+/** Find the matching Anki front for a surface form (+ optional reading).
+ * Falls back to the dictionary form (basic_form) so conjugated tokens like
+ * 食べた still match a 食べる card. */
 export function matchFront(
   idx: WordIndex,
   surface: string,
   reading?: string,
+  basicForm?: string,
 ): string | null {
   if (idx.byKey.has(surface)) return idx.byKey.get(surface)!;
   if (reading) {
@@ -39,6 +42,9 @@ export function matchFront(
     if (idx.byKey.has(withReading)) return idx.byKey.get(withReading)!;
     if (idx.byKey.has(`${surface} [${reading}]`))
       return idx.byKey.get(`${surface} [${reading}]`)!;
+  }
+  if (basicForm && basicForm !== "*" && basicForm !== surface) {
+    if (idx.byKey.has(basicForm)) return idx.byKey.get(basicForm)!;
   }
   return null;
 }

@@ -81,6 +81,16 @@ function fmtCueTime(t: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+/** Saved resume position (seconds) from localStorage, or null. */
+function savedPos(id: string): number | null {
+  try {
+    const v = parseFloat(localStorage.getItem(`zr.pos.${id}`) ?? "");
+    return Number.isFinite(v) && v > 0 ? v : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Per-entry status badge text from the batch status, or null. */
 function entryBadge(status: BatchStatus | null, entryId: string): string | null {
   if (!status) return null;
@@ -182,6 +192,12 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
             <div className="name">{e.name}</div>
             <div className="meta">
               {e.relPath} · {fmtSize(e.size)}
+              {(() => {
+                const p = savedPos(e.id);
+                return p != null ? (
+                  <span className="resume-hint"> · ▶ {fmtCueTime(p)}</span>
+                ) : null;
+              })()}
             </div>
             <div className="badges">
               {e.subLangs.length === 0 && <span className="badge">no subs</span>}
@@ -243,7 +259,7 @@ function PlayerRoute({
       <button className="btn ghost sm" onClick={() => go("#/")} style={{ marginBottom: 12 }}>
         ← Library
       </button>
-      <Player entry={entry} toast={toast} settings={settings} />
+      <Player key={entry.id} entry={entry} toast={toast} settings={settings} />
     </>
   );
 }

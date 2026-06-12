@@ -340,3 +340,9 @@ textarea.prompt {
   outline: none;
 }
 .lookup .ask-input::placeholder { color: #71717a; }
+
+/* Library card resume-position hint ("▶ 12:34") */
+.resume-hint {
+  opacity: 0.65;
+  white-space: nowrap;
+}
