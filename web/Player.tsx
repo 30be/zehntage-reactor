@@ -17,10 +17,11 @@ import {
   type ExplainResult,
 } from "./api.ts";
 import { activeCueIndex, contextAround } from "./cues.ts";
-import { getTokenizer, type KToken } from "./tokenizer.ts";
-import { buildWordIndex, type WordIndex } from "./progress.ts";
+import { getTokenizer, isLexical, kataToHira, type KToken } from "./tokenizer.ts";
+import { buildWordIndex, matchFront, type WordIndex } from "./progress.ts";
 import { TokenLine, wordKey } from "./TokenLine.tsx";
 import { Sidebar } from "./Sidebar.tsx";
+import { freqRank, freqRankOf, freqTier, loadFreq } from "./freq.ts";
 
 interface Props {
   entry: LibraryEntry;
@@ -44,6 +45,21 @@ interface PopupState {
 interface QaItem {
   q: string;
   a: string | null; // null while loading
+}
+
+// One unknown word in the pre-study (`w`) panel.
+interface PreStudyItem {
+  lemma: string; // dictionary form (wordKey) — what gets added to Anki
+  reading?: string; // hiragana
+  rank: number | null; // frequency rank, null = not in the 30k list
+  context: string; // cue text where the word first appears
+  checked: boolean;
+  added: boolean;
+}
+
+interface PreStudyState {
+  loading: boolean;
+  items: PreStudyItem[];
 }
 
 const STORAGE_PREFIX = "zr.tracks.";
@@ -178,6 +194,22 @@ export function Player({ entry, toast, settings }: Props) {
     buildWordIndex([], {}),
   );
   const [knownFronts, setKnownFronts] = useState<Set<string>>(new Set());
+  const wordIndexRef = useRef<WordIndex>(buildWordIndex([], {}));
+  useEffect(() => {
+    wordIndexRef.current = wordIndex;
+  }, [wordIndex]);
+
+  // --- frequency ranks (lazy-loaded /freq.json) for the popup tag + pre-study ---
+  const [freqMap, setFreqMap] = useState<Map<string, number> | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void loadFreq()
+      .then((m) => !cancelled && setFreqMap(m))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // --- local mark-as-known set (no Anki): zr.known, toggled with `k` ---
   const [knownWords, setKnownWords] = useState<Set<string>>(() => {
@@ -207,6 +239,92 @@ export function Player({ entry, toast, settings }: Props) {
   }, []);
   // word the cursor currently rests on (for the `k` hotkey before any popup)
   const hoveredKeyRef = useRef<string | null>(null);
+
+  // --- pre-study panel (`w`): unknown lemmas in the next 10 minutes ---
+  const [preStudy, setPreStudy] = useState<PreStudyState | null>(null);
+  const preStudyOpenRef = useRef(false);
+  useEffect(() => {
+    preStudyOpenRef.current = preStudy != null;
+  }, [preStudy]);
+  const [preBusy, setPreBusy] = useState(false);
+  const [preProg, setPreProg] = useState(0);
+  // synchronous reentrance guard: `preBusy` state can be stale for a second
+  // click that lands before React re-renders the disabled button
+  const preBusyRef = useRef(false);
+  // lets the bulk-add loop stop firing requests after the Player unmounts
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const buildPreStudy = useCallback(async () => {
+    const v = videoRef.current;
+    const t = v ? v.currentTime - subOffsetRef.current : 0;
+    const cues = primaryCuesRef.current.filter(
+      (c) => c.end >= t && c.start <= t + 600,
+    );
+    const [tok, freq] = await Promise.all([
+      getTokenizer(),
+      loadFreq().catch(() => new Map<string, number>()),
+    ]);
+    const seen = new Map<string, PreStudyItem>();
+    for (const cue of cues) {
+      for (const tk of tok.tokenize(cue.text)) {
+        if (!isLexical(tk)) continue;
+        // particles/auxiliaries aren't study material
+        if (tk.pos === "助詞" || tk.pos === "助動詞") continue;
+        const key = wordKey(tk);
+        if (seen.has(key)) continue;
+        if (knownWordsRef.current.has(key)) continue;
+        if (
+          matchFront(
+            wordIndexRef.current,
+            tk.surface_form,
+            tk.reading,
+            tk.basic_form,
+          ) != null
+        )
+          continue;
+        seen.set(key, {
+          lemma: key,
+          reading: tk.reading ? kataToHira(tk.reading) : undefined,
+          rank: freqRank(freq, tk),
+          context: cue.text,
+          checked: true,
+          added: false,
+        });
+      }
+    }
+    const items = [...seen.values()].sort(
+      (a, b) => (a.rank ?? Infinity) - (b.rank ?? Infinity),
+    );
+    // only fill in if the panel is still open
+    setPreStudy((prev) => (prev ? { loading: false, items } : prev));
+  }, []);
+
+  const togglePreStudy = useCallback(() => {
+    setPreStudy((prev) => {
+      if (prev) return null;
+      void buildPreStudy();
+      return { loading: true, items: [] };
+    });
+  }, [buildPreStudy]);
+
+  const togglePreItem = useCallback((lemma: string) => {
+    setPreStudy((prev) =>
+      prev
+        ? {
+            ...prev,
+            items: prev.items.map((it) =>
+              it.lemma === lemma ? { ...it, checked: !it.checked } : it,
+            ),
+          }
+        : prev,
+    );
+  }, []);
 
   // --- shadowing loop (`s`): kept in refs to avoid re-renders on every cue ---
   // idx = primary-cue index being looped; remaining = repeats left (Infinity
@@ -775,7 +893,7 @@ export function Player({ entry, toast, settings }: Props) {
       ",", "<", ".", ">",
       "a", "A", "-", "=", "[", "]", "\\",
       "l", "L", "k", "K",
-      "Tab", "s", "S", "h", "H", "n", "N", "p", "P",
+      "Tab", "s", "S", "h", "H", "n", "N", "p", "P", "w", "W",
     ]);
     const isTextInput = (el: Element | null): boolean => {
       if (!el) return false;
@@ -800,6 +918,12 @@ export function Player({ entry, toast, settings }: Props) {
       // Escape closes the lookup panel; otherwise leave it to native handling
       // (exit fullscreen etc.) — never eat it for nothing.
       if (e.key === "Escape") {
+        if (preStudyOpenRef.current) {
+          e.preventDefault();
+          e.stopPropagation();
+          setPreStudy(null);
+          return;
+        }
         if (popupOpenRef.current) {
           e.preventDefault();
           e.stopPropagation();
@@ -825,7 +949,7 @@ export function Player({ entry, toast, settings }: Props) {
       }
       if (!HANDLED.has(e.key)) return;
       // Avoid double-toggle on key auto-repeat for toggling keys.
-      if (e.repeat && [" ", "f", "F", "l", "L", "k", "K", "s", "S", "h", "H", "n", "N", "p", "P"].includes(e.key)) {
+      if (e.repeat && [" ", "f", "F", "l", "L", "k", "K", "s", "S", "h", "H", "n", "N", "p", "P", "w", "W"].includes(e.key)) {
         e.preventDefault();
         e.stopPropagation();
         return;
@@ -983,6 +1107,10 @@ export function Player({ entry, toast, settings }: Props) {
         case "H":
           toggleHardMode();
           break;
+        case "w":
+        case "W":
+          togglePreStudy();
+          break;
         case "n":
         case "N":
           void gotoEpisode(1);
@@ -1006,7 +1134,7 @@ export function Player({ entry, toast, settings }: Props) {
     // capture phase: run before any focused element's own key handling
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [changeOffset, toast, clearCloseTimer, resumeFromHover, toggleSidebar, toggleKnown, toggleHardMode, gotoEpisode]);
+  }, [changeOffset, toast, clearCloseTimer, resumeFromHover, toggleSidebar, toggleKnown, toggleHardMode, gotoEpisode, togglePreStudy]);
 
   const primaryText = activeP >= 0 && activeP < displayCues.length ? displayCues[activeP]!.text : "";
   const secondaryText = activeS >= 0 ? secondaryCues[activeS]!.text : "";
@@ -1038,6 +1166,61 @@ export function Player({ entry, toast, settings }: Props) {
     setWordIndex(buildWordIndex(anki.words, anki.progress));
     setKnownFronts(new Set(anki.words.map((w) => w.front)));
   }, []);
+
+  // Pre-study bulk add: text-only lookup then a LIGHT Anki add (no mediaId /
+  // timestamp → server skips frame + audio capture), sequentially per word.
+  const onBulkAdd = useCallback(async () => {
+    if (preBusyRef.current) return;
+    const todo = preStudy?.items.filter((it) => it.checked && !it.added) ?? [];
+    if (todo.length === 0) return;
+    preBusyRef.current = true;
+    setPreBusy(true);
+    setPreProg(0);
+    let done = 0;
+    let failed = 0;
+    for (const it of todo) {
+      // Abort the remaining sequence when the panel was closed (Esc/`w`/
+      // Close) or the Player unmounted — don't keep firing lookups/adds
+      // into the void. Words already added stay added.
+      if (!mountedRef.current || !preStudyOpenRef.current) break;
+      try {
+        const lk = await lookupApi({
+          word: it.lemma,
+          context: it.context,
+          source: entry.name,
+        });
+        await (api.ankiAdd as (p: Record<string, unknown>) => Promise<unknown>)({
+          word: it.lemma,
+          reading: lk.reading || it.reading || "",
+          translation: lk.translation,
+          notes: lk.notes,
+          context: it.context,
+        });
+        // optimistic known-marking (front format matches the server's card)
+        const front = lk.reading ? `${it.lemma} [${lk.reading}]` : it.lemma;
+        setKnownFronts((prev) => new Set(prev).add(front));
+        setPreStudy((prev) =>
+          prev
+            ? {
+                ...prev,
+                items: prev.items.map((p) =>
+                  p.lemma === it.lemma ? { ...p, added: true } : p,
+                ),
+              }
+            : prev,
+        );
+      } catch {
+        failed++;
+      }
+      done++;
+      setPreProg(done);
+    }
+    preBusyRef.current = false;
+    if (!mountedRef.current) return;
+    setPreBusy(false);
+    if (failed > 0) toast(`added ${done - failed}/${todo.length} (${failed} failed)`);
+    void refreshAnki();
+  }, [preStudy, entry.name, toast, refreshAnki]);
 
   // --- word hover -> popup + lookup (with ~200ms hover-intent debounce) ---
   // We only OPEN the popup (and fire the lookup) once the cursor RESTS on a
@@ -1803,6 +1986,11 @@ export function Player({ entry, toast, settings }: Props) {
             {(lookup?.reading || popup.reading) && (
               <span className="reading">{lookup?.reading || popup.reading}</span>
             )}
+            {freqMap && (
+              <span className="freq-tag">
+                {freqTier(freqRankOf(freqMap, popup.surface, popup.dictForm))}
+              </span>
+            )}
             {knownWords.has(popup.dictForm ?? popup.surface) && (
               <span
                 className="known-flag"
@@ -1884,6 +2072,62 @@ export function Player({ entry, toast, settings }: Props) {
               else if (e.key === "Escape") closePanel();
             }}
           />
+        </div>
+      )}
+
+      {preStudy && (
+        <div className="lookup prestudy">
+          <div className="prestudy-head">
+            <span className="word">pre-study</span>
+            <span className="prestudy-sub">
+              next 10 min
+              {!preStudy.loading && ` · ${preStudy.items.length} new`}
+            </span>
+          </div>
+          <div className="prestudy-list">
+            {preStudy.loading && <div className="spin">scanning…</div>}
+            {!preStudy.loading && preStudy.items.length === 0 && (
+              <div className="spin">nothing new</div>
+            )}
+            {preStudy.items.map((it) => (
+              <label
+                key={it.lemma}
+                className={`prestudy-row${it.added ? " added" : ""}`}
+              >
+                <input
+                  type="checkbox"
+                  checked={it.checked}
+                  disabled={it.added || preBusy}
+                  onChange={() => togglePreItem(it.lemma)}
+                />
+                <span className="ps-word">{it.lemma}</span>
+                {it.reading && it.reading !== it.lemma && (
+                  <span className="ps-reading">{it.reading}</span>
+                )}
+                <span className="freq-tag">{freqTier(it.rank)}</span>
+                {it.added && <span className="ps-added">✓</span>}
+              </label>
+            ))}
+          </div>
+          {(() => {
+            const todo = preStudy.items.filter((i) => i.checked && !i.added);
+            return (
+              <div className="row">
+                <button
+                  className="btn"
+                  disabled={preBusy || todo.length === 0}
+                  onClick={() => void onBulkAdd()}
+                >
+                  {preBusy
+                    ? `Adding… ${preProg}`
+                    : `Add ${todo.length} to Anki`}
+                </button>
+                <button className="btn" onClick={() => setPreStudy(null)}>
+                  Close
+                </button>
+              </div>
+            );
+          })()}
         </div>
       )}
       </div>

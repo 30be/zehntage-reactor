@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type BatchStatus, type LibraryEntry } from "./api.ts";
 import { Player } from "./Player.tsx";
+import { computeCoverage, readKnownWords, type Coverage } from "./coverage.ts";
+import { buildWordIndex } from "./progress.ts";
 
 type Route =
   | { name: "library" }
@@ -117,10 +119,62 @@ function entryBadge(status: BatchStatus | null, entryId: string): string | null 
   return null;
 }
 
+/** Idle-time helper: resolves in an idle slice (setTimeout fallback). */
+function idle(signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    // Resolve immediately when aborted — a never-settling promise would leave
+    // the caller's async loop suspended forever. Callers re-check the signal.
+    if (signal.aborted) return resolve();
+    if (typeof requestIdleCallback === "function")
+      requestIdleCallback(() => resolve(), { timeout: 2000 });
+    else setTimeout(resolve, 200);
+  });
+}
+
 function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) => void }) {
   const [entries, setEntries] = useState<LibraryEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<BatchStatus | null>(null);
+  // entryId -> coverage ("82% · 47 new"); null = computed but no ja track
+  const [coverage, setCoverage] = useState<Map<string, Coverage | null>>(
+    () => new Map(),
+  );
+
+  // Auto-compute episode coverage in idle time: one episode at a time, only
+  // entries with subs, abortable on unmount. Never blocks the UI.
+  useEffect(() => {
+    if (!entries || entries.length === 0) return;
+    const ctrl = new AbortController();
+    const { signal } = ctrl;
+    void (async () => {
+      const anki = await api
+        .ankiWords()
+        .catch(() => ({ words: [], progress: {} }));
+      if (signal.aborted) return;
+      const wordIndex = buildWordIndex(anki.words, anki.progress);
+      const known = readKnownWords();
+      for (const e of entries) {
+        if (signal.aborted) return;
+        if (e.subLangs.length === 0) continue;
+        await idle(signal);
+        if (signal.aborted) return;
+        try {
+          const cov = await computeCoverage(
+            e.id,
+            wordIndex,
+            known,
+            anki.words.length,
+            signal,
+          );
+          if (signal.aborted) return;
+          setCoverage((prev) => new Map(prev).set(e.id, cov));
+        } catch {
+          /* skip this entry — tokenizer/network hiccup */
+        }
+      }
+    })();
+    return () => ctrl.abort();
+  }, [entries]);
 
   const loadEntries = useCallback(() => {
     void api
@@ -186,6 +240,14 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
                 const p = savedPos(e.id);
                 return p != null ? (
                   <span className="resume-hint"> · ▶ {fmtCueTime(p)}</span>
+                ) : null;
+              })()}
+              {(() => {
+                const c = coverage.get(e.id);
+                return c ? (
+                  <span className="cov-hint">
+                    {" "}· {c.pct}% · {c.newCount} new
+                  </span>
                 ) : null;
               })()}
             </div>
