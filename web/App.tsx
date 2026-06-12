@@ -3,15 +3,23 @@ import { api, type BatchStatus, type LibraryEntry } from "./api.ts";
 import { Player } from "./Player.tsx";
 import { computeCoverage, readKnownWords, type Coverage } from "./coverage.ts";
 import { buildWordIndex } from "./progress.ts";
+import { kataToHira } from "./tokenizer.ts";
 
 type Route =
   | { name: "library" }
-  | { name: "player"; id: string }
+  | { name: "player"; id: string; t?: number }
   | { name: "settings" };
 
 function parseHash(): Route {
   const h = window.location.hash.replace(/^#\/?/, "");
-  if (h.startsWith("play/")) return { name: "player", id: h.slice("play/".length) };
+  if (h.startsWith("play/")) {
+    // "#/play/<id>" or "#/play/<id>@123.4" (seek after load)
+    const rest = h.slice("play/".length);
+    const at = rest.indexOf("@");
+    const id = at >= 0 ? rest.slice(0, at) : rest;
+    const t = at >= 0 ? parseFloat(rest.slice(at + 1)) : NaN;
+    return { name: "player", id, ...(Number.isFinite(t) && t >= 0 ? { t } : {}) };
+  }
   if (h === "settings") return { name: "settings" };
   return { name: "library" };
 }
@@ -75,7 +83,13 @@ export function App() {
           <Settings settings={settings} setSettings={setSettings} toast={toast} go={go} />
         )}
         {route.name === "player" && (
-          <PlayerRoute id={route.id} toast={toast} settings={settings} go={go} />
+          <PlayerRoute
+            id={route.id}
+            startAt={route.t}
+            toast={toast}
+            settings={settings}
+            go={go}
+          />
         )}
       </main>
 
@@ -131,8 +145,52 @@ function idle(signal: AbortSignal): Promise<void> {
   });
 }
 
+interface SearchHit {
+  mediaId: string;
+  name: string;
+  start: number;
+  text: string;
+}
+
+/** Wrap the matched substring in <mark>, using the same katakana→hiragana
+ * normalization as the server (1:1 length-preserving). */
+function highlightMatch(text: string, q: string): React.ReactNode {
+  const nq = kataToHira(q.trim().toLowerCase());
+  if (!nq) return text;
+  const i = kataToHira(text.toLowerCase()).indexOf(nq);
+  if (i < 0) return text;
+  return (
+    <>
+      {text.slice(0, i)}
+      <mark>{text.slice(i, i + nq.length)}</mark>
+      {text.slice(i + nq.length)}
+    </>
+  );
+}
+
 function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) => void }) {
   const [entries, setEntries] = useState<LibraryEntry[] | null>(null);
+  // --- transcript search (debounced 300ms; Esc clears) ---
+  const [query, setQuery] = useState("");
+  const [hits, setHits] = useState<SearchHit[] | null>(null);
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) {
+      setHits(null);
+      return;
+    }
+    let cancelled = false;
+    const t = window.setTimeout(() => {
+      void fetch(`/api/search?q=${encodeURIComponent(q)}`)
+        .then((r) => (r.ok ? (r.json() as Promise<SearchHit[]>) : []))
+        .then((res) => !cancelled && setHits(res))
+        .catch(() => !cancelled && setHits([]));
+    }, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, [query]);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<BatchStatus | null>(null);
   // entryId -> coverage ("82% · 47 new"); null = computed but no ja track
@@ -225,6 +283,33 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
   return (
     <>
       <h1 className="h1">Library</h1>
+      <input
+        className="search-input"
+        type="text"
+        placeholder="search transcripts…"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") setQuery("");
+        }}
+      />
+      {hits != null && (
+        <div className="search-results">
+          {hits.length === 0 && <div className="muted">no matches</div>}
+          {hits.map((h, i) => (
+            <div
+              key={`${h.mediaId}:${h.start}:${i}`}
+              className="search-hit"
+              onClick={() => go(`#/play/${h.mediaId}@${h.start}`)}
+            >
+              <span className="search-meta">
+                {h.name.replace(/\.[^.]+$/, "")} · {fmtCueTime(h.start)}
+              </span>{" "}
+              {highlightMatch(h.text, query)}
+            </div>
+          ))}
+        </div>
+      )}
       <div className="batchbar">
         <button className="btn sm" onClick={() => void onBatchAll()}>
           Generate all (ja + ru)
@@ -272,11 +357,13 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
 
 function PlayerRoute({
   id,
+  startAt,
   toast,
   settings,
   go,
 }: {
   id: string;
+  startAt?: number;
   toast: (m: string) => void;
   settings: Record<string, unknown>;
   go: (h: string) => void;
@@ -311,7 +398,13 @@ function PlayerRoute({
       <button className="btn ghost sm" onClick={() => go("#/")} style={{ marginBottom: 12 }}>
         ← Library
       </button>
-      <Player key={entry.id} entry={entry} toast={toast} settings={settings} />
+      <Player
+        key={entry.id}
+        entry={entry}
+        startAt={startAt}
+        toast={toast}
+        settings={settings}
+      />
     </>
   );
 }

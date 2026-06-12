@@ -25,6 +25,8 @@ import { freqRank, freqRankOf, freqTier, loadFreq } from "./freq.ts";
 
 interface Props {
   entry: LibraryEntry;
+  /** Initial seek (seconds) from a "#/play/<id>@t" deep link — wins over resume. */
+  startAt?: number;
   toast: (msg: string) => void;
   settings: Record<string, unknown>;
 }
@@ -147,7 +149,7 @@ const fmtTime = (s: number): string => {
 const isJaLang = (l: string) => l === "ja" || l === "jpn" || l.startsWith("ja");
 const isRuLang = (l: string) => l === "ru" || l === "rus" || l.startsWith("ru");
 
-export function Player({ entry, toast, settings }: Props) {
+export function Player({ entry, startAt, toast, settings }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   // The stage wraps the video + subtitle overlay + lookup popup; fullscreen
   // targets THIS element so the overlays stay visible in fullscreen.
@@ -161,6 +163,11 @@ export function Player({ entry, toast, settings }: Props) {
   const [activeP, setActiveP] = useState(-1);
   const [activeS, setActiveS] = useState(-1);
   const [secShow, setSecShow] = useState(false);
+  // RU-blur: hold `b` = temporary unblur; quick double-press `b` = session toggle.
+  const [secHold, setSecHold] = useState(false);
+  const [blurOff, setBlurOff] = useState(false);
+  const blurOffRef = useRef(false);
+  const lastBDownRef = useRef(0);
   const [autopause, setAutopause] = useState(false);
   const autopauseRef = useRef(false);
   const prevActiveP = useRef(-1);
@@ -638,6 +645,24 @@ export function Player({ entry, toast, settings }: Props) {
   );
 
   // --- resume position: save throttled while playing, restore on metadata ---
+  // A deep-link start time (#/play/<id>@t) wins over the saved position, once.
+  const startAtRef = useRef<number | null>(
+    typeof startAt === "number" && Number.isFinite(startAt) && startAt >= 0
+      ? startAt
+      : null,
+  );
+  // Re-navigating to the same episode with a new "@t" doesn't remount the
+  // Player (key={entry.id} is unchanged), so consume prop changes here too.
+  useEffect(() => {
+    if (!(typeof startAt === "number" && Number.isFinite(startAt) && startAt >= 0)) return;
+    const v = videoRef.current;
+    if (v && v.readyState >= 1) {
+      v.currentTime = Math.min(v.duration || Infinity, startAt);
+      startAtRef.current = null;
+    } else {
+      startAtRef.current = startAt; // metadata not loaded yet — onMeta seeks
+    }
+  }, [startAt]);
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
@@ -655,6 +680,11 @@ export function Player({ entry, toast, settings }: Props) {
       }
     };
     const onMeta = () => {
+      if (startAtRef.current != null) {
+        v.currentTime = Math.min(v.duration || Infinity, startAtRef.current);
+        startAtRef.current = null;
+        return;
+      }
       try {
         const saved = parseFloat(localStorage.getItem(posKey) ?? "");
         if (
@@ -894,6 +924,7 @@ export function Player({ entry, toast, settings }: Props) {
       "a", "A", "-", "=", "[", "]", "\\",
       "l", "L", "k", "K",
       "Tab", "s", "S", "h", "H", "n", "N", "p", "P", "w", "W",
+      "b", "B", "i", "I",
     ]);
     const isTextInput = (el: Element | null): boolean => {
       if (!el) return false;
@@ -949,7 +980,7 @@ export function Player({ entry, toast, settings }: Props) {
       }
       if (!HANDLED.has(e.key)) return;
       // Avoid double-toggle on key auto-repeat for toggling keys.
-      if (e.repeat && [" ", "f", "F", "l", "L", "k", "K", "s", "S", "h", "H", "n", "N", "p", "P", "w", "W"].includes(e.key)) {
+      if (e.repeat && [" ", "f", "F", "l", "L", "k", "K", "s", "S", "h", "H", "n", "N", "p", "P", "w", "W", "b", "B", "i", "I"].includes(e.key)) {
         e.preventDefault();
         e.stopPropagation();
         return;
@@ -1119,6 +1150,33 @@ export function Player({ entry, toast, settings }: Props) {
         case "P":
           void gotoEpisode(-1);
           break;
+        case "b":
+        case "B": {
+          // hold = temporary unblur; quick double-press toggles for the session
+          const now = Date.now();
+          if (now - lastBDownRef.current < 350) {
+            const next = !blurOffRef.current;
+            blurOffRef.current = next;
+            setBlurOff(next);
+            toast(next ? "blur off" : "blur on");
+          }
+          lastBDownRef.current = now;
+          setSecHold(true);
+          break;
+        }
+        case "i":
+        case "I": {
+          if (document.pictureInPictureElement) {
+            void document.exitPictureInPicture().catch(() => {});
+          } else if (typeof v.requestPictureInPicture === "function") {
+            v.requestPictureInPicture().catch((err: unknown) =>
+              toast(`PiP failed: ${err instanceof Error ? err.message : err}`),
+            );
+          } else {
+            toast("PiP unsupported");
+          }
+          break;
+        }
         case "k":
         case "K": {
           // toggle mark-as-known for the popup word or the hovered word
@@ -1131,9 +1189,21 @@ export function Player({ entry, toast, settings }: Props) {
         }
       }
     };
+    // keyup re-blurs the secondary line after a `b` hold (harmless elsewhere)
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === "b" || e.key === "B") setSecHold(false);
+    };
+    // alt-tab / focus loss while `b` is held: keyup never arrives — re-blur.
+    const onWinBlur = () => setSecHold(false);
     // capture phase: run before any focused element's own key handling
     window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
+    window.addEventListener("keyup", onKeyUp, true);
+    window.addEventListener("blur", onWinBlur);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+      window.removeEventListener("blur", onWinBlur);
+    };
   }, [changeOffset, toast, clearCloseTimer, resumeFromHover, toggleSidebar, toggleKnown, toggleHardMode, gotoEpisode, togglePreStudy]);
 
   const primaryText = activeP >= 0 && activeP < displayCues.length ? displayCues[activeP]!.text : "";
@@ -1858,6 +1928,72 @@ export function Player({ entry, toast, settings }: Props) {
   // hiding lives in TokenLine (shared by the overlay and the sidebar).
   const furiganaOn = settings.furigana !== false;
 
+  // --- dialogue-density strip: 2s bins, alpha = speech seconds per bin ---
+  const densityCanvasRef = useRef<HTMLCanvasElement>(null);
+  const densityMarkerRef = useRef<HTMLDivElement>(null);
+  const hasDensity = displayCues.length > 0 && videoDuration > 0;
+  useEffect(() => {
+    const c = densityCanvasRef.current;
+    if (!c || !hasDensity) return;
+    const BIN = 2;
+    const nBins = Math.max(1, Math.ceil(videoDuration / BIN));
+    const speech = new Float32Array(nBins);
+    for (const cue of displayCues) {
+      const s = Math.max(0, cue.start);
+      const e = Math.min(videoDuration, cue.end);
+      for (let b = Math.max(0, Math.floor(s / BIN)); b < nBins && b * BIN < e; b++) {
+        speech[b] =
+          (speech[b] ?? 0) +
+          Math.max(0, Math.min(e, (b + 1) * BIN) - Math.max(s, b * BIN));
+      }
+    }
+    const draw = () => {
+      const dpr = window.devicePixelRatio || 1;
+      const cssW = c.clientWidth || 640;
+      c.width = Math.max(1, Math.round(cssW * dpr));
+      c.height = Math.max(1, Math.round(4 * dpr));
+      const ctx = c.getContext("2d");
+      if (!ctx) return;
+      ctx.fillStyle = "rgba(0,0,0,0.6)";
+      ctx.fillRect(0, 0, c.width, c.height);
+      const px = c.width / nBins;
+      for (let b = 0; b < nBins; b++) {
+        const a = Math.min(1, speech[b]! / BIN);
+        if (a <= 0.01) continue;
+        ctx.fillStyle = `rgba(255,255,255,${(0.9 * a).toFixed(3)})`;
+        ctx.fillRect(b * px, 0, Math.ceil(px), c.height);
+      }
+    };
+    draw();
+    // redraw at the new CSS width on layout changes (fullscreen, resize) —
+    // otherwise the bitmap keeps its old width and stretches blurry.
+    const ro = new ResizeObserver(draw);
+    ro.observe(c);
+    return () => ro.disconnect();
+  }, [displayCues, videoDuration, hasDensity]);
+  // current-position marker: cheap direct-DOM left% update, no React re-render
+  useEffect(() => {
+    const v = videoRef.current;
+    const m = densityMarkerRef.current;
+    if (!v || !m || !hasDensity) return;
+    const upd = () => {
+      if (v.duration > 0)
+        m.style.left = `${(v.currentTime / v.duration) * 100}%`;
+    };
+    v.addEventListener("timeupdate", upd);
+    upd();
+    return () => v.removeEventListener("timeupdate", upd);
+  }, [hasDensity, entry.id]);
+  const onDensityClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const v = videoRef.current;
+    if (!v || !(v.duration > 0)) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    v.currentTime = Math.max(
+      0,
+      Math.min(v.duration, ((e.clientX - r.left) / r.width) * v.duration),
+    );
+  }, []);
+
   const sidebarSeek = useCallback((t: number) => {
     const v = videoRef.current;
     if (v) v.currentTime = Math.min(v.duration || Infinity, Math.max(0, t));
@@ -1921,7 +2057,7 @@ export function Player({ entry, toast, settings }: Props) {
           </div>
           {secondaryText && (
             <div
-              className={`sub-secondary${secShow ? " show" : ""}`}
+              className={`sub-secondary${secShow || secHold || blurOff ? " show" : ""}`}
               onMouseEnter={() => {
                 secondaryHoveredRef.current = true;
                 setSecShow(true);
@@ -1937,6 +2073,17 @@ export function Player({ entry, toast, settings }: Props) {
             </div>
           )}
         </div>
+        {hasDensity && (
+          <>
+            <canvas
+              ref={densityCanvasRef}
+              className="density-strip"
+              title="Dialogue density — click to seek"
+              onClick={onDensityClick}
+            />
+            <div ref={densityMarkerRef} className="density-marker" />
+          </>
+        )}
       {popup && (
         <div
           ref={lookupRef}

@@ -1,6 +1,7 @@
 // zehntage-reactor HTTP server (Bun.serve).
 
 import { extname, join, dirname, basename } from "node:path";
+import { stat } from "node:fs/promises";
 import {
   Library,
   subLangsFor,
@@ -267,6 +268,68 @@ async function chainGenerateAll(
   return "translate";
 }
 
+// --- transcript search (lazy per-entry index over the best ja track) ---
+
+/** katakana → hiragana (1:1 codepoint shift), for normalized matching. */
+function kataToHira(s: string): string {
+  return s.replace(/[ァ-ヶ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60));
+}
+
+function searchNorm(s: string): string {
+  return kataToHira(s.toLowerCase());
+}
+
+interface SearchIndexEntry {
+  key: string; // trackId|mtime — invalidates when the ja track changes
+  lines: { start: number; text: string; norm: string }[];
+}
+
+const searchIndex = new Map<string, SearchIndexEntry>();
+const SEARCH_INDEX_MAX = 64; // ~entries cached; a 25-min episode ≈ a few hundred KB
+
+/** Latest mtime among the video and its ja sidecars (cache invalidation). */
+async function jaMtime(entry: LibraryEntry): Promise<number> {
+  let mt = (await stat(entry.absPath).catch(() => null))?.mtimeMs ?? 0;
+  for (const s of entry.sidecarSubs) {
+    if (!isJapaneseLang(s.lang)) continue;
+    const st = await stat(s.path).catch(() => null);
+    if (st && st.mtimeMs > mt) mt = st.mtimeMs;
+  }
+  return mt;
+}
+
+// Dedup concurrent first-searches: while one request is building an entry's
+// index, others await the same promise instead of re-parsing the track.
+const searchIndexBuilding = new Map<string, Promise<SearchIndexEntry | null>>();
+
+function searchIndexFor(entry: LibraryEntry): Promise<SearchIndexEntry | null> {
+  const inflight = searchIndexBuilding.get(entry.id);
+  if (inflight) return inflight;
+  const p = buildSearchIndex(entry).finally(() => searchIndexBuilding.delete(entry.id));
+  searchIndexBuilding.set(entry.id, p);
+  return p;
+}
+
+async function buildSearchIndex(entry: LibraryEntry): Promise<SearchIndexEntry | null> {
+  const trackId = await bestJapaneseTrackId(entry);
+  if (!trackId) return null;
+  const key = `${trackId}|${await jaMtime(entry)}`;
+  const hit = searchIndex.get(entry.id);
+  if (hit && hit.key === key) return hit;
+  const cues = await cuesForTrack(entry, trackId).catch(() => null);
+  if (!cues) return null;
+  const idx: SearchIndexEntry = {
+    key,
+    lines: cues.map((c) => ({ start: c.start, text: c.text, norm: searchNorm(c.text) })),
+  };
+  if (!searchIndex.has(entry.id) && searchIndex.size >= SEARCH_INDEX_MAX) {
+    const oldest = searchIndex.keys().next().value;
+    if (oldest !== undefined) searchIndex.delete(oldest);
+  }
+  searchIndex.set(entry.id, idx);
+  return idx;
+}
+
 export interface ServerHandle {
   port: number;
   url: string;
@@ -308,6 +371,31 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
             })),
           ),
         );
+      }
+
+      // --- transcript search across all entries' best ja tracks ---
+      if (req.method === "GET" && path === "/api/search") {
+        const q = (url.searchParams.get("q") ?? "").trim();
+        if (!q) return json([]);
+        const nq = searchNorm(q);
+        const entries = await library.refresh();
+        const hits: { mediaId: string; name: string; start: number; text: string }[] = [];
+        for (const entry of entries) {
+          if (hits.length >= 100) break;
+          const idx = await searchIndexFor(entry);
+          if (!idx) continue;
+          for (const line of idx.lines) {
+            if (!line.norm.includes(nq)) continue;
+            hits.push({
+              mediaId: entry.id,
+              name: entry.name,
+              start: line.start,
+              text: line.text,
+            });
+            if (hits.length >= 100) break;
+          }
+        }
+        return json(hits);
       }
 
       // --- media ---
