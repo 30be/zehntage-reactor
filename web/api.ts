@@ -43,6 +43,12 @@ export interface WordLookup {
   context: string;
 }
 
+export interface ExplainResult {
+  breakdown: string;
+  idioms: string;
+  translation: string;
+}
+
 export interface AnkiWord {
   front: string;
   back: string;
@@ -142,6 +148,15 @@ export const api = {
     withFrame?: boolean;
     noCache?: boolean;
   }) => jpost<WordLookup>("/api/lookup", p),
+  explain: (p: { sentence: string; secondary: string; source: string }) =>
+    jpost<ExplainResult>("/api/explain", p),
+  ask: (p: {
+    question: string;
+    word?: string;
+    sentence?: string;
+    priorAnswer?: string;
+    source?: string;
+  }) => jpost<{ answer: string }>("/api/ask", p),
   ankiWords: () => jget<AnkiWordsResponse>("/api/anki/words"),
   ankiAdd: (p: {
     word: string;

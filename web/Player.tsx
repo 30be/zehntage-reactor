@@ -14,6 +14,7 @@ import {
   type LibraryEntry,
   type SubTrackInfo,
   type WordLookup,
+  type ExplainResult,
 } from "./api.ts";
 import { activeCueIndex, contextAround } from "./cues.ts";
 import { getTokenizer, isLexical, type KToken } from "./tokenizer.ts";
@@ -31,13 +32,20 @@ interface Props {
 }
 
 interface PopupState {
-  surface: string;
+  kind: "word" | "sentence";
+  surface: string; // the word, or the whole JP sentence for kind="sentence"
   reading?: string;
   x: number; // horizontal center of the anchored word (viewport coords)
   y: number; // top edge of the anchored word
   anchorBottom: number; // bottom edge of the anchored word
   context: string;
+  secondary?: string; // RU cue text shown at the same time (sentence panels)
   timestamp: number;
+}
+
+interface QaItem {
+  q: string;
+  a: string | null; // null while loading
 }
 
 const STORAGE_PREFIX = "zr.tracks.";
@@ -132,6 +140,18 @@ export function Player({ entry, toast, settings }: Props) {
   const [reloadLoading, setReloadLoading] = useState(false);
   const lookupCache = useRef<Map<string, WordLookup>>(new Map());
   const inflight = useRef<Map<string, Promise<WordLookup>>>(new Map());
+
+  // sentence-structure explain panel state (same panel chrome as word lookups)
+  const [explain, setExplain] = useState<ExplainResult | null>(null);
+  const [explainLoading, setExplainLoading] = useState(false);
+
+  // follow-up Q/A inside the panel (cleared when the panel closes)
+  const [qa, setQa] = useState<QaItem[]>([]);
+  const [askText, setAskText] = useState("");
+  const [askBusy, setAskBusy] = useState(false);
+  const askInputRef = useRef<HTMLInputElement>(null);
+  // While the ask input is focused, the panel must not auto-close on hover-out.
+  const askFocusedRef = useRef(false);
 
   // hover-intent: open the popup only once the cursor RESTS on a word ~200ms;
   // a separate grace timer hides it after the cursor leaves to empty space.
@@ -470,6 +490,7 @@ export function Player({ entry, toast, settings }: Props) {
         const rect = el.getBoundingClientRect();
         const ctx = contextAround(primaryCues, activeP) || primaryText;
         setPopup({
+          kind: "word",
           surface,
           reading,
           x: rect.left + rect.width / 2,
@@ -491,6 +512,7 @@ export function Player({ entry, toast, settings }: Props) {
     clearCloseTimer();
     closeTimer.current = window.setTimeout(() => {
       closeTimer.current = null;
+      if (askFocusedRef.current) return; // typing a follow-up — keep the panel
       setPopup(null);
       resumeFromHover();
     }, HOVER_CLOSE_MS);
@@ -501,13 +523,75 @@ export function Player({ entry, toast, settings }: Props) {
   }, [clearCloseTimer]);
   const onPanelLeave = useCallback(() => {
     clearCloseTimer();
+    if (askFocusedRef.current) return; // typing a follow-up — keep the panel
     setPopup(null);
     resumeFromHover();
   }, [clearCloseTimer, resumeFromHover]);
 
+  const closePanel = useCallback(() => {
+    clearCloseTimer();
+    askFocusedRef.current = false;
+    setPopup(null);
+    resumeFromHover();
+  }, [clearCloseTimer, resumeFromHover]);
+
+  // "(?)" after the last token: explain the whole sentence in the same panel.
+  const onExplainClick = useCallback(
+    (e: React.MouseEvent) => {
+      clearOpenTimer();
+      clearCloseTimer();
+      pauseForHover();
+      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      setPopup({
+        kind: "sentence",
+        surface: primaryText,
+        x: rect.left + rect.width / 2,
+        y: rect.top,
+        anchorBottom: rect.bottom,
+        context: primaryText,
+        secondary: secondaryText,
+        timestamp: videoRef.current?.currentTime ?? 0,
+      });
+    },
+    [primaryText, secondaryText, clearOpenTimer, clearCloseTimer, pauseForHover],
+  );
+
+  // clear the follow-up Q/A session whenever the panel closes or retargets
+  useEffect(() => {
+    setQa([]);
+    setAskText("");
+    setAskBusy(false);
+    if (!popup) askFocusedRef.current = false;
+  }, [popup?.kind, popup?.surface]);
+
+  // fetch the sentence explanation when a sentence panel opens (cached server-side)
+  useEffect(() => {
+    if (!popup || popup.kind !== "sentence") {
+      setExplain(null);
+      return;
+    }
+    let cancelled = false;
+    setExplain(null);
+    setExplainLoading(true);
+    void api
+      .explain({
+        sentence: popup.surface,
+        secondary: popup.secondary ?? "",
+        source: entry.name,
+      })
+      .then((res) => {
+        if (!cancelled) setExplain(res);
+      })
+      .catch(() => {})
+      .finally(() => !cancelled && setExplainLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [popup?.kind, popup?.surface]);
+
   // fetch lookup when popup target changes (default: NO frame — saves latency)
   useEffect(() => {
-    if (!popup) {
+    if (!popup || popup.kind !== "word") {
       setLookup(null);
       return;
     }
@@ -545,7 +629,7 @@ export function Player({ entry, toast, settings }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [popup?.surface]);
+  }, [popup?.kind, popup?.surface]);
 
   // re-run the current lookup WITH a video frame, replacing the panel content.
   const onAddFrame = useCallback(async () => {
@@ -618,7 +702,7 @@ export function Player({ entry, toast, settings }: Props) {
     left = Math.max(margin, Math.min(left, vw - width - margin));
 
     setPopupPos({ left, top, visibility: "visible" });
-  }, [popup, lookup, lookupLoading, frameLoading, frameAdded]);
+  }, [popup, lookup, lookupLoading, frameLoading, frameAdded, explain, explainLoading, qa]);
 
   const popupFront = useMemo(() => {
     if (!popup) return null;
@@ -661,6 +745,79 @@ export function Player({ entry, toast, settings }: Props) {
       toast(`Add failed: ${e instanceof Error ? e.message : e}`);
     }
   }, [popup, lookup, popupFront, primaryText, entry.id, refreshAnki, toast]);
+
+  // Add the whole sentence as an Anki card (front = JP sentence, back =
+  // translation, notes = breakdown + idioms). Same optimistic flow as words.
+  const onAddSentence = useCallback(async () => {
+    if (!popup || popup.kind !== "sentence" || !explain) return;
+    const v = videoRef.current;
+    const front = popup.surface;
+    setKnownFronts((prev) => {
+      const next = new Set(prev);
+      next.add(front);
+      return next;
+    });
+    try {
+      await api.ankiAdd({
+        word: popup.surface,
+        reading: "",
+        translation: explain.translation,
+        notes: [explain.breakdown, explain.idioms].filter(Boolean).join("\n\n"),
+        context: popup.secondary ?? "",
+        mediaId: entry.id,
+        timestamp: v?.currentTime ?? popup.timestamp,
+      });
+      void refreshAnki();
+    } catch (e) {
+      setKnownFronts((prev) => {
+        const next = new Set(prev);
+        next.delete(front);
+        return next;
+      });
+      toast(`Add failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }, [popup, explain, entry.id, refreshAnki, toast]);
+
+  // --- follow-up question (both panel kinds) ---
+  const onAsk = useCallback(async () => {
+    if (!popup || askBusy) return;
+    const q = askText.trim();
+    if (!q) return;
+    setAskText("");
+    setAskBusy(true);
+    setQa((prev) => [...prev, { q, a: null }]);
+    const priorAnswer =
+      popup.kind === "word"
+        ? [lookup?.reading, lookup?.translation, lookup?.notes]
+            .filter(Boolean)
+            .join("\n")
+        : [explain?.breakdown, explain?.idioms, explain?.translation]
+            .filter(Boolean)
+            .join("\n");
+    try {
+      const res = await api.ask({
+        question: q,
+        ...(popup.kind === "word" ? { word: popup.surface } : {}),
+        sentence: popup.context,
+        priorAnswer,
+        source: entry.name,
+      });
+      setQa((prev) =>
+        prev.map((item, i) => (i === prev.length - 1 ? { ...item, a: res.answer } : item)),
+      );
+    } catch (e) {
+      setQa((prev) =>
+        prev.map((item, i) =>
+          i === prev.length - 1
+            ? { ...item, a: `error: ${e instanceof Error ? e.message : e}` }
+            : item,
+        ),
+      );
+    } finally {
+      setAskBusy(false);
+      askInputRef.current?.focus(); // keep typing flow
+    }
+  }, [popup, askText, askBusy, lookup, explain, entry.name]);
 
   const onDelete = useCallback(async () => {
     if (!popupFront) return;
@@ -824,6 +981,15 @@ export function Player({ entry, toast, settings }: Props) {
                   );
                 })
               : primaryText}
+            {primaryText && (
+              <span
+                className="explain-q"
+                title="Explain sentence structure"
+                onClick={onExplainClick}
+              >
+                ?
+              </span>
+            )}
           </div>
           {secondaryText && (
             <div
@@ -851,6 +1017,42 @@ export function Player({ entry, toast, settings }: Props) {
           onMouseEnter={onPanelEnter}
           onMouseLeave={onPanelLeave}
         >
+          {popup.kind === "sentence" ? (
+            <>
+              <div className="sentence">{popup.surface}</div>
+              {explainLoading && <div className="spin">Explaining…</div>}
+              {explain && (
+                <>
+                  <div className="translation">{explain.translation}</div>
+                  <div className="notes breakdown">{explain.breakdown}</div>
+                  {explain.idioms && (
+                    <div className="notes breakdown">{explain.idioms}</div>
+                  )}
+                </>
+              )}
+              <div className="row">
+                {popupSaved ? (
+                  <button
+                    className="btn danger"
+                    onClick={onDelete}
+                    title="Remove this sentence card from Anki"
+                  >
+                    Delete
+                  </button>
+                ) : (
+                  <button
+                    className="btn"
+                    disabled={!explain}
+                    onClick={onAddSentence}
+                    title="Add this sentence to Anki with the current video frame"
+                  >
+                    Add to Anki
+                  </button>
+                )}
+              </div>
+            </>
+          ) : (
+            <>
           <div>
             <span className="word">{popup.surface}</span>
             {(lookup?.reading || popup.reading) && (
@@ -897,6 +1099,38 @@ export function Player({ entry, toast, settings }: Props) {
               {reloadLoading ? "…" : "↻"}
             </button>
           </div>
+            </>
+          )}
+
+          {qa.length > 0 && (
+            <div className="qa">
+              {qa.map((item, i) => (
+                <div key={i} className="qa-item">
+                  <div className="qa-q">{item.q}</div>
+                  <div className="qa-a">{item.a ?? "…"}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          <input
+            ref={askInputRef}
+            className="ask-input"
+            type="text"
+            placeholder="ask…"
+            value={askText}
+            onChange={(e) => setAskText(e.target.value)}
+            onFocus={() => {
+              askFocusedRef.current = true;
+              clearCloseTimer();
+            }}
+            onBlur={() => {
+              askFocusedRef.current = false;
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void onAsk();
+              else if (e.key === "Escape") closePanel();
+            }}
+          />
         </div>
       )}
 

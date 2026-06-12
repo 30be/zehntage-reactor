@@ -21,7 +21,14 @@ import {
   type SubTrack,
 } from "../lib/subs.ts";
 import { whisperQueue, type WhisperEvent } from "../lib/whisper.ts";
-import { lookupWord, translateCues, DEFAULT_LOOKUP_PROMPT } from "../lib/gemini.ts";
+import {
+  lookupWord,
+  translateCues,
+  explainSentence,
+  askQuestion,
+  DEFAULT_LOOKUP_PROMPT,
+  type ExplainResult,
+} from "../lib/gemini.ts";
 import { listWords, getProgress, addCard, deleteCard, uploadImage } from "../lib/anki.ts";
 import { readSettings, writeSettings } from "../lib/settings.ts";
 
@@ -128,6 +135,9 @@ interface TranslateBatchItem {
 // Module-level so status survives across requests; processed sequentially to
 // avoid hammering Gemini.
 const translateBatch: TranslateBatchItem[] = [];
+
+// In-memory cache for /api/explain, keyed by the exact sentence string.
+const explainCache = new Map<string, ExplainResult>();
 let translatePumpRunning = false;
 
 async function pumpTranslateBatch(library: Library): Promise<void> {
@@ -415,6 +425,46 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
           track: `sidecar:gen:${targetLang}`,
           cueCount: translated.length,
         });
+      }
+
+      // --- Gemini sentence-structure explain (cached by sentence) ---
+      if (req.method === "POST" && path === "/api/explain") {
+        const body = (await req.json()) as {
+          sentence?: string;
+          secondary?: string;
+          source?: string;
+        };
+        if (!body.sentence) return err("sentence required", 400);
+        const cached = explainCache.get(body.sentence);
+        if (cached) return json(cached);
+        const res = await explainSentence(
+          body.sentence,
+          body.secondary ?? "",
+          body.source ?? "",
+        );
+        explainCache.set(body.sentence, res);
+        return json(res);
+      }
+
+      // --- Gemini free-form follow-up question ---
+      if (req.method === "POST" && path === "/api/ask") {
+        const body = (await req.json()) as {
+          question?: string;
+          word?: string;
+          sentence?: string;
+          priorAnswer?: string;
+          source?: string;
+        };
+        if (!body.question) return err("question required", 400);
+        return json(
+          await askQuestion({
+            question: body.question,
+            word: body.word,
+            sentence: body.sentence,
+            priorAnswer: body.priorAnswer,
+            source: body.source,
+          }),
+        );
       }
 
       // --- Gemini word lookup ---

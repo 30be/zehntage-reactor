@@ -140,6 +140,86 @@ export async function lookupWord(
   return (await callGemini(prompt, WORD_SCHEMA, image)) as WordLookup;
 }
 
+// --- sentence-structure explain ---
+
+export const EXPLAIN_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    breakdown: { type: "STRING" },
+    idioms: { type: "STRING" },
+    translation: { type: "STRING" },
+  },
+  required: ["breakdown", "idioms", "translation"],
+} as const;
+
+export interface ExplainResult {
+  breakdown: string;
+  idioms: string;
+  translation: string;
+}
+
+export function buildExplainPrompt(
+  sentence: string,
+  secondary: string,
+  source: string,
+): string {
+  return `The learner is a native Russian speaker, fluent in English, learning Japanese. Explain the structure of this Japanese subtitle sentence for them. Be compact — no filler.
+
+Provide three fields:
+- breakdown: the sentence's grammar explained in short lines — grammar points, particle usage, conjugations and contractions (spell out what casual/contracted forms expand to, e.g. "〜ちゃった = 〜てしまった (completion/regret)"), plus a word gloss ONLY where non-obvious.
+- idioms: multiword idioms, set phrases, or collocations in the sentence with brief meanings; empty string if none.
+- translation: a natural Russian translation of the whole sentence.
+
+${secondary ? `An existing subtitle translation (may be loose): ${secondary}\n` : ""}Source: ${source}
+
+Sentence:
+${sentence}`;
+}
+
+export async function explainSentence(
+  sentence: string,
+  secondary: string,
+  source: string,
+): Promise<ExplainResult> {
+  return (await callGemini(
+    buildExplainPrompt(sentence, secondary, source),
+    EXPLAIN_SCHEMA,
+  )) as ExplainResult;
+}
+
+// --- free-form follow-up question ---
+
+const ASK_SCHEMA = {
+  type: "OBJECT",
+  properties: { answer: { type: "STRING" } },
+  required: ["answer"],
+} as const;
+
+export interface AskParams {
+  question: string;
+  word?: string;
+  sentence?: string;
+  priorAnswer?: string;
+  source?: string;
+}
+
+export function buildAskPrompt(p: AskParams): string {
+  const ctx: string[] = [];
+  if (p.word) ctx.push(`Word being studied: ${p.word}`);
+  if (p.sentence) ctx.push(`Sentence: ${p.sentence}`);
+  if (p.priorAnswer) ctx.push(`Explanation already shown to the learner:\n${p.priorAnswer}`);
+  if (p.source) ctx.push(`Source: ${p.source}`);
+  return `The learner is a native Russian speaker, fluent in English, learning Japanese. They have a follow-up question about the material below. Answer concisely (a few sentences max), in the language the question was asked in.
+
+${ctx.join("\n")}
+
+Question: ${p.question}`;
+}
+
+export async function askQuestion(p: AskParams): Promise<{ answer: string }> {
+  return (await callGemini(buildAskPrompt(p), ASK_SCHEMA)) as { answer: string };
+}
+
 // --- cue translation (batched, cheap) ---
 
 const LANG_NAMES: Record<string, string> = {
