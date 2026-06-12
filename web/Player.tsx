@@ -23,6 +23,14 @@ import { TokenLine, wordKey } from "./TokenLine.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 import { freqRank, freqRankOf, freqTier, loadFreq } from "./freq.ts";
 import { tmHeartbeat, tmEvent } from "./telemetry.ts";
+import {
+  PlayIcon,
+  PauseIcon,
+  VolumeIcon,
+  VolumeXIcon,
+  MaximizeIcon,
+  RotateCwIcon,
+} from "./icons.tsx";
 
 interface Props {
   entry: LibraryEntry;
@@ -377,10 +385,14 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   }, []);
 
   // --- shadowing loop (`s`): kept in refs to avoid re-renders on every cue ---
-  // idx = primary-cue index being looped; remaining = repeats left (Infinity
-  // until a digit 1-9 is pressed right after `s`).
+  // idx = primary-cue index being looped; remaining = repeats left.
+  // Count comes from the Settings page ("Shadowing repeats", 0 = infinite).
   const loopRef = useRef<{ idx: number; remaining: number } | null>(null);
-  const loopArmTimeRef = useRef(0); // digit-count window opens when `s` arms
+  const shadowRepeats = Math.max(0, Math.round(Number(settings.shadowRepeats)) || 0);
+  const shadowRepeatsRef = useRef(shadowRepeats);
+  useEffect(() => {
+    shadowRepeatsRef.current = shadowRepeats;
+  }, [shadowRepeats]);
 
   // --- hard mode (`h`): hide JP text while playing, reveal on pause/hover/tail ---
   const [hardMode, setHardMode] = useState(() => {
@@ -1017,18 +1029,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         }
         return;
       }
-      // Digits 1-9 pressed right after `s` set the shadowing-loop count.
-      if (
-        /^[1-9]$/.test(e.key) &&
-        loopRef.current &&
-        Date.now() - loopArmTimeRef.current < 3000
-      ) {
-        e.preventDefault();
-        e.stopPropagation();
-        loopRef.current.remaining = parseInt(e.key, 10);
-        toast(`loop ×${e.key}`);
-        return;
-      }
       if (!HANDLED.has(e.key)) return;
       // Avoid double-toggle on key auto-repeat for toggling keys.
       if (e.repeat && [" ", "f", "F", "l", "L", "k", "K", "s", "S", "h", "H", "n", "N", "p", "P", "w", "W", "b", "B", "i", "I"].includes(e.key)) {
@@ -1166,8 +1166,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         }
         case "s":
         case "S": {
-          // Shadowing loop on the current primary cue. Digits 1-9 right after
-          // arm a repeat count; default infinite. `s` again releases.
+          // Shadowing loop on the current primary cue. Repeat count comes from
+          // Settings ("Shadowing repeats", 0 = infinite). `s` again releases.
           if (loopRef.current) {
             loopRef.current = null;
             toast("loop off");
@@ -1180,9 +1180,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             toast("no cue to loop");
             break;
           }
-          loopRef.current = { idx: i, remaining: Infinity };
-          loopArmTimeRef.current = Date.now();
-          toast("loop on");
+          const n = shadowRepeatsRef.current;
+          loopRef.current = { idx: i, remaining: n > 0 ? n : Infinity };
+          toast(n > 0 ? `loop ×${n}` : "loop on");
           break;
         }
         case "h":
@@ -2074,7 +2074,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       for (let b = 0; b < nBins; b++) {
         const a = Math.min(1, speech[b]! / BIN);
         if (a <= 0.01) continue;
-        ctx.fillStyle = `rgba(255,255,255,${(0.9 * a).toFixed(3)})`;
+        ctx.fillStyle = `rgba(255,255,255,${(0.4 * a).toFixed(3)})`;
         ctx.fillRect(b * px, 0, Math.ceil(px), c.height);
       }
     };
@@ -2174,6 +2174,40 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     };
   }, [entry.id, pokeHud]);
 
+  // Stage mouse handling: leaving the stage hides the HUD instantly (no 2.5s
+  // wait); in fullscreen, hugging the top/side edges (~8px) also hides it.
+  const hideHudNow = useCallback(() => {
+    if (hudTimerRef.current != null) window.clearTimeout(hudTimerRef.current);
+    hudTimerRef.current = null;
+    const v = videoRef.current;
+    if (v && !v.paused && !scrubbingRef.current && !barHoverRef.current)
+      setHudHidden(true);
+  }, []);
+  const onStageMouseMove = useCallback(
+    (e: React.MouseEvent) => {
+      // Edge-hide applies to the TOP and SIDE edges only. The bottom strip is
+      // exempt: that's where the vbar lives — moving the mouse there is how
+      // the user summons the controls (the hidden bar has pointer-events:
+      // none, so a bottom-edge hide would make it unreachable in fullscreen).
+      // Side edges are also exempt near the bottom corners (the fullscreen
+      // button sits bottom-right).
+      const EDGE = 8;
+      const BAR_ZONE = 80; // px above the bottom reserved for the vbar
+      const aboveBar = e.clientY < window.innerHeight - BAR_ZONE;
+      if (
+        document.fullscreenElement != null &&
+        (e.clientY <= EDGE ||
+          (aboveBar &&
+            (e.clientX <= EDGE || e.clientX >= window.innerWidth - EDGE)))
+      ) {
+        hideHudNow();
+        return;
+      }
+      pokeHud();
+    },
+    [pokeHud, hideHudNow],
+  );
+
   const togglePlay = useCallback(() => {
     const v = videoRef.current;
     if (!v) return;
@@ -2258,7 +2292,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             "--va": videoAspect,
           } as React.CSSProperties
         }
-        onMouseMove={pokeHud}
+        onMouseMove={onStageMouseMove}
+        onMouseLeave={hideHudNow}
       >
         {/* Custom controls (the .vbar below) replace the native ones: the
             native bar fought our density strip and its fullscreen button
@@ -2362,7 +2397,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
               title={isPaused ? "Play (space)" : "Pause (space)"}
               aria-label={isPaused ? "Play" : "Pause"}
             >
-              {isPaused ? "▶" : "❚❚"}
+              {isPaused ? <PlayIcon /> : <PauseIcon />}
             </button>
             <span className="vbar-time">
               {fmtTime(curTime)} / {fmtTime(videoDuration)}
@@ -2378,7 +2413,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
               title={muted ? "Unmute" : "Mute"}
               aria-label={muted ? "Unmute" : "Mute"}
             >
-              {muted || volume === 0 ? "muted" : "vol"}
+              {muted || volume === 0 ? <VolumeXIcon /> : <VolumeIcon />}
             </button>
             <input
               className="vbar-vol"
@@ -2403,7 +2438,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
               title="Fullscreen (f)"
               aria-label="Fullscreen"
             >
-              ⛶
+              <MaximizeIcon size={20} />
             </button>
           </div>
         </div>
@@ -2516,7 +2551,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
               title="Regenerate the explanation from scratch (when Gemini's answer is off)"
               aria-label="Regenerate explanation"
             >
-              {reloadLoading ? "…" : "↻"}
+              {reloadLoading ? "…" : <RotateCwIcon size={14} />}
             </button>
           </div>
             </>

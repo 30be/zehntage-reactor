@@ -176,3 +176,219 @@ export function summarizeEvents(events: TelemetryEvent[]): StatsSummary {
 export async function statsSummary(): Promise<StatsSummary> {
   return summarizeEvents(await readEvents());
 }
+
+// --- analytics v2: per-(media, day) series + overview -----------------------
+
+export interface EpisodeDayRow {
+  mediaId: string;
+  date: string; // local "YYYY-MM-DD"
+  wallPlayingSec: number;
+  wallPausedSec: number;
+  /** Approx. content seconds: forward position deltas between consecutive
+   * heartbeats of the same media, capped at 60s each. */
+  contentSec: number;
+  /** wall (playing+paused) / content. null when contentSec < 60 (too noisy). */
+  coefficient: number | null;
+  lookups: number;
+  ankiAdds: number;
+  /** ankiAdds per minute of playing wall time. null when no playing time. */
+  cardsPerMin: number | null;
+}
+
+/** Per-(mediaId, day) analytics rows, sorted by date then mediaId. */
+export function episodeSeries(events: TelemetryEvent[]): EpisodeDayRow[] {
+  type Acc = Omit<EpisodeDayRow, "coefficient" | "cardsPerMin">;
+  const rows = new Map<string, Acc>();
+  const lastPos = new Map<string, number>(); // per media, across days
+
+  const row = (mediaId: string, ts: number): Acc => {
+    const date = localDate(ts);
+    const key = `${mediaId} ${date}`;
+    let r = rows.get(key);
+    if (!r) {
+      r = {
+        mediaId,
+        date,
+        wallPlayingSec: 0,
+        wallPausedSec: 0,
+        contentSec: 0,
+        lookups: 0,
+        ankiAdds: 0,
+      };
+      rows.set(key, r);
+    }
+    return r;
+  };
+
+  for (const e of events) {
+    const id = typeof e.mediaId === "string" ? e.mediaId : null;
+    if (!id) continue;
+    switch (e.type) {
+      case "heartbeat": {
+        const r = row(id, e.ts);
+        if (e.paused === true) r.wallPausedSec += HEARTBEAT_SEC;
+        else r.wallPlayingSec += HEARTBEAT_SEC;
+        const pos = typeof e.position === "number" ? e.position : null;
+        if (pos !== null) {
+          const prev = lastPos.get(id);
+          // Forward delta capped at 60s: seeks/jumps don't count as content.
+          if (prev !== undefined && pos > prev && pos - prev <= 60)
+            r.contentSec += pos - prev;
+          lastPos.set(id, pos);
+        }
+        break;
+      }
+      case "lookup":
+        row(id, e.ts).lookups += 1;
+        break;
+      case "anki_add":
+        row(id, e.ts).ankiAdds += 1;
+        break;
+      default:
+        break;
+    }
+  }
+
+  return [...rows.values()]
+    .map((r) => ({
+      ...r,
+      coefficient:
+        r.contentSec >= 60
+          ? (r.wallPlayingSec + r.wallPausedSec) / r.contentSec
+          : null,
+      cardsPerMin:
+        r.wallPlayingSec > 0 ? r.ankiAdds / (r.wallPlayingSec / 60) : null,
+    }))
+    .sort((a, b) =>
+      a.date !== b.date
+        ? a.date < b.date
+          ? -1
+          : 1
+        : a.mediaId.localeCompare(b.mediaId),
+    );
+}
+
+export interface OverviewDay {
+  date: string;
+  wallPlayingSec: number;
+  wallPausedSec: number;
+  contentSec: number;
+  lookups: number;
+  ankiAdds: number;
+}
+
+export interface CumulativePoint {
+  date: string;
+  /** Total anki cards added up to and including this date. */
+  total: number;
+}
+
+export interface Overview {
+  totals: {
+    wallPlayingSec: number;
+    wallPausedSec: number;
+    contentSec: number;
+    lookups: number;
+    ankiAdds: number;
+    mediaCount: number;
+  };
+  /** Daily series for the last 30 calendar days (gaps zero-filled),
+   * anchored on the newest event (or `now` for an empty log). */
+  last30Days: OverviewDay[];
+  /** Cumulative ankiAdds curve, one point per day with at least one add. */
+  ankiCumulative: CumulativePoint[];
+}
+
+/** Totals + last-30-day daily series + cumulative anki curve. */
+export function overview(events: TelemetryEvent[], now = Date.now()): Overview {
+  const rows = episodeSeries(events);
+  const totals = {
+    wallPlayingSec: 0,
+    wallPausedSec: 0,
+    contentSec: 0,
+    lookups: 0,
+    ankiAdds: 0,
+    mediaCount: new Set(rows.map((r) => r.mediaId)).size,
+  };
+  const byDay = new Map<string, OverviewDay>();
+  for (const r of rows) {
+    totals.wallPlayingSec += r.wallPlayingSec;
+    totals.wallPausedSec += r.wallPausedSec;
+    totals.contentSec += r.contentSec;
+    totals.lookups += r.lookups;
+    totals.ankiAdds += r.ankiAdds;
+    let d = byDay.get(r.date);
+    if (!d) {
+      d = {
+        date: r.date,
+        wallPlayingSec: 0,
+        wallPausedSec: 0,
+        contentSec: 0,
+        lookups: 0,
+        ankiAdds: 0,
+      };
+      byDay.set(r.date, d);
+    }
+    d.wallPlayingSec += r.wallPlayingSec;
+    d.wallPausedSec += r.wallPausedSec;
+    d.contentSec += r.contentSec;
+    d.lookups += r.lookups;
+    d.ankiAdds += r.ankiAdds;
+  }
+
+  // Anchor the 30-day window on the newest event so old logs still render.
+  const lastTs = events.reduce((m, e) => Math.max(m, e.ts), 0) || now;
+  const last30Days: OverviewDay[] = [];
+  const anchor = new Date(lastTs);
+  for (let i = 29; i >= 0; i--) {
+    // Calendar-day stepping, not fixed 24h chunks: DST makes some local days
+    // 23/25h long, which would skip or duplicate a date in the series.
+    const d = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() - i);
+    const date = localDate(d.getTime());
+    last30Days.push(
+      byDay.get(date) ?? {
+        date,
+        wallPlayingSec: 0,
+        wallPausedSec: 0,
+        contentSec: 0,
+        lookups: 0,
+        ankiAdds: 0,
+      },
+    );
+  }
+
+  const ankiCumulative: CumulativePoint[] = [];
+  let running = 0;
+  for (const d of [...byDay.values()].sort((a, b) => (a.date < b.date ? -1 : 1))) {
+    if (d.ankiAdds === 0) continue;
+    running += d.ankiAdds;
+    ankiCumulative.push({ date: d.date, total: running });
+  }
+
+  return { totals, last30Days, ankiCumulative };
+}
+
+const CSV_HEADER = [
+  "mediaId",
+  "date",
+  "wallPlayingSec",
+  "wallPausedSec",
+  "contentSec",
+  "coefficient",
+  "lookups",
+  "ankiAdds",
+  "cardsPerMin",
+] as const;
+
+function csvCell(v: string | number | null): string {
+  if (v === null) return "";
+  if (typeof v === "number") return Number.isInteger(v) ? String(v) : v.toFixed(3);
+  return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+}
+
+/** Episode series rows as a CSV string (with header, \n line endings). */
+export function toCsv(rows: EpisodeDayRow[]): string {
+  const lines = [CSV_HEADER.join(",")];
+  for (const r of rows) lines.push(CSV_HEADER.map((k) => csvCell(r[k])).join(","));
+  return lines.join("\n") + "\n";
+}

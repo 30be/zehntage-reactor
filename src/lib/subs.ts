@@ -189,6 +189,42 @@ export function parseSubtitleText(text: string, ext: string): Cue[] {
   }
 }
 
+// --- whisper anti-hallucination: collapse repeated-cue runs ---
+
+/** Normalization for repeat detection: trim + strip JP/ASCII punctuation. */
+function repeatNorm(text: string): string {
+  return text
+    .replace(/[。、．，！？!?…‥・「」『』（）()\[\]【】〜~ー―\-—\s]/g, "")
+    .trim();
+}
+
+/**
+ * Whisper hallucinates on music/silence by repeating the same phrase as many
+ * consecutive cues. Collapse a run of consecutive identically-normalized cues
+ * into ONE cue spanning the whole run — but only when the run looks like a
+ * hallucination: length >= `minRun` (default 4), or a 3-run stretching over
+ * `spanSec` (default 20s) of wall time. Short 3-runs are kept, because real
+ * dialogue legitimately repeats (待って！待って！待って！).
+ */
+export function collapseRepeatedCues(cues: Cue[], minRun = 4, spanSec = 20): Cue[] {
+  const out: Cue[] = [];
+  let i = 0;
+  while (i < cues.length) {
+    const norm = repeatNorm(cues[i]!.text);
+    let j = i + 1;
+    while (j < cues.length && norm !== "" && repeatNorm(cues[j]!.text) === norm) j++;
+    const run = j - i;
+    const span = cues[j - 1]!.end - cues[i]!.start;
+    if (run >= minRun || (run >= 3 && span > spanSec)) {
+      out.push({ start: cues[i]!.start, end: cues[j - 1]!.end, text: cues[i]!.text });
+    } else {
+      for (let k = i; k < j; k++) out.push(cues[k]!);
+    }
+    i = j;
+  }
+  return out;
+}
+
 export function cuesToSrt(cues: Cue[]): string {
   return (
     cues

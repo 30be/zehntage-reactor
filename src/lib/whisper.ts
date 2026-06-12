@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import type { Cue } from "./subs.ts";
-import { cuesToSrt, parseTimestamp } from "./subs.ts";
+import { collapseRepeatedCues, cuesToSrt, parseTimestamp } from "./subs.ts";
 
 const MODEL_PATH = join(homedir(), "models", "ggml-medium.bin");
 const THREADS = 12;
@@ -153,7 +153,7 @@ class WhisperQueue {
       job.cues.push(cue);
       this.emit(job, { type: "cue", cue });
     }
-    await Bun.write(job.outPath, cuesToSrt(job.cues));
+    await Bun.write(job.outPath, cuesToSrt(collapseRepeatedCues(job.cues)));
     this.setStatus(job, "done");
   }
 
@@ -206,8 +206,8 @@ class WhisperQueue {
         throw new Error(`whisper-cli exited with ${code}: ${(await new Response(proc.stderr as ReadableStream).text()).slice(0, 300)}`);
       }
 
-      // 3. Save sidecar SRT.
-      await Bun.write(job.outPath, cuesToSrt(job.cues));
+      // 3. Save sidecar SRT (hallucinated repeat-runs collapsed).
+      await Bun.write(job.outPath, cuesToSrt(collapseRepeatedCues(job.cues)));
       this.setStatus(job, "done");
     } finally {
       await unlink(wavPath).catch(() => {});

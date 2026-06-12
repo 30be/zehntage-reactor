@@ -139,7 +139,15 @@ export async function getProgress(): Promise<Record<string, number> | null> {
 
 export async function addCard(card: AnkiCard): Promise<void> {
   if (ankiFake()) {
-    fakeCards.set(card.front, { ...card });
+    // Mirror the real anki-mcp behavior: an `image` renders as an <img> tag
+    // inside the target field (the Cards tab filters on this).
+    const stored = { ...card };
+    if (stored.image && stored.image_field === "context") {
+      stored.context = [stored.context, `<img src="${stored.image}">`]
+        .filter(Boolean)
+        .join("<br>");
+    }
+    fakeCards.set(card.front, stored);
     return;
   }
   await zehntageRequest("/zehntage/add", "POST", card);

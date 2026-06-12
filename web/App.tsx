@@ -16,6 +16,7 @@ type Route =
   | { name: "player"; id: string; t?: number }
   | { name: "settings" }
   | { name: "stats" }
+  | { name: "cards" }
   | { name: "home" };
 
 function parseHash(): Route {
@@ -30,6 +31,7 @@ function parseHash(): Route {
   }
   if (h === "settings") return { name: "settings" };
   if (h === "stats") return { name: "stats" };
+  if (h === "cards") return { name: "cards" };
   if (h === "home") return { name: "home" };
   return { name: "library" };
 }
@@ -116,7 +118,7 @@ export function App() {
     <div className="app shell">
       <aside className="sidebar">
         <a className="brand side-brand" href="#/home" title="Home">
-          <span className="side-icon" aria-hidden>十</span>
+          <span className="side-icon brand-mark" aria-hidden>十日</span>
           <span className="side-label">zehntage</span>
         </a>
         <nav className="side-nav">
@@ -129,6 +131,7 @@ export function App() {
             route.name === "player",
             !lastMedia,
           )}
+          {navItem("Cards", "▣", "#/cards", route.name === "cards")}
           {navItem("Stats", "∿", "#/stats", route.name === "stats")}
           {navItem("Settings", "⚙", "#/settings", route.name === "settings")}
         </nav>
@@ -138,8 +141,9 @@ export function App() {
         {route.name === "home" && <Home go={go} />}
         {route.name === "library" && <Library go={go} toast={toast} />}
         {route.name === "stats" && <Stats go={go} />}
+        {route.name === "cards" && <Cards go={go} toast={toast} />}
         {route.name === "settings" && (
-          <Settings settings={settings} setSettings={setSettings} toast={toast} go={go} />
+          <Settings settings={settings} setSettings={setSettings} toast={toast} />
         )}
         {route.name === "player" && (
           <PlayerRoute
@@ -235,7 +239,7 @@ const HOTKEYS: [string, string][] = [
   ["← →", "prev / next cue (seek)"],
   ["↑ ↓", "volume"],
   ["a", "replay current cue"],
-  ["s", "autopause mode (then digits 1-9: count)"],
+  ["s", "shadowing loop current cue (count: Settings)"],
   ["Tab / Shift+Tab", "cycle subtitle tracks"],
   ["n / p", "next / previous episode"],
   ["h", "hard mode (hide JP while playing)"],
@@ -284,7 +288,13 @@ function Home({ go }: { go: (h: string) => void }) {
   );
 }
 
-// --- library root chooser (dim line above the cards) ---
+// --- library root chooser: mini directory navigator (dim line above cards) ---
+
+interface BrowseResult {
+  path: string;
+  parent: string | null;
+  dirs: string[];
+}
 
 function RootChooser({
   toast,
@@ -294,22 +304,46 @@ function RootChooser({
   onChanged: () => void;
 }) {
   const [info, setInfo] = useState<{ root: string; count: number } | null>(null);
-  const [editing, setEditing] = useState(false);
-  const [value, setValue] = useState("");
+  const [open, setOpen] = useState(false);
+  const [browse, setBrowse] = useState<BrowseResult | null>(null);
+  const [value, setValue] = useState(""); // manual path entry (power users)
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     void api.getRoot().then(setInfo).catch(() => {});
   }, []);
 
-  const submit = async () => {
-    const p = value.trim();
-    if (!p) return;
+  // Esc closes the panel (global while open).
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  const browseTo = async (p?: string) => {
+    try {
+      const r = await fetch(
+        `/api/browse${p ? `?path=${encodeURIComponent(p)}` : ""}`,
+      );
+      if (!r.ok) throw new Error(`browse → ${r.status}`);
+      const data = (await r.json()) as BrowseResult;
+      setBrowse(data);
+      setValue(data.path);
+    } catch (e) {
+      toast(`Browse failed: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  const applyRoot = async (p: string) => {
+    if (!p.trim()) return;
     setBusy(true);
     try {
-      const next = await api.setRoot(p);
+      const next = await api.setRoot(p.trim());
       setInfo(next);
-      setEditing(false);
+      setOpen(false);
       toast(`Library root set: ${next.root} (${next.count} entries)`);
       onChanged();
     } catch (e) {
@@ -319,37 +353,79 @@ function RootChooser({
     }
   };
 
-  if (!editing) {
-    return (
+  return (
+    <div className={`root-line${open ? " editing" : " muted"}`}>
       <div
-        className="root-line muted"
+        className="root-current"
         title="Click to change the library root"
         onClick={() => {
-          setValue(info?.root ?? "");
-          setEditing(true);
+          if (open) {
+            setOpen(false);
+            return;
+          }
+          setOpen(true);
+          void browseTo(info?.root);
         }}
       >
         {info ? `${info.root} · ${info.count} entries` : "…"}
       </div>
-    );
-  }
-  return (
-    <div className="root-line editing">
-      <input
-        type="text"
-        className="root-input"
-        autoFocus
-        placeholder="/absolute/path/to/library"
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") void submit();
-          if (e.key === "Escape") setEditing(false);
-        }}
-      />
-      <button className="btn sm" disabled={busy} onClick={() => void submit()}>
-        {busy ? "…" : "Set"}
-      </button>
+      {open && (
+        <div className="root-panel">
+          <div className="root-manual">
+            <input
+              type="text"
+              className="root-input"
+              placeholder="/absolute/path/to/library"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void applyRoot(value);
+              }}
+            />
+            <button
+              className="btn sm"
+              disabled={busy}
+              onClick={() => void applyRoot(value)}
+            >
+              {busy ? "…" : "Set"}
+            </button>
+          </div>
+          <div className="root-dirs">
+            {browse?.parent != null && (
+              <div
+                className="root-dir up"
+                onClick={() => void browseTo(browse.parent!)}
+              >
+                ..
+              </div>
+            )}
+            {browse?.dirs.map((d) => (
+              <div
+                key={d}
+                className="root-dir"
+                onClick={() => void browseTo(`${browse.path.replace(/\/$/, "")}/${d}`)}
+              >
+                {d}/
+              </div>
+            ))}
+            {browse && browse.dirs.length === 0 && (
+              <div className="root-dir muted none">no subfolders</div>
+            )}
+          </div>
+          <div className="root-actions">
+            <button
+              className="btn sm primary root-use"
+              disabled={busy || !browse}
+              onClick={() => browse && void applyRoot(browse.path)}
+            >
+              Use this folder
+            </button>
+            <button className="btn sm ghost" onClick={() => setOpen(false)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -754,6 +830,111 @@ function Stats({ go }: { go: (h: string) => void }) {
   );
 }
 
+// --- Cards browser: Anki cards added from the player (context has a frame) ---
+
+interface FullCard {
+  front: string;
+  back: string;
+  notes: string;
+  context: string;
+}
+
+/** <img src="..."> inside the context HTML, or null. */
+function cardImgSrc(context: string): string | null {
+  const m = context.match(/<img[^>]*\bsrc="([^"]+)"/i);
+  return m?.[1] ?? null;
+}
+
+/** Parse "<episode name> @ mm:ss" out of the context HTML. */
+function cardEpisodeRef(context: string): { name: string; sec: number } | null {
+  for (const part of context.split(/<br\s*\/?>/i)) {
+    const m = part.trim().match(/^(.+) @ (\d+):(\d{2})$/);
+    if (m) return { name: m[1]!, sec: parseInt(m[2]!, 10) * 60 + parseInt(m[3]!, 10) };
+  }
+  return null;
+}
+
+function Cards({ go, toast }: { go: (h: string) => void; toast: (m: string) => void }) {
+  const [cards, setCards] = useState<FullCard[] | null>(null);
+  const [entries, setEntries] = useState<LibraryEntry[]>([]);
+  // double-click-to-confirm delete: front of the card in "sure?" state
+  const [confirmFront, setConfirmFront] = useState<string | null>(null);
+
+  useEffect(() => {
+    void fetch("/api/anki/cards")
+      .then((r) => (r.ok ? (r.json() as Promise<FullCard[]>) : Promise.reject(r.status)))
+      .then(setCards)
+      .catch(() => setCards([]));
+    void api.library().then(setEntries).catch(() => {});
+  }, []);
+
+  const frameCards = (cards ?? []).filter((c) => /<img/i.test(c.context));
+
+  const onDelete = async (front: string) => {
+    if (confirmFront !== front) {
+      setConfirmFront(front);
+      return;
+    }
+    setConfirmFront(null);
+    // optimistic removal
+    setCards((prev) => (prev ? prev.filter((c) => c.front !== front) : prev));
+    try {
+      await api.ankiDelete(front);
+    } catch (e) {
+      toast(`Delete failed: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  return (
+    <>
+      <h1 className="h1">Cards</h1>
+      {cards == null && <div className="empty">Loading…</div>}
+      {cards != null && frameCards.length === 0 && (
+        <div className="empty">No cards with frames yet.</div>
+      )}
+      <div className="cards-list">
+        {frameCards.map((c) => {
+          const img = cardImgSrc(c.context);
+          const ref = cardEpisodeRef(c.context);
+          const entry = ref ? entries.find((e) => e.name === ref.name) : undefined;
+          return (
+            <div key={c.front} className="card-row">
+              {img ? (
+                <img className="card-frame" src={img} alt="" loading="lazy" />
+              ) : (
+                <span className="card-frame placeholder" />
+              )}
+              <span className="card-front">{c.front}</span>
+              <span className="card-back muted">{c.back}</span>
+              <span className="card-actions">
+                <button
+                  className="btn sm card-rewatch"
+                  disabled={!entry || !ref}
+                  title={
+                    entry && ref
+                      ? `Rewatch ${ref.name} @ ${fmtCueTime(ref.sec)}`
+                      : "Source episode not in the library"
+                  }
+                  onClick={() => entry && ref && go(`#/play/${entry.id}@${ref.sec}`)}
+                >
+                  rewatch
+                </button>
+                <button
+                  className={`btn sm danger card-delete${confirmFront === c.front ? " confirm" : ""}`}
+                  onClick={() => void onDelete(c.front)}
+                  onBlur={() => setConfirmFront((f) => (f === c.front ? null : f))}
+                >
+                  {confirmFront === c.front ? "sure?" : "delete"}
+                </button>
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
 function PlayerRoute({
   id,
   startAt,
@@ -803,9 +984,6 @@ function PlayerRoute({
 
   return (
     <>
-      <button className="btn ghost sm" onClick={() => go("#/")} style={{ marginBottom: 12 }}>
-        ← Library
-      </button>
       <Player
         key={entry.id}
         entry={entry}
@@ -821,12 +999,10 @@ function Settings({
   settings,
   setSettings,
   toast,
-  go,
 }: {
   settings: Record<string, unknown>;
   setSettings: (s: Record<string, unknown>) => void;
   toast: (m: string) => void;
-  go: (h: string) => void;
 }) {
   const [primaryLang, setPrimaryLang] = useState(
     (settings.targetLang as string) || "ja",
@@ -841,6 +1017,9 @@ function Settings({
   const [prestudyMinutes, setPrestudyMinutes] = useState(
     String(Number(settings.prestudyMinutes) || 10),
   );
+  const [shadowRepeats, setShadowRepeats] = useState(
+    String(Math.max(0, Math.round(Number(settings.shadowRepeats)) || 0)),
+  );
   const promptDefault = (settings.lookupPromptDefault as string) || "";
   const [lookupPrompt, setLookupPrompt] = useState(
     (settings.lookupPrompt as string) || promptDefault,
@@ -853,6 +1032,7 @@ function Settings({
     setAutoWhisper(Boolean(settings.whisperAutoGenerate));
     setFurigana(settings.furigana !== false);
     setPrestudyMinutes(String(Number(settings.prestudyMinutes) || 10));
+    setShadowRepeats(String(Math.max(0, Math.round(Number(settings.shadowRepeats)) || 0)));
     const def = (settings.lookupPromptDefault as string) || "";
     setLookupPrompt((settings.lookupPrompt as string) || def);
   }, [settings]);
@@ -869,6 +1049,7 @@ function Settings({
           1,
           Math.min(120, Math.round(Number(prestudyMinutes)) || 10),
         ),
+        shadowRepeats: Math.max(0, Math.round(Number(shadowRepeats)) || 0),
         lookupPrompt,
       });
       setSettings(next);
@@ -882,9 +1063,6 @@ function Settings({
 
   return (
     <>
-      <button className="btn ghost sm" onClick={() => go("#/")} style={{ marginBottom: 12 }}>
-        ← Library
-      </button>
       <h1 className="h1">Settings</h1>
       <div className="form">
         <div className="field">
@@ -932,6 +1110,17 @@ function Settings({
             max={120}
             value={prestudyMinutes}
             onChange={(e) => setPrestudyMinutes(e.target.value)}
+          />
+        </div>
+        <div className="field">
+          <label htmlFor="shadowRepeats">Shadowing repeats (0 = infinite)</label>
+          <input
+            id="shadowRepeats"
+            type="number"
+            min={0}
+            max={99}
+            value={shadowRepeats}
+            onChange={(e) => setShadowRepeats(e.target.value)}
           />
         </div>
         <div className="field">

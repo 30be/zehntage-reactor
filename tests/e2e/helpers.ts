@@ -9,6 +9,8 @@ const ALLOWLIST = [
   // expected 400 from the root-chooser invalid-path test (no URL is attached
   // to "Failed to load resource" console entries, so match by status text)
   /Failed to load resource.*400/,
+  // Cards tab renders fake-anki frame paths ("fake/upload.jpg") that 404
+  /Failed to load resource.*404/,
 ];
 
 export const test = base.extend<{ page: Page }>({

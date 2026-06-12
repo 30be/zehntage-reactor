@@ -669,21 +669,23 @@ textarea.prompt {
   top: 50%;
   transform: translateY(-50%);
   width: 0;
-  height: 5px;
+  height: 7px; /* 2px thicker than the density background */
   border-radius: 2px 0 0 2px;
-  background: rgba(255, 255, 255, 0.45);
+  background: rgba(255, 255, 255, 0.95);
   pointer-events: none;
   z-index: 1;
 }
-/* position caret (was the tiny marker under the strip) */
+/* position caret — clearly visible above density + played line */
 .seekbar .density-marker {
   top: 50%;
   bottom: auto;
   transform: translateY(-50%);
-  width: 2px;
-  height: 11px;
+  width: 3px;
+  height: 13px;
   margin-left: -1px;
+  border-radius: 1px;
   background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
   opacity: 1;
   z-index: 2;
 }
@@ -914,3 +916,96 @@ textarea.prompt {
   max-height: none;
   max-width: none;
 }
+
+/* ---- polish batch (appended) ---- */
+
+/* vbar buttons hold inline SVG icons now — center them */
+.vbar-btn { display: inline-flex; align-items: center; justify-content: center; }
+.vbar-btn svg { display: block; }
+.lookup .btn.icon svg { display: block; }
+
+/* sidebar brand: "十日 zehntage" expanded, "十日" mark when collapsed */
+.side-brand .brand-mark {
+  width: auto;
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* root navigator panel (Library) */
+.root-line.editing { display: block; cursor: default; }
+.root-line .root-current { cursor: pointer; }
+.root-line .root-current:hover { color: var(--fg); }
+.root-panel {
+  margin-top: 6px;
+  max-width: 480px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.root-manual { display: flex; gap: 8px; align-items: center; }
+.root-dirs {
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.root-dir {
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.root-dir:hover { background: var(--muted-bg); }
+.root-dir.up { color: var(--muted); }
+.root-dir.none { cursor: default; }
+.root-dir.none:hover { background: transparent; }
+.root-actions { display: flex; gap: 8px; }
+
+/* Cards browser tab */
+.cards-list { display: flex; flex-direction: column; gap: 6px; max-width: 720px; }
+.card-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.card-frame {
+  flex: none;
+  width: 72px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: var(--muted-bg);
+}
+.card-frame.placeholder { display: inline-block; }
+.card-front { font-weight: 600; font-size: 14px; white-space: nowrap; }
+.card-back {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card-actions { flex: none; display: flex; gap: 6px; }
+
+/* viewport fit: stage + cue sidebar leave room for the controls row below
+   (sidebar layout ~180px of chrome: title line + controls + paddings) */
+/* floored at 240px so small windows don't collapse the stage to nothing */
+:root { --stage-max: max(240px, calc(100vh - 180px)); }
+.video-stage,
+.stage-row .video-stage {
+  max-height: var(--stage-max);
+  max-width: calc(var(--stage-max) * var(--va, 16 / 9));
+}
+.cue-sidebar { max-height: var(--stage-max); }
+.video-stage:fullscreen { max-height: none; max-width: none; }

@@ -9,6 +9,7 @@ import {
   languageName,
   trackLabel,
   parseSidecarTrackId,
+  collapseRepeatedCues,
   type SubTrack,
 } from "../src/lib/subs.ts";
 
@@ -163,5 +164,67 @@ describe("parseSidecarTrackId", () => {
 
   test("non-sidecar ids return null", () => {
     expect(parseSidecarTrackId("embedded:2")).toBeNull();
+  });
+});
+
+describe("collapseRepeatedCues", () => {
+  const cue = (start: number, end: number, text: string) => ({ start, end, text });
+
+  test("collapses runs of >=4 identical cues into one spanning cue", () => {
+    const cues = [
+      cue(0, 2, "こんにちは"),
+      cue(2, 4, "おれきほうたろお殿"),
+      cue(4, 6, "おれきほうたろお殿。"),
+      cue(6, 8, " おれきほうたろお殿 "),
+      cue(8, 10, "おれきほうたろお殿!"),
+      cue(10, 12, "次の台詞"),
+    ];
+    const out = collapseRepeatedCues(cues);
+    expect(out).toEqual([
+      cue(0, 2, "こんにちは"),
+      cue(2, 10, "おれきほうたろお殿"),
+      cue(10, 12, "次の台詞"),
+    ]);
+  });
+
+  test("keeps runs of 2 untouched", () => {
+    const cues = [cue(0, 1, "はい"), cue(1, 2, "はい"), cue(2, 3, "いいえ")];
+    expect(collapseRepeatedCues(cues)).toEqual(cues);
+  });
+
+  test("keeps a legit short 3-run (待って x3) untouched", () => {
+    const cues = [
+      cue(0, 1, "待って"),
+      cue(1, 2, "待って！"),
+      cue(2, 3, "待って"),
+      cue(3, 5, "ほうたろう"),
+    ];
+    expect(collapseRepeatedCues(cues)).toEqual(cues);
+  });
+
+  test("collapses a 3-run spanning more than 20s (hallucination)", () => {
+    const cues = [
+      cue(0, 8, "ご視聴ありがとうございました"),
+      cue(8, 16, "ご視聴ありがとうございました"),
+      cue(16, 25, "ご視聴ありがとうございました"),
+      cue(25, 27, "次の台詞"),
+    ];
+    expect(collapseRepeatedCues(cues)).toEqual([
+      cue(0, 25, "ご視聴ありがとうございました"),
+      cue(25, 27, "次の台詞"),
+    ]);
+  });
+
+  test("punctuation-only cues never merge with each other", () => {
+    const cues = [cue(0, 1, "…"), cue(1, 2, "。。"), cue(2, 3, "…")];
+    expect(collapseRepeatedCues(cues)).toEqual(cues);
+  });
+
+  test("empty input and idempotency", () => {
+    expect(collapseRepeatedCues([])).toEqual([]);
+    const cues = Array.from({ length: 10 }, (_, i) => cue(i, i + 1, "ループ"));
+    const once = collapseRepeatedCues(cues);
+    expect(once).toEqual([cue(0, 10, "ループ")]);
+    expect(collapseRepeatedCues(once)).toEqual(once);
   });
 });

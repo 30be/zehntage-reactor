@@ -1,7 +1,7 @@
 // zehntage-reactor HTTP server (Bun.serve).
 
-import { extname, join, dirname, basename } from "node:path";
-import { stat } from "node:fs/promises";
+import { extname, join, dirname, basename, resolve } from "node:path";
+import { stat, readdir } from "node:fs/promises";
 import {
   Library,
   subLangsFor,
@@ -27,6 +27,7 @@ import {
   trackLabel,
   languageName,
   parseSidecarTrackId,
+  collapseRepeatedCues,
   type Cue,
   type SubTrack,
 } from "../lib/subs.ts";
@@ -348,6 +349,34 @@ async function buildSearchIndex(entry: LibraryEntry): Promise<SearchIndexEntry |
   return idx;
 }
 
+/**
+ * One-time idempotent startup cleanup: collapse hallucinated repeat-runs in
+ * existing generated subs/*.ja.srt sidecars. Rewrites only when changed.
+ */
+async function cleanupHallucinatedSidecars(library: Library): Promise<void> {
+  let fixed = 0;
+  for (const entry of library.list()) {
+    for (const s of entry.sidecarSubs) {
+      if (s.origin !== "generated" || !isJapaneseLang(s.lang) || s.ext !== ".srt")
+        continue;
+      try {
+        const cues = parseSrt(await Bun.file(s.path).text());
+        const collapsed = collapseRepeatedCues(cues);
+        if (collapsed.length < cues.length) {
+          await Bun.write(s.path, cuesToSrt(collapsed));
+          fixed++;
+          console.log(
+            `[subs-cleanup] ${s.path}: ${cues.length} → ${collapsed.length} cues`,
+          );
+        }
+      } catch {
+        // unreadable sidecar — leave it alone
+      }
+    }
+  }
+  if (fixed > 0) console.log(`[subs-cleanup] rewrote ${fixed} file(s)`);
+}
+
 export interface ServerHandle {
   port: number;
   url: string;
@@ -375,6 +404,9 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
     console.warn(`[migrate] failed: ${e}`),
   );
   await library.refresh();
+  await cleanupHallucinatedSidecars(library).catch((e) =>
+    console.warn(`[subs-cleanup] failed: ${e}`),
+  );
 
   const fetchHandler = async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
@@ -384,7 +416,10 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       // --- static / SPA ---
       if (req.method === "GET" && (path === "/" || path === "/index.html")) {
         return new Response(Bun.file(join(PUBLIC_DIR, "index.html")), {
-          headers: { "Content-Type": "text/html; charset=utf-8" },
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-cache",
+          },
         });
       }
 
@@ -796,10 +831,39 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         );
       }
 
+      // --- directory browser (root navigator in the Library view) ---
+      if (req.method === "GET" && path === "/api/browse") {
+        const raw = (url.searchParams.get("path") ?? "").trim() || currentRoot;
+        if (!raw.startsWith("/")) return err("path must be absolute", 400);
+        const p = resolve(raw); // normalize ".." segments / trailing slashes
+        const st = await stat(p).catch(() => null);
+        if (!st?.isDirectory()) return err(`not a directory: ${p}`, 400);
+        const entries = await readdir(p, { withFileTypes: true }).catch(() => []);
+        const dirs = entries
+          .filter((d) => d.isDirectory() && !d.name.startsWith("."))
+          .map((d) => d.name)
+          .sort((a, b) => a.localeCompare(b));
+        const parent = dirname(p);
+        return json({ path: p, parent: parent === p ? null : parent, dirs });
+      }
+
       // --- Anki ---
       if (req.method === "GET" && path === "/api/anki/words") {
         const [words, progress] = await Promise.all([listWords(), getProgress()]);
         return json({ words, progress });
+      }
+
+      // Fuller card info for the Cards browser tab (front/back/notes/context).
+      if (req.method === "GET" && path === "/api/anki/cards") {
+        const cards = await listWords();
+        return json(
+          cards.map((c) => ({
+            front: c.front ?? "",
+            back: c.back ?? "",
+            notes: c.notes ?? "",
+            context: c.context ?? "",
+          })),
+        );
       }
 
       if (req.method === "POST" && path === "/api/anki/add") {
@@ -926,7 +990,14 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       // --- other static assets in public/ ---
       if (req.method === "GET" && !path.startsWith("/api/")) {
         const file = Bun.file(join(PUBLIC_DIR, path.slice(1)));
-        if (await file.exists()) return new Response(file);
+        if (await file.exists()) {
+          // App bundle must never be served stale; dict/freq keep defaults.
+          const noCache = path === "/app.js" || path === "/app.css";
+          return new Response(
+            file,
+            noCache ? { headers: { "Cache-Control": "no-cache" } } : undefined,
+          );
+        }
       }
 
       return err("not found", 404);
