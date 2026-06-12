@@ -88,6 +88,12 @@ export function Player({ entry, toast, settings }: Props) {
   const [activeP, setActiveP] = useState(-1);
   const [activeS, setActiveS] = useState(-1);
   const [secShow, setSecShow] = useState(false);
+  const [autopause, setAutopause] = useState(false);
+  const autopauseRef = useRef(false);
+  const prevActiveP = useRef(-1);
+  useEffect(() => {
+    autopauseRef.current = autopause;
+  }, [autopause]);
 
   const [tokens, setTokens] = useState<KToken[] | null>(null);
   const tokenizerReady = useRef(false);
@@ -109,6 +115,7 @@ export function Player({ entry, toast, settings }: Props) {
   const [frameAdded, setFrameAdded] = useState(false);
   const [reloadLoading, setReloadLoading] = useState(false);
   const lookupCache = useRef<Map<string, WordLookup>>(new Map());
+  const inflight = useRef<Map<string, Promise<WordLookup>>>(new Map());
 
   // hover-intent: open the popup only once the cursor RESTS on a word ~200ms;
   // a separate grace timer hides it after the cursor leaves to empty space.
@@ -213,19 +220,86 @@ export function Player({ entry, toast, settings }: Props) {
     };
   }, [entry.id, secondaryId]);
 
-  // --- active cue tracking via timeupdate ---
+  // --- active cue tracking via timeupdate (+ autopause at each cue end) ---
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
     const onTime = () => {
       const t = v.currentTime;
-      setActiveP(activeCueIndex(primaryCues, t));
+      const idx = activeCueIndex(primaryCues, t);
+      // Autopause: when we leave a primary cue (its subtitle ends), pause —
+      // useful for shadowing/learning. Skip while seeking to avoid stray pauses.
+      if (
+        autopauseRef.current &&
+        !v.seeking &&
+        !v.paused &&
+        prevActiveP.current >= 0 &&
+        idx !== prevActiveP.current
+      ) {
+        v.pause();
+      }
+      prevActiveP.current = idx;
+      setActiveP(idx);
       setActiveS(activeCueIndex(secondaryCues, t));
     };
     v.addEventListener("timeupdate", onTime);
     onTime();
     return () => v.removeEventListener("timeupdate", onTime);
   }, [primaryCues, secondaryCues]);
+
+  // --- global hotkeys: work regardless of focus (except real text inputs) ---
+  useEffect(() => {
+    const FRAME = 1 / 24; // ~one frame at 23.976/24 fps
+    const onKey = (e: KeyboardEvent) => {
+      const v = videoRef.current;
+      if (!v) return;
+      const tgt = e.target as HTMLElement | null;
+      if (tgt && (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA")) return;
+      switch (e.key) {
+        case " ":
+          e.preventDefault();
+          if (v.paused) void v.play();
+          else v.pause();
+          break;
+        case "f":
+        case "F":
+          e.preventDefault();
+          if (document.fullscreenElement) void document.exitFullscreen();
+          else void v.requestFullscreen?.();
+          break;
+        case "ArrowLeft":
+          e.preventDefault();
+          v.currentTime = Math.max(0, v.currentTime - 5);
+          break;
+        case "ArrowRight":
+          e.preventDefault();
+          v.currentTime = Math.min(v.duration || Infinity, v.currentTime + 5);
+          break;
+        case "ArrowUp":
+          e.preventDefault();
+          v.volume = Math.min(1, v.volume + 0.1);
+          break;
+        case "ArrowDown":
+          e.preventDefault();
+          v.volume = Math.max(0, v.volume - 0.1);
+          break;
+        case ",":
+        case "<":
+          e.preventDefault();
+          v.pause();
+          v.currentTime = Math.max(0, v.currentTime - FRAME);
+          break;
+        case ".":
+        case ">":
+          e.preventDefault();
+          v.pause();
+          v.currentTime = Math.min(v.duration || Infinity, v.currentTime + FRAME);
+          break;
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const primaryText = activeP >= 0 ? primaryCues[activeP]!.text : "";
   const secondaryText = activeS >= 0 ? secondaryCues[activeS]!.text : "";
@@ -271,6 +345,8 @@ export function Player({ entry, toast, settings }: Props) {
       const reading = tok.reading;
       openTimer.current = window.setTimeout(() => {
         openTimer.current = null;
+        // Pause on hover (unconditional) so the learner can read at leisure.
+        videoRef.current?.pause();
         const rect = el.getBoundingClientRect();
         const ctx = contextAround(primaryCues, activeP) || primaryText;
         setPopup({
@@ -324,12 +400,23 @@ export function Player({ entry, toast, settings }: Props) {
     let cancelled = false;
     setLookup(null);
     setLookupLoading(true);
-    void api
-      .lookup({ word: popup.surface, context: popup.context, source: entry.name })
+    // De-dup concurrent/repeat requests for the same word: share one in-flight
+    // promise so sliding away and back never fires a second Gemini call.
+    const surface = popup.surface;
+    let p = inflight.current.get(surface);
+    if (!p) {
+      p = api
+        .lookup({ word: surface, context: popup.context, source: entry.name })
+        .then((res) => {
+          lookupCache.current.set(surface, res);
+          return res;
+        })
+        .finally(() => inflight.current.delete(surface));
+      inflight.current.set(surface, p);
+    }
+    void p
       .then((res) => {
-        if (cancelled) return;
-        lookupCache.current.set(popup.surface, res);
-        setLookup(res);
+        if (!cancelled) setLookup(res);
       })
       .catch(() => {})
       .finally(() => !cancelled && setLookupLoading(false));
@@ -668,12 +755,13 @@ export function Player({ entry, toast, settings }: Props) {
               {frameLoading ? "Adding frame…" : frameAdded ? "Frame added" : "Add frame"}
             </button>
             <button
-              className="btn"
+              className="btn icon"
               disabled={!lookup || reloadLoading}
               onClick={onReload}
               title="Regenerate the explanation from scratch (when Gemini's answer is off)"
+              aria-label="Regenerate explanation"
             >
-              {reloadLoading ? "…" : "↻ Regenerate"}
+              {reloadLoading ? "…" : "↻"}
             </button>
           </div>
         </div>
@@ -708,6 +796,17 @@ export function Player({ entry, toast, settings }: Props) {
             ))}
           </select>
         </div>
+        <label
+          className="switch inline"
+          title="Pause automatically at the end of every subtitle (learning aid)"
+        >
+          <input
+            type="checkbox"
+            checked={autopause}
+            onChange={(e) => setAutopause(e.target.checked)}
+          />
+          Autopause
+        </label>
 
         {!hasJa && !whisperBusy && (
           <button
