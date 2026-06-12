@@ -51,8 +51,8 @@ describe("commands registry", () => {
   });
 
   test("filterCommands: case-insensitive substring over titles", () => {
-    const list = [cmd("1", "player: toggle Hard mode"), cmd("2", "go: stats")];
-    expect(filterCommands(list, "hard").map((c) => c.id)).toEqual(["1"]);
+    const list = [cmd("1", "player: toggle Autopause"), cmd("2", "go: stats")];
+    expect(filterCommands(list, "autopause").map((c) => c.id)).toEqual(["1"]);
     expect(filterCommands(list, "STATS").map((c) => c.id)).toEqual(["2"]);
     expect(filterCommands(list, "  ").length).toBe(2);
     expect(filterCommands(list, "zzz")).toEqual([]);

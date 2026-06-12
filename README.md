@@ -49,12 +49,13 @@ Bindings match physical keys (`e.code`), so they work on any layout.
 | space / f | play–pause / fullscreen |
 | ← → / ↑ ↓ | seek ±5s / volume |
 | Tab / Shift+Tab | next / previous cue |
-| a or r / s | replay cue / shadowing loop |
+| r / s | replay cue / shadowing loop |
+| a / g | Anki add–remove popup word / regenerate |
 | , . | frame step back / forward |
 | - = / Shift+- = | speed / subtitle size |
 | [ ] \\ | subtitle offset − / + / reset |
 | Shift+← → | previous / next episode |
-| u / h | autopause / hard mode |
+| p | autopause |
 | l / w | cue sidebar / pre-study panel |
 | b / bb | peek translation / toggle blur |
 | i | picture-in-picture |

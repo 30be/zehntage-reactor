@@ -133,8 +133,12 @@ export function refreshAnkiWords(): Promise<AnkiWordsResponse> {
 /** Optimistic write-through after a successful add: the word underlines
  * survive an immediate reload without waiting for the network. */
 export function cacheAddWord(word: string, reading: string, back: string, notes = ""): void {
-  const cached = readAnkiCache();
-  if (!cached) return;
+  // No persisted cache yet (first session / cleared storage / >quota deck):
+  // start one from the optimistic word so the underline survives a reload and
+  // the notify channel still fires. ETag null → next fetch is a full 200.
+  const cached =
+    readAnkiCache() ??
+    ({ ts: 0, etag: null, data: { words: [], progress: {} } } as StoredCache);
   const front = reading ? `${word} [${reading}]` : word;
   if (!cached.data.words.some((w) => w.front === front)) {
     cached.data.words.push({ front, back, notes, context: "" });

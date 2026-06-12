@@ -24,17 +24,7 @@ test("f fullscreens the stage element", async ({ page }) => {
   await expect.poll(() => page.evaluate(() => document.fullscreenElement === null)).toBe(true);
 });
 
-test("a replays the current cue (currentTime jumps back to cue start)", async ({ page }) => {
-  await openPlayer(page, "clip.mp4");
-  await seekTo(page, 8); // inside cue 2 (6–9s)
-  await waitForTokens(page);
-  await page.keyboard.press("a");
-  const t = await page.evaluate(() => document.querySelector("video")!.currentTime);
-  expect(t).toBeGreaterThanOrEqual(5.9);
-  expect(t).toBeLessThan(6.5);
-});
-
-test("r replays the current cue (alias of a)", async ({ page }) => {
+test("r replays the current cue (a is the Anki toggle now)", async ({ page }) => {
   await openPlayer(page, "clip.mp4");
   await seekTo(page, 8); // inside cue 2 (6–9s)
   await waitForTokens(page);
@@ -68,10 +58,10 @@ test("letter hotkeys bind to e.code (work on a Russian layout)", async ({ page }
   await openPlayer(page, "clip.mp4");
   await seekTo(page, 8); // inside cue 2 (6–9s)
   await waitForTokens(page);
-  // Russian layout: physical A key produces key "ф", code "KeyA" -> replay.
+  // Russian layout: physical R key produces key "к", code "KeyR" -> replay.
   await page.evaluate(() => {
     window.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ф", code: "KeyA", bubbles: true }),
+      new KeyboardEvent("keydown", { key: "к", code: "KeyR", bubbles: true }),
     );
   });
   const t = await page.evaluate(() => document.querySelector("video")!.currentTime);
@@ -103,4 +93,18 @@ test("Space passes through to a focused button instead of toggling playback", as
   // native button activation opens the CC popover; playback stays paused
   await expect(page.locator(".cc-pop")).toBeVisible();
   await expect(video(page)).toHaveJSProperty("paused", true);
+});
+
+test("Tab still navigates cues after clicking a vbar button (focus guard)", async ({ page }) => {
+  await openPlayer(page, "clip.mp4");
+  await seekTo(page, 3); // inside cue 1 (2-5s); next cue starts at 6s
+  await waitForTokens(page);
+  // Clicking focuses the button (browsers do this even for tabIndex=-1) —
+  // Tab must STILL seek to the next cue, not do native focus traversal.
+  await page.locator(".vbar-mute").click();
+  await page.locator(".vbar-mute").click(); // unmute again, keep focus
+  await page.keyboard.press("Tab");
+  const t = await page.evaluate(() => document.querySelector("video")!.currentTime);
+  expect(t).toBeGreaterThanOrEqual(5.5);
+  expect(t).toBeLessThan(6.5);
 });

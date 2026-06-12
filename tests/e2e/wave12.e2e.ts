@@ -15,8 +15,8 @@ async function deleteFront(page: import("@playwright/test").Page, front: string)
   await page.request.post("/api/anki/delete", { data: { front } });
 }
 
-test("read mode: Add to Anki mines the word with sentence context + source", async ({ page }) => {
-  await deleteFront(page, "勉強 [フェイク]");
+test("read mode: `a` mines the word with sentence context + source", async ({ page }) => {
+  await deleteFront(page, "勉強 [べんきょう]");
   await openRead(page);
   const tok = page.locator(".read-para .tok").first(); // 勉強
   await tok.waitFor({ timeout: 20_000 });
@@ -25,9 +25,11 @@ test("read mode: Add to Anki mines the word with sentence context + source", asy
   await expect(popup).toBeVisible();
   await expect(popup.locator(".translation")).toBeVisible(); // fake lookup in
 
-  await popup.locator("button", { hasText: "Add to Anki" }).click();
-  // optimistic flip to the saved/Delete state
-  await expect(popup.locator("button", { hasText: "Delete" })).toBeVisible();
+  // no Add/Delete buttons — `a` toggles, the word color is the state cue
+  await expect(popup.locator("button", { hasText: "Add to Anki" })).toHaveCount(0);
+  await page.keyboard.press("a");
+  // optimistic flip to the saved (in-deck) color
+  await expect(popup.locator(".word")).toHaveClass(/saved/);
 
   // fake anki received the card
   await expect
@@ -36,12 +38,12 @@ test("read mode: Add to Anki mines the word with sentence context + source", asy
       const { words } = (await res.json()) as { words: { front: string }[] };
       return words.map((w) => w.front);
     })
-    .toContain("勉強 [フェイク]");
+    .toContain("勉強 [べんきょう]");
 
   // context = "JP paragraph<br>RU translation<br>source: <doc>" — no frame
   const res = await page.request.get("/api/anki/cards");
   const cards = (await res.json()) as { front: string; context: string }[];
-  const card = cards.find((c) => c.front === "勉強 [フェイク]");
+  const card = cards.find((c) => c.front === "勉強 [べんきょう]");
   expect(card).toBeTruthy();
   expect(card!.context).toContain("勉強します。");
   expect(card!.context).toContain("Я учусь.");
@@ -114,10 +116,10 @@ test("Ctrl+K palette: navigate and run player actions", async ({ page }) => {
   // typing in the palette input never triggers player hotkeys
   await palette.locator("input").fill("w");
   await expect(page.locator(".lookup.prestudy")).toHaveCount(0);
-  await palette.locator("input").fill("hard");
-  await expect(palette.locator(".palette-row.sel")).toContainText("hard mode");
+  await palette.locator("input").fill("autopause");
+  await expect(palette.locator(".palette-row.sel")).toContainText("autopause");
   await page.keyboard.press("Enter");
-  await expect(page.locator(".toast")).toHaveText("hard mode on");
+  await expect(page.locator(".toast")).toHaveText("autopause on");
 });
 
 test("? opens the hotkey cheatsheet; player hotkeys stay quiet under it", async ({ page }) => {
@@ -168,8 +170,8 @@ test("due words from progress get the dotted .due hint", async ({ page }) => {
 
 test("pre-study promotes i+1 candidates with a badge", async ({ page }) => {
   // leave 勉強 / 図書館 as the only unknowns of their cues
-  await deleteFront(page, "勉強 [フェイク]");
-  await deleteFront(page, "図書館 [フェイク]");
+  await deleteFront(page, "勉強 [べんきょう]");
+  await deleteFront(page, "図書館 [としょかん]");
   await page.addInitScript(() => {
     localStorage.setItem(
       "zr.known",

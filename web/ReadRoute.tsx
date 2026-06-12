@@ -9,7 +9,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type Cue, type LibraryEntry, type WordLookup } from "./api.ts";
 import { Read } from "./Read.tsx";
 import { TokenLine, AccentReading } from "./TokenLine.tsx";
-import { buildWordIndex, matchFront, type WordIndex } from "./progress.ts";
+import {
+  buildWordIndex,
+  matchFront,
+  withFront,
+  withoutFront,
+  type WordIndex,
+} from "./progress.ts";
 import { getTokenizer, type KToken } from "./tokenizer.ts";
 import { accentOf, loadAccents } from "./accent.ts";
 import { readBlacklist, writeBlacklist } from "./blacklist.ts";
@@ -60,12 +66,32 @@ export function ReadRoute({
   const [popup, setPopup] = useState<ReadPopup | null>(null);
   const [lookup, setLookup] = useState<WordLookup | null>(null);
   const [lookupLoading, setLookupLoading] = useState(false);
-  // deck fronts (for the Add/Delete button state), optimistically updated
+  // deck fronts (drives the popup saved-state color), optimistically updated
   const [knownFronts, setKnownFronts] = useState<Set<string>>(new Set());
+  // optimistic fronts not yet confirmed by the server payload
+  const pendingFrontsRef = useRef<Set<string>>(new Set());
   const deckCardsRef = useRef<Map<string, { front: string; back: string; notes: string }>>(
     new Map(),
   );
   const panelRef = useRef<HTMLDivElement>(null);
+  // `a` (Anki toggle) / `g` (regenerate) hotkeys reach the latest closures
+  const ankiToggleRef = useRef<() => void>(() => {});
+  const regenRef = useRef<() => void>(() => {});
+
+  const markFrontOptimistic = useCallback((front: string) => {
+    pendingFrontsRef.current.add(front);
+    setKnownFronts((prev) => new Set(prev).add(front));
+    setWordIndex((prev) => withFront(prev, front));
+  }, []);
+  const unmarkFrontOptimistic = useCallback((front: string) => {
+    pendingFrontsRef.current.delete(front);
+    setKnownFronts((prev) => {
+      const next = new Set(prev);
+      next.delete(front);
+      return next;
+    });
+    setWordIndex((prev) => withoutFront(prev, front));
+  }, []);
 
   // ask… follow-up thread (cleared when the popup retargets/closes)
   const [qa, setQa] = useState<QaItem[]>([]);
@@ -129,13 +155,16 @@ export function ReadRoute({
       .ankiWords()
       .then((a) => {
         if (cancelled) return;
-        setWordIndex(buildWordIndex(a.words, a.progress));
+        const fronts = new Set(a.words.map((w) => w.front));
+        for (const f of pendingFrontsRef.current) {
+          if (fronts.has(f)) pendingFrontsRef.current.delete(f); // confirmed
+          else fronts.add(f); // still pending — keep the optimistic mark
+        }
+        let idx = buildWordIndex(a.words, a.progress);
+        for (const f of pendingFrontsRef.current) idx = withFront(idx, f);
+        setWordIndex(idx);
         deckCardsRef.current = new Map(a.words.map((w) => [w.front, w]));
-        setKnownFronts((prev) => {
-          const next = new Set(a.words.map((w) => w.front));
-          for (const f of prev) next.add(f); // keep optimistic adds
-          return next;
-        });
+        setKnownFronts(fronts);
       })
       .catch(() => {});
     void loadAccents()
@@ -189,6 +218,10 @@ export function ReadRoute({
       } else if (e.code === "KeyK") {
         toggleKnown(key);
         tmEvent("mark_known", { word: key });
+      } else if (e.code === "KeyA") {
+        ankiToggleRef.current();
+      } else if (e.code === "KeyG") {
+        regenRef.current();
       }
     };
     const onDown = (e: MouseEvent) => {
@@ -205,7 +238,10 @@ export function ReadRoute({
     };
   }, [popup, toggleKnown, toggleBlacklist]);
 
-  // simplified lookup: deck card if present, else Gemini
+  // simplified lookup: deck card if present, else Gemini. Depends on
+  // wordIndex too: deck data arriving AFTER the popup opened (slow
+  // /api/anki/words) must still fill from the card instead of Gemini.
+  const lookupArrivedRef = useRef(false);
   useEffect(() => {
     if (!popup) {
       setLookup(null);
@@ -224,6 +260,9 @@ export function ReadRoute({
       setLookupLoading(false);
       return;
     }
+    // a Gemini answer already on screen for this popup target stays — the
+    // wordIndex dep must not refire the network call on every deck refresh
+    if (lookupArrivedRef.current) return;
     let cancelled = false;
     setLookup(null);
     setLookupLoading(true);
@@ -233,13 +272,46 @@ export function ReadRoute({
         context: popup.context,
         source: entry?.name ?? "",
       })
-      .then((res) => !cancelled && setLookup(res))
+      .then((res) => {
+        if (cancelled) return;
+        lookupArrivedRef.current = true;
+        setLookup(res);
+      })
       .catch(() => {})
       .finally(() => !cancelled && setLookupLoading(false));
     return () => {
       cancelled = true;
     };
+  }, [popup?.surface, popup?.context, wordIndex]);
+  useEffect(() => {
+    lookupArrivedRef.current = false;
   }, [popup?.surface, popup?.context]);
+
+  // `g`: regenerate the explanation (bypass any deck-card fill)
+  const onRegen = useCallback(() => {
+    if (!popup) return;
+    let cancelled = false;
+    setLookup(null);
+    setLookupLoading(true);
+    void (api.lookup as (p: {
+      word: string;
+      context: string;
+      source: string;
+      noCache?: boolean;
+    }) => Promise<WordLookup>)({
+      word: popup.surface,
+      context: popup.context,
+      source: entry?.name ?? "",
+      noCache: true,
+    })
+      .then((res) => {
+        if (cancelled) return;
+        lookupArrivedRef.current = true;
+        setLookup(res);
+      })
+      .catch(() => {})
+      .finally(() => !cancelled && setLookupLoading(false));
+  }, [popup, entry]);
 
   // reset the ask… thread when the popup retargets or closes
   useEffect(() => {
@@ -298,7 +370,14 @@ export function ReadRoute({
     const reading = lookup?.reading || popup.reading;
     return reading ? `${popup.surface} [${reading}]` : popup.surface;
   }, [popup, lookup]);
-  const popupSaved = popupFront ? knownFronts.has(popupFront) : false;
+  const popupMatchedFront = useMemo(() => {
+    if (!popup) return null;
+    return (
+      matchFront(wordIndex, popup.surface, popup.reading, popup.dictForm) ??
+      (popupFront && knownFronts.has(popupFront) ? popupFront : null)
+    );
+  }, [popup, wordIndex, knownFronts, popupFront]);
+  const popupSaved = popupMatchedFront != null;
 
   // Add to Anki: mining flow with the paragraph as context — no video frame/
   // audio (no mediaId/timestamp → the server skips capture). Context format:
@@ -306,7 +385,7 @@ export function ReadRoute({
   const onAdd = useCallback(async () => {
     if (!popup || !lookup || !popupFront || !entry) return;
     const front = popupFront;
-    setKnownFronts((prev) => new Set(prev).add(front)); // optimistic
+    markFrontOptimistic(front); // instant color flip
     const docName = entry.name.replace(/\.[^.]+$/, "");
     try {
       await (api.ankiAdd as (p: Record<string, unknown>) => Promise<unknown>)({
@@ -320,29 +399,30 @@ export function ReadRoute({
       });
       tmEvent("anki_add_read", { word: popup.surface, mediaId: id });
     } catch {
-      // revert the optimistic state
-      setKnownFronts((prev) => {
-        const next = new Set(prev);
-        next.delete(front);
-        return next;
-      });
+      unmarkFrontOptimistic(front); // revert the optimistic state
     }
-  }, [popup, lookup, popupFront, entry, id]);
+  }, [popup, lookup, popupFront, entry, id, markFrontOptimistic, unmarkFrontOptimistic]);
 
   const onDelete = useCallback(async () => {
-    if (!popupFront) return;
+    const front = popupMatchedFront; // the card that actually matched
+    if (!front) return;
+    unmarkFrontOptimistic(front); // instant color flip
     try {
-      await api.ankiDelete(popupFront);
-      setKnownFronts((prev) => {
-        const next = new Set(prev);
-        next.delete(popupFront);
-        return next;
-      });
-      deckCardsRef.current.delete(popupFront);
+      await api.ankiDelete(front);
+      deckCardsRef.current.delete(front);
     } catch {
-      /* keep the saved state — delete failed */
+      markFrontOptimistic(front); // delete failed — card is still there
     }
-  }, [popupFront]);
+  }, [popupMatchedFront, markFrontOptimistic, unmarkFrontOptimistic]);
+
+  // `a`: toggle the popup word in Anki (no buttons — color is the state cue)
+  const onAnkiToggle = useCallback(() => {
+    if (!popup) return;
+    if (popupSaved) void onDelete();
+    else if (lookup) void onAdd();
+  }, [popup, popupSaved, lookup, onAdd, onDelete]);
+  ankiToggleRef.current = onAnkiToggle;
+  regenRef.current = onRegen;
 
   // ask… follow-up (same contract as the player popup)
   const onAsk = useCallback(async () => {
@@ -428,7 +508,9 @@ export function ReadRoute({
           style={{ position: "absolute", left: popup.x, top: popup.y }}
         >
           <div>
-            <span className="word">{popup.surface}</span>
+            <span className={`word${popupSaved ? " saved" : ""}`}>
+              {popup.surface}
+            </span>
             {readingNode && <span className="reading read-reading">{readingNode}</span>}
             {popupKey && blacklist.has(popupKey) && (
               <span className="known-flag" title="Blacklisted — press x to toggle">
@@ -449,24 +531,6 @@ export function ReadRoute({
             </>
           )}
           <div className="row">
-            {popupSaved ? (
-              <button
-                className="btn danger"
-                onClick={() => void onDelete()}
-                title="Remove this word from Anki"
-              >
-                Delete
-              </button>
-            ) : (
-              <button
-                className="btn"
-                disabled={!lookup}
-                onClick={() => void onAdd()}
-                title="Add this word to Anki with the sentence as context (no frame/audio)"
-              >
-                Add to Anki
-              </button>
-            )}
             <button className="btn" onClick={() => setPopup(null)}>
               Close
             </button>

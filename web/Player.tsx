@@ -19,7 +19,13 @@ import {
 } from "./api.ts";
 import { activeCueIndex, contextAround } from "./cues.ts";
 import { getTokenizer, isLexical, kataToHira, type KToken } from "./tokenizer.ts";
-import { buildWordIndex, matchFront, type WordIndex } from "./progress.ts";
+import {
+  buildWordIndex,
+  matchFront,
+  withFront,
+  withoutFront,
+  type WordIndex,
+} from "./progress.ts";
 import { TokenLine, AccentReading, wordKey } from "./TokenLine.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 import { heatBins, heatAlpha } from "./heat.ts";
@@ -34,7 +40,6 @@ import {
   VolumeXIcon,
   MaximizeIcon,
   CaptionsIcon,
-  RotateCwIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   BookOpenIcon,
@@ -76,6 +81,10 @@ interface PopupState {
   secondary?: string; // RU cue text shown at the same time (sentence panels)
   dictForm?: string; // basic_form when it differs from the surface (e.g. 食べる)
   timestamp: number;
+  // The plain cue text at popup-open time: card context + frame/audio capture
+  // stay coherent with what the user looked at, even if playback moved on
+  // while the (pinned) popup stayed open.
+  cueText: string;
 }
 
 interface QaItem {
@@ -209,7 +218,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   const [blurOff, setBlurOff] = useState(false);
   const blurOffRef = useRef(false);
   const lastBDownRef = useRef(0);
-  // Autopause: no UI control — toggled with the `u` hotkey, persisted.
+  // Autopause: no UI control — toggled with the `p` hotkey, persisted.
   const [autopause, setAutopause] = useState(() => {
     try {
       return localStorage.getItem("zr.autopause") === "1";
@@ -310,9 +319,13 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   // liveAnki snapshot so a background revalidation that raced an add can't
   // un-mark a freshly-added word. Confirmed fronts drop out of the set.
   const pendingFrontsRef = useRef<Set<string>>(new Set());
+  // Instant feedback: the optimistic front goes into the WORD INDEX too, so
+  // TokenLine recolors the word in the same render — not seconds later when
+  // the server roundtrip + cache refresh lands.
   const markFrontOptimistic = useCallback((front: string) => {
     pendingFrontsRef.current.add(front);
     setKnownFronts((prev) => new Set(prev).add(front));
+    setWordIndex((prev) => withFront(prev, front));
   }, []);
   const unmarkFrontOptimistic = useCallback((front: string) => {
     pendingFrontsRef.current.delete(front);
@@ -321,15 +334,19 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       next.delete(front);
       return next;
     });
+    setWordIndex((prev) => withoutFront(prev, front));
   }, []);
   useEffect(() => {
     if (!liveAnki) return;
-    setWordIndex(buildWordIndex(liveAnki.words, liveAnki.progress));
     const fronts = new Set(liveAnki.words.map((w) => w.front));
     for (const f of pendingFrontsRef.current) {
       if (fronts.has(f)) pendingFrontsRef.current.delete(f); // confirmed
       else fronts.add(f); // still pending — keep the optimistic mark
     }
+    // pending (not-yet-confirmed) optimistic fronts survive the rebuild
+    let idx = buildWordIndex(liveAnki.words, liveAnki.progress);
+    for (const f of pendingFrontsRef.current) idx = withFront(idx, f);
+    setWordIndex(idx);
     setKnownFronts(fronts);
     deckCardsRef.current = new Map(liveAnki.words.map((w) => [w.front, w]));
   }, [liveAnki]);
@@ -564,29 +581,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     shadowRepeatsRef.current = shadowRepeats;
   }, [shadowRepeats]);
 
-  // --- hard mode (`h`): hide JP text while playing, reveal on pause/hover/tail ---
-  const [hardMode, setHardMode] = useState(() => {
-    try {
-      return localStorage.getItem("zr.hardmode") === "1";
-    } catch {
-      return false;
-    }
-  });
-  const hardModeRef = useRef(hardMode);
-  const toggleHardMode = useCallback(() => {
-    const next = !hardModeRef.current;
-    hardModeRef.current = next;
-    setHardMode(next);
-    try {
-      localStorage.setItem("zr.hardmode", next ? "1" : "0");
-    } catch {
-      /* ignore */
-    }
-    toast(next ? "hard mode on" : "hard mode off");
-  }, [toast]);
-  // delayed-reveal: true in the last 0.2s of the active cue (listen first,
-  // read after); driven from the timeupdate handler below.
-  const [revealTail, setRevealTail] = useState(false);
   const [isPaused, setIsPaused] = useState(true);
   useEffect(() => {
     const v = videoRef.current;
@@ -642,9 +636,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   });
   const [lookup, setLookup] = useState<WordLookup | null>(null);
   const [lookupLoading, setLookupLoading] = useState(false);
-  const [frameLoading, setFrameLoading] = useState(false);
-  const [frameAdded, setFrameAdded] = useState(false);
-  const [reloadLoading, setReloadLoading] = useState(false);
   const lookupCache = useRef<Map<string, WordLookup>>(new Map());
   const inflight = useRef<Map<string, Promise<WordLookup>>>(new Map());
 
@@ -1067,13 +1058,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       // Track-time for the PRIMARY track: subtract the user's sync offset.
       const t = v.currentTime - subOffset;
       const idx = activeCueIndex(displayCues, t);
-      // Hard-mode tail reveal: show the JP text in the last 0.2s of the cue.
-      setRevealTail(
-        hardModeRef.current &&
-          idx >= 0 &&
-          displayCues[idx] != null &&
-          displayCues[idx]!.end - t <= 0.2,
-      );
       // Shadowing loop: on reaching the looped cue's end, seek back to its
       // start and keep playing. Takes precedence over autopause (the early
       // return below skips the autopause branch entirely while looping).
@@ -1169,6 +1153,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
 
   // popup-open flag for the hotkey handler (Escape closes the lookup panel)
   const popupOpenRef = useRef(false);
+  // `a` (Anki toggle) and `g` (regenerate) reach their latest closures via
+  // refs — they're defined far below, after the lookup state they need.
+  const ankiToggleRef = useRef<() => void>(() => {});
+  const regenLookupRef = useRef<() => void>(() => {});
   // known-set key of the word popup currently open (for the `k` hotkey)
   const popupKeyRef = useRef<string | null>(null);
   useEffect(() => {
@@ -1308,7 +1296,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     // e.key, which is layout-correct for them.
     const LETTERS: Record<string, string> = {
       KeyF: "f", KeyA: "a", KeyR: "r", KeyL: "l", KeyK: "k", KeyS: "s",
-      KeyH: "h", KeyU: "u", KeyW: "w", KeyB: "b", KeyI: "i", KeyX: "x",
+      KeyP: "p", KeyG: "g", KeyW: "w", KeyB: "b", KeyI: "i", KeyX: "x",
     };
     const HANDLED = new Set([
       " ",
@@ -1318,7 +1306,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       "Tab",
       ...Object.values(LETTERS),
     ]);
-    const REPEAT_TOGGLES = new Set([" ", "f", "l", "k", "s", "h", "u", "w", "b", "i", "x"]);
+    const REPEAT_TOGGLES = new Set([" ", "f", "l", "k", "s", "p", "g", "a", "w", "b", "i", "x"]);
     const isTextInput = (el: Element | null): boolean => {
       if (!el) return false;
       if (el.tagName === "TEXTAREA") return true;
@@ -1343,8 +1331,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       // Layout-independent letter token: physical key for letters, e.key else.
       const kb = LETTERS[e.code] ?? e.key;
       // Focused <select>/<button>: letter hotkeys still work (no conflict),
-      // but Space/Enter/Tab/arrows belong to the element — except Shift+←/→
-      // (episode nav), which selects/buttons don't use.
+      // but Space/Enter/arrows belong to the element — except Shift+←/→
+      // (episode nav), which selects/buttons don't use. Tab is NOT passed:
+      // the player owns cue navigation, and browsers focus buttons on CLICK
+      // (even tabIndex={-1} ones), which used to break Tab until blur.
       const passEl = (el: Element | null) =>
         el?.tagName === "SELECT" || el?.tagName === "BUTTON";
       const episodeNav =
@@ -1352,7 +1342,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       if (
         (passEl(active) || passEl(e.target as Element | null)) &&
         !episodeNav &&
-        (kb === " " || kb === "Enter" || kb === "Tab" || kb.startsWith("Arrow"))
+        (kb === " " || kb === "Enter" || kb.startsWith("Arrow"))
       )
         return;
       // Escape closes the lookup panel; otherwise leave it to native handling
@@ -1436,10 +1426,18 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           v.currentTime = Math.min(v.duration || Infinity, v.currentTime + FRAME);
           break;
         case "a":
+          // Anki toggle for the open popup word: add when new, delete when
+          // the word is already in the deck. Color is the only state cue.
+          ankiToggleRef.current();
+          break;
+        case "g":
+          // Regenerate the popup explanation (fresh Gemini call, no cache).
+          regenLookupRef.current();
+          break;
         case "r": {
           // Replay: jump to the start of the current primary cue; if within
           // the first 0.3s (or between cues), step back to the previous one —
-          // tapping `a` repeatedly walks backward cue by cue.
+          // tapping `r` repeatedly walks backward cue by cue.
           const off = subOffsetRef.current;
           const cues = primaryCuesRef.current;
           if (cues.length === 0) break;
@@ -1538,13 +1536,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           toast(n > 0 ? `loop ×${n}` : "loop on");
           break;
         }
-        case "h":
-          toggleHardMode();
-          break;
         case "w":
           togglePreStudy();
           break;
-        case "u":
+        case "p":
           toggleAutopause();
           break;
         case "b": {
@@ -1610,7 +1605,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       window.removeEventListener("keyup", onKeyUp, true);
       window.removeEventListener("blur", onWinBlur);
     };
-  }, [changeOffset, adjustSubScale, toast, clearCloseTimer, resumeFromHover, toggleSidebar, toggleKnown, toggleBlacklist, toggleHardMode, gotoEpisode, togglePreStudy, toggleAutopause]);
+  }, [changeOffset, adjustSubScale, toast, clearCloseTimer, resumeFromHover, toggleSidebar, toggleKnown, toggleBlacklist, gotoEpisode, togglePreStudy, toggleAutopause]);
 
   const primaryText = activeP >= 0 && activeP < displayCues.length ? displayCues[activeP]!.text : "";
   // Bounds-checked: activeS can be stale for one render after the secondary
@@ -1702,8 +1697,11 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           ...(sText ? { sentenceTranslation: sText } : {}),
           ...(preFrames ? { mediaId: entry.id, timestamp: it.time } : {}),
         });
-        // optimistic known-marking (front format matches the server's card)
+        // optimistic known-marking (front format matches the server's card);
+        // the placeholder lemma mark is swapped for the real front so it
+        // can't linger in pendingFronts forever (it never gets confirmed).
         const front = lk.reading ? `${it.lemma} [${lk.reading}]` : it.lemma;
+        if (front !== it.lemma) unmarkFrontOptimistic(it.lemma);
         markFrontOptimistic(front);
         setPreStudy((prev) =>
           prev
@@ -1760,6 +1758,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             ? tok.basic_form
             : undefined,
         timestamp: videoRef.current?.currentTime ?? 0,
+        cueText: ctxOverride || primaryText,
       };
     },
     [displayCues, activeP, primaryText, secondaryText],
@@ -1869,6 +1868,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         context: markedContext(displayCues, activeP) || primaryText,
         secondary: secondaryText,
         timestamp: videoRef.current?.currentTime ?? 0,
+        cueText: primaryText,
       });
     },
     [primaryText, secondaryText, displayCues, activeP, clearOpenTimer, clearCloseTimer, pauseForHover],
@@ -1952,8 +1952,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       setLookup(null);
       return;
     }
-    setFrameAdded(false);
-    setFrameLoading(false);
     sessLookupsRef.current += 1; // session-summary counter
     // Word already in the deck? Fill the popup from the existing card —
     // no Gemini call. The Regenerate button still forces a fresh lookup.
@@ -2022,35 +2020,11 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     };
   }, [popup?.kind, popup?.surface, popup?.context]);
 
-  // re-run the current lookup WITH a video frame, replacing the panel content.
-  const onAddFrame = useCallback(async () => {
-    if (!popup) return;
-    setFrameLoading(true);
-    try {
-      const res = await lookupApi({
-        word: popup.surface,
-        context: popup.context,
-        secondary: popup.secondary,
-        source: entry.name,
-        mediaId: entry.id,
-        timestamp: popup.timestamp,
-        withFrame: true,
-      });
-      lookupCache.current.set(`${popup.surface} ${popup.context}`, res);
-      setLookup(res);
-      setFrameAdded(true);
-    } catch (e) {
-      toast(`Frame lookup failed: ${e instanceof Error ? e.message : e}`);
-    } finally {
-      setFrameLoading(false);
-    }
-  }, [popup, entry.id, entry.name, toast]);
-
   // Regenerate the lookup text for the same word, BYPASSING the cache (force a
   // fresh Gemini call). Replaces the panel content and updates the cache.
+  // Bound to the `g` hotkey (no button — laconic popup).
   const onReload = useCallback(async () => {
-    if (!popup) return;
-    setReloadLoading(true);
+    if (!popup || popup.kind !== "word") return;
     setLookupLoading(true);
     try {
       const res = await lookupApi({
@@ -2066,10 +2040,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     } catch (e) {
       toast(`Regenerate failed: ${e instanceof Error ? e.message : e}`);
     } finally {
-      setReloadLoading(false);
       setLookupLoading(false);
     }
   }, [popup, entry.name, toast]);
+  regenLookupRef.current = () => void onReload();
 
   // Position the lookup panel: prefer above the word, flip below when there
   // isn't room, and clamp horizontally so it can never be cut off-screen.
@@ -2096,7 +2070,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     left = Math.max(margin, Math.min(left, vw - width - margin));
 
     setPopupPos({ left, top, visibility: "visible" });
-  }, [popup, lookup, lookupLoading, frameLoading, frameAdded, explain, explainLoading, qa]);
+  }, [popup, lookup, lookupLoading, explain, explainLoading, qa]);
 
   const popupFront = useMemo(() => {
     if (!popup) return null;
@@ -2104,7 +2078,19 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     return reading ? `${popup.surface} [${reading}]` : popup.surface;
   }, [popup, lookup]);
 
-  const popupSaved = popupFront ? knownFronts.has(popupFront) : false;
+  // The deck front this popup actually refers to: reading-aware match for
+  // word popups (conjugated surfaces resolve to the dictionary-form card),
+  // exact front for sentence panels. null = not in the deck.
+  const popupMatchedFront = useMemo(() => {
+    if (!popup) return null;
+    if (popup.kind === "sentence")
+      return knownFronts.has(popup.surface) ? popup.surface : null;
+    return (
+      matchFront(wordIndex, popup.surface, popup.reading, popup.dictForm) ??
+      (popupFront && knownFronts.has(popupFront) ? popupFront : null)
+    );
+  }, [popup, wordIndex, knownFronts, popupFront]);
+  const popupSaved = popupMatchedFront != null;
 
   // Bounds of the primary cue at `timestamp` in FILE time (cue times are
   // track-time, so re-add the user's sync offset) for sentence-audio capture.
@@ -2121,7 +2107,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
 
   const onAdd = useCallback(async () => {
     if (!popup || !lookup || !popupFront) return;
-    const v = videoRef.current;
     const front = popupFront;
     // OPTIMISTIC: immediately flip the button to the saved/Delete state by
     // marking the word known; POST in the background and revert on failure.
@@ -2139,7 +2124,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           const text = cues[i]!.text;
           if (counts[i] !== 1) continue;
           if (!text.includes(popup.surface) && !text.includes(target)) continue;
-          if (text.trim() === primaryText.trim()) continue;
+          if (text.trim() === popup.cueText.trim()) continue;
           iPlusOne = text.trim();
           break;
         }
@@ -2153,10 +2138,13 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         notes: iPlusOne
           ? `${lookup.notes ? `${lookup.notes}\n` : ""}例: ${iPlusOne}`
           : lookup.notes,
-        context: primaryText,
+        // popup-open time data — NOT the current playhead: with a pinned
+        // popup the video may have moved on; frame, audio and context must
+        // all describe the cue the user looked up.
+        context: popup.cueText,
         ...(popup.secondary ? { sentenceTranslation: popup.secondary } : {}),
         mediaId: entry.id,
-        timestamp: v?.currentTime ?? 0,
+        timestamp: popup.timestamp,
         ...cueBoundsAt(popup.timestamp),
       });
       sessCardsRef.current += 1;
@@ -2167,13 +2155,12 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       unmarkFrontOptimistic(front);
       toast(`Add failed: ${e instanceof Error ? e.message : e}`);
     }
-  }, [popup, lookup, popupFront, primaryText, entry.id, refreshAnki, toast, cueBoundsAt, markFrontOptimistic, unmarkFrontOptimistic]);
+  }, [popup, lookup, popupFront, entry.id, refreshAnki, toast, cueBoundsAt, markFrontOptimistic, unmarkFrontOptimistic]);
 
   // Add the whole sentence as an Anki card (front = JP sentence, back =
   // translation, notes = breakdown + idioms). Same optimistic flow as words.
   const onAddSentence = useCallback(async () => {
     if (!popup || popup.kind !== "sentence" || !explain) return;
-    const v = videoRef.current;
     const front = popup.surface;
     markFrontOptimistic(front);
     try {
@@ -2185,7 +2172,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         context: "",
         ...(popup.secondary ? { sentenceTranslation: popup.secondary } : {}),
         mediaId: entry.id,
-        timestamp: v?.currentTime ?? popup.timestamp,
+        timestamp: popup.timestamp,
         ...cueBoundsAt(popup.timestamp),
       });
       sessCardsRef.current += 1;
@@ -2238,15 +2225,36 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   }, [popup, askText, askBusy, lookup, explain, entry.name]);
 
   const onDelete = useCallback(async () => {
-    if (!popupFront) return;
+    // Delete the card that actually MATCHED (e.g. the 食べる card for a
+    // 食べた popup) — deleting the token-built front would silently no-op.
+    const front = popupMatchedFront;
+    if (!front) return;
+    unmarkFrontOptimistic(front); // instant color flip back to unknown
     try {
-      await api.ankiDelete(popupFront);
+      await api.ankiDelete(front);
       toast("Removed from Anki");
       await refreshAnki();
     } catch (e) {
+      markFrontOptimistic(front); // revert — the card is still there
       toast(`Delete failed: ${e instanceof Error ? e.message : e}`);
     }
-  }, [popupFront, refreshAnki, toast]);
+  }, [popupMatchedFront, refreshAnki, toast, markFrontOptimistic, unmarkFrontOptimistic]);
+
+  // `a` hotkey: toggle the popup word/sentence in Anki. Color (and the small
+  // "from your deck" badge when the card was matched) is the only state cue.
+  const onAnkiToggle = useCallback(() => {
+    if (!popup) return;
+    if (popupSaved) {
+      void onDelete();
+      return;
+    }
+    if (popup.kind === "sentence") {
+      if (explain) void onAddSentence();
+      return;
+    }
+    if (lookup) void onAdd();
+  }, [popup, popupSaved, lookup, explain, onAdd, onAddSentence, onDelete]);
+  ankiToggleRef.current = onAnkiToggle;
 
   // Attach the SSE stream of a whisper job (new or rediscovered after reload)
   // and drive the progress UI + live cues from it.
@@ -2270,16 +2278,25 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         dirty = true;
         if (flushTimer == null) flushTimer = window.setTimeout(flush, 250);
       };
+      // Never two live streams: a rediscovery attach racing a user-initiated
+      // one would otherwise leak the previous EventSource (and flicker cues
+      // between two competing liveCues arrays).
+      whisperEsRef.current?.close();
       const es = new EventSource(api.whisperEventsUrl(jobId));
       whisperEsRef.current = es;
       es.onopen = () => {
         whisperRetryRef.current = 0; // healthy connection → reset retry budget
       };
       es.onmessage = (ev) => {
-        const data = JSON.parse(ev.data) as
+        let data:
           | { type: "snapshot"; status: string; cues: Cue[] }
           | { type: "status"; status: string; error?: string }
           | { type: "cue"; cue: Cue };
+        try {
+          data = JSON.parse(ev.data as string) as typeof data;
+        } catch {
+          return; // one malformed event must not kill the handler
+        }
         if (data.type === "snapshot") {
           liveCues.length = 0;
           liveCues.push(...data.cues);
@@ -2343,6 +2360,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     }
     whisperRetryRef.current += 1;
     window.setTimeout(() => {
+      if (!mountedRef.current) return; // Player unmounted — no orphan SSE
       if (whisperEsRef.current != null) return; // already reattached
       void api
         .whisperActive(entry.id)
@@ -2755,7 +2773,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   // so the registration never churns with re-renders.
   const cmdCtxRef = useRef({
     toggleAutopause,
-    toggleHardMode,
     toggleSidebar,
     togglePreStudy,
     toggleFullscreen,
@@ -2769,7 +2786,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   });
   cmdCtxRef.current = {
     toggleAutopause,
-    toggleHardMode,
     toggleSidebar,
     togglePreStudy,
     toggleFullscreen,
@@ -2784,8 +2800,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   useEffect(() => {
     const c = () => cmdCtxRef.current;
     return registerCommands("player", [
-      { id: "pl.autopause", title: "player: toggle autopause", hint: "u", run: () => c().toggleAutopause() },
-      { id: "pl.hard", title: "player: toggle hard mode", hint: "h", run: () => c().toggleHardMode() },
+      { id: "pl.autopause", title: "player: toggle autopause", hint: "p", run: () => c().toggleAutopause() },
       { id: "pl.sidebar", title: "player: toggle cue sidebar", hint: "l", run: () => c().toggleSidebar() },
       { id: "pl.prestudy", title: "player: pre-study panel", hint: "w", run: () => c().togglePreStudy() },
       { id: "pl.fs", title: "player: fullscreen", hint: "f", run: () => c().toggleFullscreen() },
@@ -2879,9 +2894,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           onClick={togglePlay}
         />
         <div
-          className={`sub-overlay${hardMode ? " hardmode" : ""}${
-            hardMode && (isPaused || revealTail) ? " reveal" : ""
-          }`}
+          className="sub-overlay"
           style={{ "--sub-scale": subScale } as React.CSSProperties}
         >
           {cuesLoading && !primaryText && (
@@ -3178,7 +3191,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         >
           {popup.kind === "sentence" ? (
             <>
-              <div className="sentence">{popup.surface}</div>
+              <div className={`sentence${popupSaved ? " saved" : ""}`}>
+                {popup.surface}
+              </div>
               {explainLoading && <div className="spin">Explaining…</div>}
               {explain && (
                 <>
@@ -3189,31 +3204,13 @@ export function Player({ entry, startAt, toast, settings }: Props) {
                   )}
                 </>
               )}
-              <div className="row">
-                {popupSaved ? (
-                  <button
-                    className="btn danger"
-                    onClick={onDelete}
-                    title="Remove this sentence card from Anki"
-                  >
-                    Delete
-                  </button>
-                ) : (
-                  <button
-                    className="btn"
-                    disabled={!explain}
-                    onClick={onAddSentence}
-                    title="Add this sentence to Anki with the current video frame"
-                  >
-                    Add to Anki
-                  </button>
-                )}
-              </div>
             </>
           ) : (
             <>
           <div>
-            <span className="word">{popup.surface}</span>
+            <span className={`word${popupSaved ? " saved" : ""}`}>
+              {popup.surface}
+            </span>
             {(lookup?.reading || popup.reading) && (
               <span className="reading popup-reading">
                 {pitchOn && accents ? (
@@ -3242,7 +3239,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             {lookupFromDeck && (
               <span
                 className="deck-tag"
-                title="Filled from your existing Anki card — no AI call. Use ⟳ to regenerate."
+                title="Filled from your Anki card — a deletes it, g regenerates"
               >
                 from your deck
               </span>
@@ -3271,39 +3268,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
               {lookup.notes && <div className="notes">{lookup.notes}</div>}
             </>
           )}
-          <div className="row">
-            {popupSaved ? (
-              <button className="btn danger" onClick={onDelete} title="Remove this word from Anki">
-                Delete
-              </button>
-            ) : (
-              <button
-                className="btn"
-                disabled={!lookup}
-                onClick={onAdd}
-                title="Add this word to Anki with the current video frame"
-              >
-                Add to Anki
-              </button>
-            )}
-            <button
-              className="btn"
-              disabled={!lookup || frameLoading || frameAdded}
-              onClick={onAddFrame}
-              title="Re-run the lookup using the current video frame as visual context"
-            >
-              {frameLoading ? "Adding frame…" : frameAdded ? "Frame added" : "Add frame"}
-            </button>
-            <button
-              className="btn icon"
-              disabled={!lookup || reloadLoading}
-              onClick={onReload}
-              title="Regenerate the explanation from scratch (when Gemini's answer is off)"
-              aria-label="Regenerate explanation"
-            >
-              {reloadLoading ? "…" : <RotateCwIcon size={14} />}
-            </button>
-          </div>
           {encHits && encHits.length > 0 && (
             <div className="enc">
               <div

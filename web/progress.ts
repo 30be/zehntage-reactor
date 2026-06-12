@@ -4,47 +4,98 @@ import type { AnkiWord, ProgressEntry } from "./api.ts";
 import { kataToHira } from "./tokenizer.ts";
 
 export interface WordIndex {
-  // normalized surface (and "surface [reading]") -> front
+  // exact keys: the full front and "word [hiragana-reading]" -> front
   byKey: Map<string, string>;
+  // bare word of bracketed fronts -> candidate cards WITH their reading, so a
+  // token's reading can veto homograph matches (辛い[からい] ≠ 辛い(つらい)).
+  bare: Map<string, Array<{ front: string; reading: string }>>;
   progress: Record<string, ProgressEntry>;
+}
+
+function indexFront(idx: WordIndex, front: string): void {
+  idx.byKey.set(front, front);
+  // front is "word" or "word [reading]".
+  const m = front.match(/^(.+?)\s*\[(.+?)\]\s*$/);
+  if (m) {
+    const word = m[1]!.trim();
+    const reading = kataToHira(m[2]!.trim());
+    idx.byKey.set(`${word} [${reading}]`, front);
+    const list = idx.bare.get(word);
+    if (list) list.push({ front, reading });
+    else idx.bare.set(word, [{ front, reading }]);
+  }
 }
 
 export function buildWordIndex(
   words: AnkiWord[],
   progress: Record<string, ProgressEntry>,
 ): WordIndex {
-  const byKey = new Map<string, string>();
-  for (const w of words) {
-    const front = w.front;
-    byKey.set(front, front);
-    // front is "word" or "word [reading]" — index both the bare word and full.
-    const m = front.match(/^(.+?)\s*\[(.+?)\]\s*$/);
-    if (m) {
-      byKey.set(m[1]!.trim(), front);
-    }
+  const idx: WordIndex = { byKey: new Map(), bare: new Map(), progress };
+  for (const w of words) indexFront(idx, w.front);
+  return idx;
+}
+
+/** Clone-with-extra-front: optimistic add path (instant token coloring). */
+export function withFront(idx: WordIndex, front: string): WordIndex {
+  const next: WordIndex = {
+    byKey: new Map(idx.byKey),
+    bare: new Map(idx.bare),
+    progress: idx.progress,
+  };
+  // don't mutate a shared bare list — copy the bucket we touch
+  const m = front.match(/^(.+?)\s*\[(.+?)\]\s*$/);
+  if (m) {
+    const word = m[1]!.trim();
+    next.bare.set(word, [...(next.bare.get(word) ?? [])]);
   }
-  return { byKey, progress };
+  indexFront(next, front);
+  return next;
+}
+
+/** Clone-without-front: optimistic delete path. */
+export function withoutFront(idx: WordIndex, front: string): WordIndex {
+  const byKey = new Map<string, string>();
+  for (const [k, f] of idx.byKey) if (f !== front) byKey.set(k, f);
+  const bare = new Map<string, Array<{ front: string; reading: string }>>();
+  for (const [k, list] of idx.bare) {
+    const kept = list.filter((e) => e.front !== front);
+    if (kept.length) bare.set(k, kept);
+  }
+  return { byKey, bare, progress: idx.progress };
 }
 
 /** Find the matching Anki front for a surface form (+ optional reading).
- * Falls back to the dictionary form (basic_form) so conjugated tokens like
- * 食べた still match a 食べる card. */
+ *
+ * Reading-aware: when the token has a reading, a bracketed card only matches
+ * if its bracket reading agrees (kataToHira-normalized) — a 辛い[からい]
+ * card never claims 辛い read as つらい. Readingless fronts (sentence cards,
+ * legacy bare lemmas) match on exact text. Falls back to the dictionary form
+ * (basic_form) so conjugated tokens like 食べた still match a 食べる card —
+ * the surface reading can't be checked against the dictionary form there. */
 export function matchFront(
   idx: WordIndex,
   surface: string,
   reading?: string,
   basicForm?: string,
 ): string | null {
-  if (idx.byKey.has(surface)) return idx.byKey.get(surface)!;
-  if (reading) {
-    const hira = kataToHira(reading);
-    const withReading = `${surface} [${hira}]`;
-    if (idx.byKey.has(withReading)) return idx.byKey.get(withReading)!;
-    if (idx.byKey.has(`${surface} [${reading}]`))
-      return idx.byKey.get(`${surface} [${reading}]`)!;
+  const hira = reading ? kataToHira(reading) : null;
+  if (hira) {
+    const f = idx.byKey.get(`${surface} [${hira}]`);
+    if (f) return f;
+  }
+  // exact front text (readingless card, or a full "word [reading]" string)
+  const exact = idx.byKey.get(surface);
+  if (exact) return exact;
+  if (!hira) {
+    // no token reading to verify — accept any card for this bare word
+    const cands = idx.bare.get(surface);
+    if (cands && cands.length > 0) return cands[0]!.front;
   }
   if (basicForm && basicForm !== "*" && basicForm !== surface) {
-    if (idx.byKey.has(basicForm)) return idx.byKey.get(basicForm)!;
+    const exactBase = idx.byKey.get(basicForm);
+    if (exactBase) return exactBase;
+    const cands = idx.bare.get(basicForm);
+    if (cands && cands.length > 0) return cands[0]!.front;
   }
   return null;
 }

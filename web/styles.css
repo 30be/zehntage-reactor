@@ -185,6 +185,10 @@ a { color: inherit; }
   font-size: 14px;
 }
 .lookup .word { font-size: 20px; font-weight: 700; }
+/* `a`-toggle state cue: the popup word/sentence turns learning-blue when the
+   card is in the deck (no Add/Delete buttons — color is the only cue) */
+.lookup .word.saved,
+.lookup .sentence.saved { color: oklch(0.65 0.15 250); }
 .lookup .reading { color: #a1a1aa; font-size: 14px; margin-left: 8px; }
 .lookup .translation { margin-top: 8px; font-size: 15px; }
 .lookup .notes { margin-top: 8px; color: #d4d4d8; font-size: 13px; line-height: 1.5; }
@@ -427,7 +431,7 @@ textarea.prompt {
 }
 /* sidebar sits on a light background — darker hover than the overlay's */
 .cue-sidebar .tok:hover { background: rgba(0, 0, 0, 0.08); }
-.cue-row .cue-sec { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.cue-sec { font-size: 12px; color: var(--muted); }
 
 /* ---- fullscreen stage (`f` key; appended) ---- */
 .video-stage:fullscreen {
@@ -475,19 +479,6 @@ textarea.prompt {
   padding: 1px 7px;
   vertical-align: middle;
   user-select: none;
-}
-
-/* --- hard mode (`h`): hide the JP subtitle text while playing, keeping the
-   layout (opacity, not display). Revealed when paused, on overlay hover (the
-   parent class toggles before per-word hover-lookup timers fire), or in the
-   last 0.2s of the cue (delayed reveal, set from the player). */
-.sub-overlay.hardmode .sub-primary {
-  opacity: 0;
-  transition: opacity 0.12s ease;
-}
-.sub-overlay.hardmode .sub-primary:hover,
-.sub-overlay.hardmode.reveal .sub-primary {
-  opacity: 1;
 }
 
 /* ---- frequency tag (popup + pre-study): tiny, dim, no new colors ---- */
@@ -1327,14 +1318,18 @@ textarea.prompt {
 /* ---- wave 10 (appended): CC popover, centered title,
    fullscreen sidebar overlay, stats polish ---- */
 
-/* sidebar translations: blurred like the on-screen RU line, revealed on
-   hovering the cue row (same hide-until-asked idea, laconic) */
-.cue-row .cue-sec {
-  filter: blur(4px);
-  transition: filter 0.15s;
+/* sidebar translations: a tiny (?) appears while the row is hovered; the RU
+   text renders inline only while the (?) itself is hovered (Sidebar.tsx) —
+   no vertical space reserved otherwise */
+.cue-sec-q {
+  visibility: hidden;
+  margin-left: 6px;
+  color: var(--muted);
   cursor: default;
+  font-size: 12px;
 }
-.cue-row:hover .cue-sec { filter: none; }
+.cue-row:hover .cue-sec-q { visibility: visible; }
+.cue-sec-q .cue-sec { margin-left: 6px; }
 
 /* CC button + popover (track selection moved off the page into the vbar) */
 .vbar-cc.on { opacity: 1; background: rgba(255, 255, 255, 0.14); }
@@ -1439,7 +1434,7 @@ textarea.prompt {
 .fs-sidebar .cue-row .cue-time { color: #a1a1aa; }
 .fs-sidebar .cue-row .cue-time:hover { color: #fff; }
 .fs-sidebar .tok:hover { background: rgba(255, 255, 255, 0.18); }
-.fs-sidebar .cue-row .cue-sec { color: #a1a1aa; }
+.fs-sidebar .cue-sec { color: #a1a1aa; }
 
 /* stats polish: one consistent content width, monochrome bars, breathing
    room between sections */

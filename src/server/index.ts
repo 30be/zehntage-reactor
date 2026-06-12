@@ -218,10 +218,15 @@ interface AnkiWordsCacheEntry {
 }
 let ankiWordsCache: AnkiWordsCacheEntry | null = null;
 let ankiWordsInflight: Promise<AnkiWordsCacheEntry> | null = null;
+// Generation counter: a bust invalidates any refresh that STARTED before it,
+// so an eager post-mutation refresh can never join a pre-mutation inflight
+// and repopulate the cache with stale (pre-add/pre-delete) data.
+let ankiWordsGen = 0;
 
 function refreshAnkiWordsCache(): Promise<AnkiWordsCacheEntry> {
   if (!ankiWordsInflight) {
-    ankiWordsInflight = (async () => {
+    const gen = ankiWordsGen;
+    const p = (async () => {
       const [words, progress] = await Promise.all([listWords(), getProgress()]);
       const body = JSON.stringify({ words, progress });
       const entry: AnkiWordsCacheEntry = {
@@ -229,18 +234,22 @@ function refreshAnkiWordsCache(): Promise<AnkiWordsCacheEntry> {
         etag: `"${Bun.hash(body).toString(16)}"`,
         ts: Date.now(),
       };
-      ankiWordsCache = entry;
+      // A bust happened while we were fetching — this payload is stale.
+      if (gen === ankiWordsGen) ankiWordsCache = entry;
       return entry;
     })().finally(() => {
-      ankiWordsInflight = null;
+      if (ankiWordsInflight === p) ankiWordsInflight = null;
     });
+    ankiWordsInflight = p;
   }
   return ankiWordsInflight;
 }
 
 /** Bust the cache after a mutation and refresh eagerly so the next GET is hot. */
 function bustAnkiWordsCache(): void {
+  ankiWordsGen++;
   ankiWordsCache = null;
+  ankiWordsInflight = null; // detach a stale inflight — start fresh
   void refreshAnkiWordsCache().catch(() => {});
 }
 

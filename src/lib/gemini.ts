@@ -9,6 +9,22 @@ import type { Cue } from "./subs.ts";
 const geminiFake = () => process.env.GEMINI_FAKE === "1";
 const fakeDelay = () => new Promise<void>((r) => setTimeout(r, 50));
 
+/** Fake-mode reading: the REAL hiragana reading via the server tokenizer, so
+ * reading-aware deck matching (web/progress.ts matchFront) behaves in e2e the
+ * same as with live Gemini. Falls back to a marker string on failure. */
+async function fakeReading(word: string): Promise<string> {
+  try {
+    const { getServerTokenizer } = await import("./tokenindex.ts");
+    const { kataToHira } = await import("./jatok.ts");
+    const tokenize = await getServerTokenizer();
+    const toks = tokenize(word);
+    const reading = toks.map((t) => t.reading ?? t.surface_form).join("");
+    return reading ? kataToHira(reading) : "ふぇいく";
+  } catch {
+    return "ふぇいく";
+  }
+}
+
 const GEMINI_URL =
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent";
 
@@ -144,7 +160,7 @@ export async function lookupWord(
   if (geminiFake()) {
     await fakeDelay();
     return {
-      reading: "フェイク",
+      reading: await fakeReading(word),
       translation: `перевод(${word})`,
       notes: `fake-notes(${word})`,
       context: `<b>${word}</b>のテスト文です。`,
@@ -291,7 +307,7 @@ export function languageName(code: string): string {
 export function buildTranslateBatchPrompt(lines: string[], targetLang: string): string {
   const target = languageName(targetLang);
   const numbered = lines.map((l, i) => `${i + 1}. ${l.replace(/\n/g, " ")}`).join("\n");
-  return `Translate the following numbered subtitle lines into ${target}. They are consecutive lines from one video — use the surrounding lines for context, but translate each line separately. Keep translations natural, concise, and suitable as subtitles. Return exactly ${lines.length} translations, in order, one per input line.
+  return `Translate the following numbered subtitle lines into ${target}. They are consecutive lines from one video — use the surrounding lines for context, but translate each line separately. The reader is LEARNING the source language: translate literally, preserving the source word choices, grammatical structure, and word order as far as the target language allows — do NOT polish into nice idiomatic prose. A slightly awkward but transparent translation is better than a natural-sounding loose one. Keep each line concise. Return exactly ${lines.length} translations, in order, one per input line.
 
 ${numbered}`;
 }

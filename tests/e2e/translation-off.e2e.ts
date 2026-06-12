@@ -21,6 +21,9 @@ test("switching the translation off during playback does not crash", async ({ pa
   // RU line disappears, player stays alive (no pageerror — fixture asserts).
   await expect(page.locator(".sub-secondary")).toHaveCount(0);
   await expect(page.locator("video")).toBeVisible();
+  // playback kept running through the popover clicks — re-seek into the cue
+  // before asserting its text (the assertion is about not crashing, not time)
+  await seekTo(page, 3);
   await expect(page.locator(".sub-primary")).toContainText("勉強");
 
   // Still functional after further seeking.
@@ -39,18 +42,24 @@ test("switching the translation back on restores the blurred line", async ({ pag
   await expect(page.locator(".sub-secondary")).toContainText("Я учусь.");
 });
 
-test("sidebar translation lines are blurred until the row is hovered", async ({ page }) => {
+test("sidebar translation hides behind a row-hover (?) affordance", async ({ page }) => {
   await openPlayer(page, "clip.mp4");
   await seekTo(page, 3);
   await page.keyboard.press("l"); // open the cue sidebar
   await expect(page.locator(".cue-sidebar")).toBeVisible();
-  const sec = page.locator(".cue-sidebar .cue-sec").first();
-  await expect(sec).toBeVisible();
-  const blurred = () =>
-    sec.evaluate((el) => window.getComputedStyle(el).filter.includes("blur"));
-  expect(await blurred()).toBe(true);
-  await sec.hover(); // hovering the row reveals the translation
-  await expect.poll(blurred).toBe(false);
+  // no translation text rendered by default — only on hovering the (?)
+  const row = page.locator(".cue-sidebar .cue-row.active");
+  await expect(row).toBeVisible();
+  await expect(row.locator(".cue-sec")).toHaveCount(0);
+  const q = row.locator(".cue-sec-q");
+  // the (?) is invisible until the row is hovered
+  expect(await q.evaluate((el) => getComputedStyle(el).visibility)).toBe("hidden");
+  await row.hover();
+  await expect.poll(() => q.evaluate((el) => getComputedStyle(el).visibility)).toBe(
+    "visible",
+  );
+  await q.hover(); // hovering the (?) itself renders the RU text inline
+  await expect(row.locator(".cue-sec")).toHaveText("Я учусь.");
   await page.mouse.move(10, 10);
-  await expect.poll(blurred).toBe(true);
+  await expect(row.locator(".cue-sec")).toHaveCount(0);
 });

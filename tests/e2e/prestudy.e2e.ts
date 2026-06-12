@@ -58,5 +58,5 @@ test("bulk add sends checked words to (fake) Anki", async ({ page }) => {
       const { words } = (await res.json()) as { words: { front: string }[] };
       return words.map((w) => w.front);
     })
-    .toContain("図書館 [フェイク]");
+    .toContain("図書館 [としょかん]");
 });

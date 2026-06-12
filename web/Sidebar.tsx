@@ -60,6 +60,10 @@ function CueRow({
   const [tokens, setTokens] = useState<KToken[] | null>(
     () => tokenCache.get(cue.text) ?? null,
   );
+  // RU translation: hidden by default. A small (?) shows up while the row is
+  // hovered; the translation text renders ONLY while the (?) itself is
+  // hovered — inline, reserving no vertical space otherwise.
+  const [secShown, setSecShown] = useState(false);
   useEffect(() => {
     const cached = tokenCache.get(cue.text);
     if (cached) {
@@ -104,8 +108,16 @@ function CueRow({
             onWordLeave={onWordLeave}
             onWordClick={(tok, e) => onWordClick(tok, e, cue.text)}
           />
+          {secondary && (
+            <span
+              className="cue-sec-q"
+              onMouseEnter={() => setSecShown(true)}
+              onMouseLeave={() => setSecShown(false)}
+            >
+              ?{secShown && <span className="cue-sec">{secondary}</span>}
+            </span>
+          )}
         </div>
-        {secondary && <div className="cue-sec">{secondary}</div>}
       </div>
     </div>
   );
