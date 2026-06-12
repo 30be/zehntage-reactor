@@ -22,6 +22,7 @@ import { buildWordIndex, matchFront, type WordIndex } from "./progress.ts";
 import { TokenLine, wordKey } from "./TokenLine.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 import { freqRank, freqRankOf, freqTier, loadFreq } from "./freq.ts";
+import { tmHeartbeat, tmEvent } from "./telemetry.ts";
 
 interface Props {
   entry: LibraryEntry;
@@ -55,6 +56,7 @@ interface PreStudyItem {
   reading?: string; // hiragana
   rank: number | null; // frequency rank, null = not in the 30k list
   context: string; // cue text where the word first appears
+  time: number; // first-occurrence cue midpoint in FILE time (for frame capture)
   checked: boolean;
   added: boolean;
 }
@@ -267,11 +269,51 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     };
   }, []);
 
+  // pre-study window length (minutes) — from the Settings page, default 10
+  const prestudyMin = Math.max(
+    1,
+    Math.min(120, Math.round(Number(settings.prestudyMinutes)) || 10),
+  );
+  const prestudyMinRef = useRef(prestudyMin);
+  useEffect(() => {
+    prestudyMinRef.current = prestudyMin;
+  }, [prestudyMin]);
+
+  // "with frames" toggle in the pre-study header: bulk adds also pass
+  // mediaId+timestamp so the server captures a frame per card (slower).
+  const [preFrames, setPreFrames] = useState(() => {
+    try {
+      return localStorage.getItem("zr.prestudyFrames") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const togglePreFrames = useCallback(() => {
+    setPreFrames((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("zr.prestudyFrames", next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }, []);
+
+  // --- telemetry: playback heartbeat every 15s while the Player is mounted ---
+  useEffect(() => {
+    const iv = window.setInterval(() => {
+      const v = videoRef.current;
+      if (v) tmHeartbeat(entry.id, v.currentTime, v.paused);
+    }, 15000);
+    return () => window.clearInterval(iv);
+  }, [entry.id]);
+
   const buildPreStudy = useCallback(async () => {
     const v = videoRef.current;
     const t = v ? v.currentTime - subOffsetRef.current : 0;
     const cues = primaryCuesRef.current.filter(
-      (c) => c.end >= t && c.start <= t + 600,
+      (c) => c.end >= t && c.start <= t + prestudyMinRef.current * 60,
     );
     const [tok, freq] = await Promise.all([
       getTokenizer(),
@@ -300,6 +342,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           reading: tk.reading ? kataToHira(tk.reading) : undefined,
           rank: freqRank(freq, tk),
           context: cue.text,
+          time: (cue.start + cue.end) / 2 + subOffsetRef.current,
           checked: true,
           added: false,
         });
@@ -490,10 +533,17 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   const [whisperStatus, setWhisperStatus] = useState<string>("");
   const [whisperLastEnd, setWhisperLastEnd] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
+  // The stage sizes itself to the video's native aspect ratio so there are
+  // never letterbox bars (subs floating in black) in normal mode.
+  const [videoAspect, setVideoAspect] = useState("16 / 9");
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    const onMeta = () => setVideoDuration(v.duration || 0);
+    const onMeta = () => {
+      setVideoDuration(v.duration || 0);
+      if (v.videoWidth > 0 && v.videoHeight > 0)
+        setVideoAspect(`${v.videoWidth} / ${v.videoHeight}`);
+    };
     v.addEventListener("loadedmetadata", onMeta);
     onMeta();
     return () => v.removeEventListener("loadedmetadata", onMeta);
@@ -882,6 +932,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     const v = videoRef.current;
     if (!v) return;
     const onEnded = () => {
+      tmEvent("episode_end", { mediaId: entry.id });
       cancelAutoNextRef.current?.();
       toast("Next episode in 5s…");
       const cleanup = () => {
@@ -911,7 +962,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       v.removeEventListener("ended", onEnded);
       cancelAutoNextRef.current?.();
     };
-  }, [toast]);
+  }, [entry.id, toast]);
 
   // --- global hotkeys: work regardless of focus (except real text inputs) ---
   useEffect(() => {
@@ -1184,6 +1235,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           if (!key) break;
           const adding = !knownWordsRef.current.has(key);
           toggleKnown(key);
+          tmEvent("mark_known", { word: key });
           toast(adding ? `known: ${key}` : `unknown: ${key}`);
           break;
         }
@@ -1258,6 +1310,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           word: it.lemma,
           context: it.context,
           source: entry.name,
+          ...(preFrames
+            ? { mediaId: entry.id, timestamp: it.time, withFrame: true }
+            : {}),
         });
         await (api.ankiAdd as (p: Record<string, unknown>) => Promise<unknown>)({
           word: it.lemma,
@@ -1265,6 +1320,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           translation: lk.translation,
           notes: lk.notes,
           context: it.context,
+          ...(preFrames ? { mediaId: entry.id, timestamp: it.time } : {}),
         });
         // optimistic known-marking (front format matches the server's card)
         const front = lk.reading ? `${it.lemma} [${lk.reading}]` : it.lemma;
@@ -1286,11 +1342,12 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       setPreProg(done);
     }
     preBusyRef.current = false;
+    tmEvent("prestudy_add", { count: done - failed });
     if (!mountedRef.current) return;
     setPreBusy(false);
     if (failed > 0) toast(`added ${done - failed}/${todo.length} (${failed} failed)`);
     void refreshAnki();
-  }, [preStudy, entry.name, toast, refreshAnki]);
+  }, [preStudy, entry.id, entry.name, preFrames, toast, refreshAnki]);
 
   // --- word hover -> popup + lookup (with ~200ms hover-intent debounce) ---
   // We only OPEN the popup (and fire the lookup) once the cursor RESTS on a
@@ -2032,23 +2089,147 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   useEffect(() => {
     const v = videoRef.current;
     const m = densityMarkerRef.current;
-    if (!v || !m || !hasDensity) return;
+    if (!v || !m) return;
     const upd = () => {
-      if (v.duration > 0)
-        m.style.left = `${(v.currentTime / v.duration) * 100}%`;
+      if (!(v.duration > 0)) return;
+      const pct = (v.currentTime / v.duration) * 100;
+      m.style.left = `${pct}%`;
+      if (playedRef.current) playedRef.current.style.width = `${pct}%`;
     };
     v.addEventListener("timeupdate", upd);
+    v.addEventListener("seeking", upd);
     upd();
-    return () => v.removeEventListener("timeupdate", upd);
-  }, [hasDensity, entry.id]);
-  const onDensityClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    return () => {
+      v.removeEventListener("timeupdate", upd);
+      v.removeEventListener("seeking", upd);
+    };
+  }, [entry.id]);
+  // --- custom controls bar (replaces the native <video controls>) ---
+  const seekRef = useRef<HTMLDivElement>(null);
+  const playedRef = useRef<HTMLDivElement>(null);
+  const scrubbingRef = useRef(false);
+  const [seekHover, setSeekHover] = useState<{ x: number; t: number } | null>(
+    null,
+  );
+  // mm:ss readout — timeupdate fires ~4×/s, cheap enough for a state update
+  const [curTime, setCurTime] = useState(0);
+  useEffect(() => {
     const v = videoRef.current;
-    if (!v || !(v.duration > 0)) return;
-    const r = e.currentTarget.getBoundingClientRect();
-    v.currentTime = Math.max(
-      0,
-      Math.min(v.duration, ((e.clientX - r.left) / r.width) * v.duration),
-    );
+    if (!v) return;
+    const upd = () => setCurTime(v.currentTime);
+    v.addEventListener("timeupdate", upd);
+    v.addEventListener("seeked", upd);
+    upd();
+    return () => {
+      v.removeEventListener("timeupdate", upd);
+      v.removeEventListener("seeked", upd);
+    };
+  }, [entry.id]);
+
+  // volume / mute mirrors (ArrowUp/Down hotkeys change v.volume directly)
+  const [volume, setVolume] = useState(1);
+  const [muted, setMuted] = useState(false);
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const upd = () => {
+      setVolume(v.volume);
+      setMuted(v.muted);
+    };
+    v.addEventListener("volumechange", upd);
+    upd();
+    return () => v.removeEventListener("volumechange", upd);
+  }, [entry.id]);
+
+  // Autohide: fade the bar (and the cursor) after 2.5s without mouse movement
+  // while playing. Reappears on mousemove / pause. The bar OVERLAYS the video,
+  // so the subtitle overlay never shifts when it hides.
+  const [hudHidden, setHudHidden] = useState(false);
+  const hudTimerRef = useRef<number | null>(null);
+  const barHoverRef = useRef(false);
+  const pokeHud = useCallback(() => {
+    setHudHidden(false);
+    if (hudTimerRef.current != null) window.clearTimeout(hudTimerRef.current);
+    hudTimerRef.current = window.setTimeout(() => {
+      hudTimerRef.current = null;
+      const v = videoRef.current;
+      if (v && !v.paused && !scrubbingRef.current && !barHoverRef.current)
+        setHudHidden(true);
+    }, 2500);
+  }, []);
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const onPause = () => {
+      if (hudTimerRef.current != null) window.clearTimeout(hudTimerRef.current);
+      hudTimerRef.current = null;
+      setHudHidden(false);
+    };
+    v.addEventListener("pause", onPause);
+    v.addEventListener("play", pokeHud);
+    return () => {
+      v.removeEventListener("pause", onPause);
+      v.removeEventListener("play", pokeHud);
+      if (hudTimerRef.current != null) window.clearTimeout(hudTimerRef.current);
+    };
+  }, [entry.id, pokeHud]);
+
+  const togglePlay = useCallback(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    pausedByHoverRef.current = false; // user took control
+    if (v.paused) void v.play();
+    else v.pause();
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    if (document.fullscreenElement) void document.exitFullscreen();
+    else void stageRef.current?.requestFullscreen?.();
+  }, []);
+
+  const seekToClientX = useCallback((clientX: number) => {
+    const bar = seekRef.current;
+    const v = videoRef.current;
+    if (!bar || !v || !(v.duration > 0)) return;
+    const r = bar.getBoundingClientRect();
+    const frac = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+    v.currentTime = frac * v.duration;
+  }, []);
+  const hoverTimeAt = useCallback((clientX: number): { x: number; t: number } | null => {
+    const bar = seekRef.current;
+    const v = videoRef.current;
+    if (!bar || !v || !(v.duration > 0)) return null;
+    const r = bar.getBoundingClientRect();
+    const frac = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+    return { x: frac * r.width, t: frac * v.duration };
+  }, []);
+  const onSeekDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      e.currentTarget.setPointerCapture(e.pointerId);
+      scrubbingRef.current = true;
+      seekToClientX(e.clientX);
+      setSeekHover(hoverTimeAt(e.clientX));
+    },
+    [seekToClientX, hoverTimeAt],
+  );
+  const onSeekMove = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      setSeekHover(hoverTimeAt(e.clientX));
+      if (scrubbingRef.current) seekToClientX(e.clientX);
+    },
+    [seekToClientX, hoverTimeAt],
+  );
+  const onSeekUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    scrubbingRef.current = false;
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  const onSeekLeave = useCallback(() => {
+    if (!scrubbingRef.current) setSeekHover(null);
   }, []);
 
   const sidebarSeek = useCallback((t: number) => {
@@ -2068,14 +2249,24 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         {entry.name.replace(/\.[^.]+$/, "")}
       </div>
       <div className="stage-row">
-      <div className="video-stage" ref={stageRef}>
-        {/* nofullscreen: the native button would fullscreen the bare <video>,
-            hiding our subtitle overlay — users press `f` instead. */}
+      <div
+        className={`video-stage${hudHidden ? " hud-hidden" : ""}`}
+        ref={stageRef}
+        style={
+          {
+            aspectRatio: videoAspect,
+            "--va": videoAspect,
+          } as React.CSSProperties
+        }
+        onMouseMove={pokeHud}
+      >
+        {/* Custom controls (the .vbar below) replace the native ones: the
+            native bar fought our density strip and its fullscreen button
+            (which would hide the subtitle overlay) had to be disabled. */}
         <video
           ref={videoRef}
           src={mediaUrl(entry.id)}
-          controls
-          controlsList="nofullscreen"
+          onClick={togglePlay}
         />
         <div
           className={`sub-overlay${hardMode ? " hardmode" : ""}${
@@ -2130,17 +2321,92 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             </div>
           )}
         </div>
-        {hasDensity && (
-          <>
-            <canvas
-              ref={densityCanvasRef}
-              className="density-strip"
-              title="Dialogue density — click to seek"
-              onClick={onDensityClick}
-            />
+        <div className="vbar">
+          <div
+            ref={seekRef}
+            className="seekbar"
+            onPointerDown={onSeekDown}
+            onPointerMove={onSeekMove}
+            onPointerUp={onSeekUp}
+            onPointerCancel={onSeekUp}
+            onPointerLeave={onSeekLeave}
+          >
+            {hasDensity && (
+              <canvas
+                ref={densityCanvasRef}
+                className="density-strip"
+                title="Dialogue density"
+              />
+            )}
+            <div ref={playedRef} className="seek-played" />
             <div ref={densityMarkerRef} className="density-marker" />
-          </>
-        )}
+            {seekHover && (
+              <div className="seek-tip" style={{ left: seekHover.x }}>
+                {fmtTime(seekHover.t)}
+              </div>
+            )}
+          </div>
+          <div
+            className="vbar-row"
+            onMouseEnter={() => {
+              barHoverRef.current = true;
+            }}
+            onMouseLeave={() => {
+              barHoverRef.current = false;
+            }}
+          >
+            <button
+              className="vbar-btn vbar-play"
+              tabIndex={-1}
+              onClick={togglePlay}
+              title={isPaused ? "Play (space)" : "Pause (space)"}
+              aria-label={isPaused ? "Play" : "Pause"}
+            >
+              {isPaused ? "▶" : "❚❚"}
+            </button>
+            <span className="vbar-time">
+              {fmtTime(curTime)} / {fmtTime(videoDuration)}
+            </span>
+            <span className="vbar-spacer" />
+            <button
+              className="vbar-btn vbar-mute"
+              tabIndex={-1}
+              onClick={() => {
+                const v = videoRef.current;
+                if (v) v.muted = !v.muted;
+              }}
+              title={muted ? "Unmute" : "Mute"}
+              aria-label={muted ? "Unmute" : "Mute"}
+            >
+              {muted || volume === 0 ? "muted" : "vol"}
+            </button>
+            <input
+              className="vbar-vol"
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={muted ? 0 : volume}
+              tabIndex={-1}
+              aria-label="Volume"
+              onChange={(e) => {
+                const v = videoRef.current;
+                if (!v) return;
+                v.volume = parseFloat(e.target.value);
+                v.muted = false;
+              }}
+            />
+            <button
+              className="vbar-btn vbar-fs"
+              tabIndex={-1}
+              onClick={toggleFullscreen}
+              title="Fullscreen (f)"
+              aria-label="Fullscreen"
+            >
+              ⛶
+            </button>
+          </div>
+        </div>
         {skipTarget != null && (
           <button
             className="skip-pill"
@@ -2293,9 +2559,21 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           <div className="prestudy-head">
             <span className="word">pre-study</span>
             <span className="prestudy-sub">
-              next 10 min
+              next {prestudyMin} min
               {!preStudy.loading && ` · ${preStudy.items.length} new`}
             </span>
+            <label
+              className="prestudy-frames"
+              title="Also capture a video frame for each card (slower)"
+            >
+              <input
+                type="checkbox"
+                checked={preFrames}
+                disabled={preBusy}
+                onChange={togglePreFrames}
+              />
+              with frames
+            </label>
           </div>
           <div className="prestudy-list">
             {preStudy.loading && <div className="spin">scanning…</div>}

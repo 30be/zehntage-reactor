@@ -6,6 +6,9 @@ const ALLOWLIST = [
   /favicon\.ico/i,
   // benign media teardown noise when a test navigates away mid-load
   /ERR_ABORTED.*\/media\//,
+  // expected 400 from the root-chooser invalid-path test (no URL is attached
+  // to "Failed to load resource" console entries, so match by status text)
+  /Failed to load resource.*400/,
 ];
 
 export const test = base.extend<{ page: Page }>({

@@ -30,6 +30,10 @@ export default defineConfig({
       GEMINI_FAKE: "1",
       WHISPER_FAKE: "1",
       ANKI_FAKE: "1",
+      // Isolate telemetry + settings from the user's real files; the fixtures
+      // lib dir is recreated by global-setup, so these reset every run.
+      ZR_EVENTS_FILE: "tests/e2e/fixtures/lib/.zr/events.jsonl",
+      ZR_CONFIG_DIR: "tests/e2e/fixtures/lib/.zr/config",
     },
   },
 });

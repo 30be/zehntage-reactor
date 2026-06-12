@@ -1,0 +1,15 @@
+{"ts":1781266535955,"type":"lookup","word":"勉強"}
+{"ts":1781266536355,"type":"anki_add","word":"勉強","mediaId":"2328ae29a728"}
+{"ts":1781266552514,"type":"lookup","word":"勉強"}
+{"ts":1781266554669,"type":"lookup","word":"勉強"}
+{"ts":1781266557510,"type":"explain","len":6}
+{"ts":1781266560471,"type":"lookup","word":"勉強"}
+{"ts":1781266565595,"type":"lookup","word":"図書館"}
+{"ts":1781266565651,"type":"anki_add","word":"図書館"}
+{"ts":1781266568095,"type":"heartbeat","mediaId":"feedfeedfeed","position":10,"paused":false}
+{"ts":1781266583095,"type":"heartbeat","mediaId":"feedfeedfeed","position":25,"paused":false}
+{"ts":1781266598095,"type":"heartbeat","mediaId":"feedfeedfeed","position":25,"paused":true}
+{"ts":1781266599095,"type":"lookup","mediaId":"feedfeedfeed","word":"猫"}
+{"ts":1781266600095,"type":"anki_add","mediaId":"feedfeedfeed","word":"猫"}
+{"ts":1781266568254,"type":"heartbeat","mediaId":"feedfeedfeed","position":1,"paused":false}
+{"ts":1781266583989,"type":"whisper_done","mediaId":"e0a410679b6b","lang":"ja"}

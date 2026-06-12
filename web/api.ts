@@ -138,6 +138,33 @@ export interface BatchAllResult {
   skipped: string[];
 }
 
+export interface RootInfo {
+  root: string;
+  count: number;
+}
+
+export interface DaySummary {
+  date: string; // "YYYY-MM-DD"
+  playSec: number;
+  pauseSec: number;
+  mediaCount: number;
+  ankiAdds: number;
+  lookups: number;
+}
+
+export interface MediaSummary {
+  mediaId: string;
+  wallSec: number;
+  contentSec: number;
+  ankiAdds: number;
+  lookups: number;
+}
+
+export interface StatsSummary {
+  days: DaySummary[];
+  media: MediaSummary[];
+}
+
 export const api = {
   library: () => jget<LibraryEntry[]>("/api/library"),
   mediaInfo: (id: string) => jget<MediaInfo>(`/api/media/${id}/info`),
@@ -204,6 +231,9 @@ export const api = {
       `/api/condense/${id}`,
       {},
     ),
+  getRoot: () => jget<RootInfo>("/api/root"),
+  setRoot: (path: string) => jpost<RootInfo>("/api/root", { path }),
+  statsSummary: () => jget<StatsSummary>("/api/stats/summary"),
   getSettings: () => jget<Record<string, unknown>>("/api/settings"),
   saveSettings: (patch: Record<string, unknown>) =>
     jpost<Record<string, unknown>>("/api/settings", patch),

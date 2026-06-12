@@ -13,7 +13,8 @@ import { translateCues } from "./lib/gemini.ts";
 function usage(): never {
   console.error(
     `Usage:
-  zehntage-reactor <file.mkv|dir>                    start player server
+  zehntage-reactor [<file.mkv|dir>]                  start player server
+                                                     (no arg: settings.mediaRoot, then cwd)
   zehntage-reactor subtitle <lang> [<lang2>] <file>  generate sidecar subtitles`,
   );
   process.exit(1);
@@ -78,16 +79,20 @@ async function runSubtitle(args: string[]): Promise<void> {
   }
 }
 
-async function runServer(arg: string): Promise<void> {
-  const target = resolve(arg);
-  const st = await stat(target).catch(() => null);
-  if (!st) {
-    console.error(`No such file or directory: ${target}`);
-    process.exit(1);
+async function runServer(arg?: string): Promise<void> {
+  let root: string | undefined;
+  if (arg !== undefined) {
+    const target = resolve(arg);
+    const st = await stat(target).catch(() => null);
+    if (!st) {
+      console.error(`No such file or directory: ${target}`);
+      process.exit(1);
+    }
+    root = st.isDirectory() ? target : dirname(target);
   }
-  const root = st.isDirectory() ? target : dirname(target);
+  // No arg: startServer falls back to settings.mediaRoot, then cwd.
   const handle = await startServer(root, Number(process.env.PORT) || 8417);
-  console.log(`zehntage-reactor serving ${root}`);
+  console.log(`zehntage-reactor serving ${handle.root}`);
   console.log(`  ${handle.url}`);
   if (process.env.ZR_NO_OPEN !== "1") {
     Bun.spawn(["xdg-open", handle.url], { stdout: "ignore", stderr: "ignore" }).unref();
@@ -95,9 +100,14 @@ async function runServer(arg: string): Promise<void> {
 }
 
 const argv = process.argv.slice(2);
-if (argv.length === 0) usage();
 
-if (argv[0] === "subtitle") {
+if (argv.length === 0) {
+  // No arg: root falls back to settings.mediaRoot, then cwd.
+  runServer().catch((e) => {
+    console.error(e instanceof Error ? e.message : String(e));
+    process.exit(1);
+  });
+} else if (argv[0] === "subtitle") {
   runSubtitle(argv.slice(1))
     .then(() => process.exit(0))
     .catch((e) => {

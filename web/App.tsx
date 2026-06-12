@@ -9,12 +9,14 @@ import { Player } from "./Player.tsx";
 import { computeCoverage, readKnownWords, type Coverage } from "./coverage.ts";
 import { buildWordIndex } from "./progress.ts";
 import { kataToHira } from "./tokenizer.ts";
+import { tmEvent, tmStart } from "./telemetry.ts";
 
 type Route =
   | { name: "library" }
   | { name: "player"; id: string; t?: number }
   | { name: "settings" }
-  | { name: "stats" };
+  | { name: "stats" }
+  | { name: "home" };
 
 function parseHash(): Route {
   const h = window.location.hash.replace(/^#\/?/, "");
@@ -28,7 +30,18 @@ function parseHash(): Route {
   }
   if (h === "settings") return { name: "settings" };
   if (h === "stats") return { name: "stats" };
+  if (h === "home") return { name: "home" };
   return { name: "library" };
+}
+
+const LAST_MEDIA_KEY = "zr.lastMedia";
+
+function readLastMedia(): string | null {
+  try {
+    return localStorage.getItem(LAST_MEDIA_KEY);
+  } catch {
+    return null;
+  }
 }
 
 function fmtSize(n: number): string {
@@ -50,7 +63,20 @@ export function App() {
 
   useEffect(() => {
     void api.getSettings().then(setSettings).catch(() => {});
+    tmStart();
   }, []);
+
+  // Telemetry: one route_change event per navigation.
+  useEffect(() => {
+    tmEvent("route_change", {
+      route: route.name,
+      ...(route.name === "player" ? { mediaId: route.id } : {}),
+    });
+  }, [route]);
+
+  // "View" nav target: the current/last-played episode.
+  const lastMedia =
+    route.name === "player" ? route.id : readLastMedia();
 
   // Keep the pending hide-timer so a second toast isn't cleared early by the
   // first toast's timeout.
@@ -68,26 +94,48 @@ export function App() {
     window.location.hash = hash;
   };
 
+  const navItem = (
+    label: string,
+    icon: string,
+    hash: string,
+    active: boolean,
+    disabled = false,
+  ) => (
+    <button
+      className={`side-item${active ? " active" : ""}`}
+      disabled={disabled}
+      title={label}
+      onClick={() => go(hash)}
+    >
+      <span className="side-icon" aria-hidden>{icon}</span>
+      <span className="side-label">{label}</span>
+    </button>
+  );
+
   return (
-    <div className="app">
-      <header className="topbar">
-        <a className="brand" href="#/" title="Back to Library">
-          zehntage-reactor
+    <div className="app shell">
+      <aside className="sidebar">
+        <a className="brand side-brand" href="#/home" title="Home">
+          <span className="side-icon" aria-hidden>十</span>
+          <span className="side-label">zehntage</span>
         </a>
-        <nav>
-          <button className="btn ghost sm" onClick={() => go("#/")}>
-            Library
-          </button>
-          <button className="btn ghost sm" onClick={() => go("#/stats")}>
-            Stats
-          </button>
-          <button className="btn ghost sm" onClick={() => go("#/settings")}>
-            Settings
-          </button>
+        <nav className="side-nav">
+          {navItem("Home", "⌂", "#/home", route.name === "home")}
+          {navItem("Library", "▤", "#/", route.name === "library")}
+          {navItem(
+            "View",
+            "▶",
+            lastMedia ? `#/play/${lastMedia}` : "#/",
+            route.name === "player",
+            !lastMedia,
+          )}
+          {navItem("Stats", "∿", "#/stats", route.name === "stats")}
+          {navItem("Settings", "⚙", "#/settings", route.name === "settings")}
         </nav>
-      </header>
+      </aside>
 
       <main className="container">
+        {route.name === "home" && <Home go={go} />}
         {route.name === "library" && <Library go={go} toast={toast} />}
         {route.name === "stats" && <Stats go={go} />}
         {route.name === "settings" && (
@@ -176,6 +224,133 @@ function highlightMatch(text: string, q: string): React.ReactNode {
       <mark>{text.slice(i, i + nq.length)}</mark>
       {text.slice(i + nq.length)}
     </>
+  );
+}
+
+// --- Home / onboarding ---
+
+const HOTKEYS: [string, string][] = [
+  ["space", "play / pause"],
+  ["f", "fullscreen"],
+  ["← →", "prev / next cue (seek)"],
+  ["↑ ↓", "volume"],
+  ["a", "replay current cue"],
+  ["s", "autopause mode (then digits 1-9: count)"],
+  ["Tab / Shift+Tab", "cycle subtitle tracks"],
+  ["n / p", "next / previous episode"],
+  ["h", "hard mode (hide JP while playing)"],
+  ["k", "mark hovered word known"],
+  ["l", "toggle cue-list sidebar"],
+  ["w", "pre-study panel (upcoming words)"],
+  ["b", "hold to unblur translation"],
+  ["i", "toggle furigana"],
+  ["- / =", "playback speed"],
+  ["[ / ] / \\", "subtitle offset − / + / reset"],
+  ["Esc", "close popups / panels"],
+];
+
+function Home({ go }: { go: (h: string) => void }) {
+  const [root, setRoot] = useState<{ root: string; count: number } | null>(null);
+  useEffect(() => {
+    void api.getRoot().then(setRoot).catch(() => {});
+  }, []);
+  return (
+    <>
+      <h1 className="h1">zehntage-reactor</h1>
+      <p className="home-tagline">
+        Watch Japanese video, mine words as you go — lookups, grammar, and Anki
+        cards without leaving the player.
+      </p>
+      <h2 className="h2">How it works</h2>
+      <ol className="home-steps">
+        <li>Pick an episode in the <a href="#/" onClick={() => go("#/")}>Library</a></li>
+        <li>Hover or click words in the subtitles for instant lookups</li>
+        <li>Hit (?) on a line for a grammar breakdown</li>
+        <li>Cards land straight in Anki</li>
+      </ol>
+      <h2 className="h2">Hotkeys</h2>
+      <div className="hotkey-grid">
+        {HOTKEYS.map(([k, desc]) => (
+          <div key={k} className="hotkey-row">
+            <span className="hotkey-key">{k}</span>
+            <span className="hotkey-desc">{desc}</span>
+          </div>
+        ))}
+      </div>
+      <div className="home-root muted">
+        Current library: {root ? `${root.root} · ${root.count} entries` : "…"}
+      </div>
+    </>
+  );
+}
+
+// --- library root chooser (dim line above the cards) ---
+
+function RootChooser({
+  toast,
+  onChanged,
+}: {
+  toast: (m: string) => void;
+  onChanged: () => void;
+}) {
+  const [info, setInfo] = useState<{ root: string; count: number } | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    void api.getRoot().then(setInfo).catch(() => {});
+  }, []);
+
+  const submit = async () => {
+    const p = value.trim();
+    if (!p) return;
+    setBusy(true);
+    try {
+      const next = await api.setRoot(p);
+      setInfo(next);
+      setEditing(false);
+      toast(`Library root set: ${next.root} (${next.count} entries)`);
+      onChanged();
+    } catch (e) {
+      toast(`Set root failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!editing) {
+    return (
+      <div
+        className="root-line muted"
+        title="Click to change the library root"
+        onClick={() => {
+          setValue(info?.root ?? "");
+          setEditing(true);
+        }}
+      >
+        {info ? `${info.root} · ${info.count} entries` : "…"}
+      </div>
+    );
+  }
+  return (
+    <div className="root-line editing">
+      <input
+        type="text"
+        className="root-input"
+        autoFocus
+        placeholder="/absolute/path/to/library"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") void submit();
+          if (e.key === "Escape") setEditing(false);
+        }}
+      />
+      <button className="btn sm" disabled={busy} onClick={() => void submit()}>
+        {busy ? "…" : "Set"}
+      </button>
+    </div>
   );
 }
 
@@ -289,11 +464,19 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
 
   if (error) return <div className="empty">Failed to load library: {error}</div>;
   if (!entries) return <div className="empty">Loading library…</div>;
-  if (entries.length === 0) return <div className="empty">No video files found.</div>;
+  if (entries.length === 0)
+    return (
+      <>
+        <h1 className="h1">Library</h1>
+        <RootChooser toast={toast} onChanged={loadEntries} />
+        <div className="empty">No video files found.</div>
+      </>
+    );
 
   return (
     <>
       <h1 className="h1">Library</h1>
+      <RootChooser toast={toast} onChanged={loadEntries} />
       <input
         className="search-input"
         type="text"
@@ -369,9 +552,52 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
 // Maturity threshold for "known" in Anki terms (interval >= 21 days).
 const MATURE_INTERVAL = 21;
 
+function localDateStr(d: Date): string {
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+
+/** GitHub-style activity grid: last ~20 weeks of daily playing minutes. */
+function ActivityGrid({ byDate }: { byDate: Map<string, number> }) {
+  // End on today; start 139 days earlier, aligned back to Monday.
+  const days: { date: string; min: number }[] = [];
+  const start = new Date();
+  start.setDate(start.getDate() - 139);
+  while (start.getDay() !== 1) start.setDate(start.getDate() - 1);
+  const today = localDateStr(new Date());
+  for (const d = new Date(start); ; d.setDate(d.getDate() + 1)) {
+    const key = localDateStr(d);
+    days.push({ date: key, min: Math.round((byDate.get(key) ?? 0) / 60) });
+    if (key === today) break;
+  }
+  const shade = (min: number) =>
+    min <= 0 ? 0 : min < 10 ? 1 : min < 30 ? 2 : min < 60 ? 3 : 4;
+  return (
+    <div className="activity-grid" data-days={days.length}>
+      {days.map((d) => (
+        <span
+          key={d.date}
+          className={`activity-cell s${shade(d.min)}`}
+          title={`${d.date}: ${d.min} min`}
+        />
+      ))}
+    </div>
+  );
+}
+
+function fmtMin(sec: number): string {
+  return `${Math.round(sec / 60)} min`;
+}
+
 function Stats({ go }: { go: (h: string) => void }) {
   const [entries, setEntries] = useState<LibraryEntry[] | null>(null);
   const [anki, setAnki] = useState<AnkiWordsResponse | null>(null);
+  const [summary, setSummary] = useState<import("./api.ts").StatsSummary | null>(null);
+
+  useEffect(() => {
+    void api.statsSummary().then(setSummary).catch(() => {});
+  }, []);
   const [coverage, setCoverage] = useState<Map<string, Coverage | null>>(
     () => new Map(),
   );
@@ -435,6 +661,64 @@ function Stats({ go }: { go: (h: string) => void }) {
           cards added
         </div>
       </div>
+
+      <h2 className="h2">Activity</h2>
+      <ActivityGrid
+        byDate={
+          new Map((summary?.days ?? []).map((d) => [d.date, d.playSec]))
+        }
+      />
+
+      {summary && summary.days.length > 0 && (
+        <>
+          <h2 className="h2">Last 14 days</h2>
+          <div className="daily-list">
+            {summary.days.slice(-14).reverse().map((d) => (
+              <div key={d.date} className="daily-row">
+                <span className="daily-date">{d.date}</span>
+                <span className="daily-min">{fmtMin(d.playSec)}</span>
+                <span className="daily-extra muted">
+                  {d.ankiAdds} cards · {d.lookups} lookups
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {summary && summary.media.length > 0 && (
+        <>
+          <h2 className="h2">Per episode (watch time)</h2>
+          <div className="daily-list">
+            {summary.media.slice(0, 20).map((m) => {
+              const e = entries?.find((x) => x.id === m.mediaId);
+              const name = (e?.name ?? m.mediaId).replace(/\.[^.]+$/, "");
+              const coef =
+                m.contentSec > 0 ? (m.wallSec / m.contentSec).toFixed(2) : "—";
+              return (
+                <div
+                  key={m.mediaId}
+                  className="daily-row media-row"
+                  onClick={() => go(`#/play/${m.mediaId}`)}
+                >
+                  <span className="daily-date">{name}</span>
+                  <span className="daily-min">{fmtMin(m.wallSec)}</span>
+                  <span className="daily-extra muted">
+                    ×{coef} · {m.ankiAdds} cards · {m.lookups} lookups
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          <div className="hint stats-footnote">
+            ×coefficient = wall / content time. Content time is approximated
+            from playback-position advance between heartbeats (seeks excluded),
+            not from unique cue coverage.
+          </div>
+        </>
+      )}
+
+      <h2 className="h2">Coverage</h2>
       {entries == null && <div className="empty">Loading…</div>}
       {entries != null && withSubs.length === 0 && (
         <div className="empty">No episodes with subtitles.</div>
@@ -485,6 +769,15 @@ function PlayerRoute({
 }) {
   const [entry, setEntry] = useState<LibraryEntry | null>(null);
   const [notFound, setNotFound] = useState(false);
+
+  // Remember the last-played episode for the sidebar "View" item.
+  useEffect(() => {
+    try {
+      localStorage.setItem(LAST_MEDIA_KEY, id);
+    } catch {
+      /* private mode */
+    }
+  }, [id]);
 
   useEffect(() => {
     void api
@@ -545,6 +838,9 @@ function Settings({
     Boolean(settings.whisperAutoGenerate),
   );
   const [furigana, setFurigana] = useState(settings.furigana !== false);
+  const [prestudyMinutes, setPrestudyMinutes] = useState(
+    String(Number(settings.prestudyMinutes) || 10),
+  );
   const promptDefault = (settings.lookupPromptDefault as string) || "";
   const [lookupPrompt, setLookupPrompt] = useState(
     (settings.lookupPrompt as string) || promptDefault,
@@ -556,6 +852,7 @@ function Settings({
     setSecondaryLang((settings.knownLang as string) || "ru");
     setAutoWhisper(Boolean(settings.whisperAutoGenerate));
     setFurigana(settings.furigana !== false);
+    setPrestudyMinutes(String(Number(settings.prestudyMinutes) || 10));
     const def = (settings.lookupPromptDefault as string) || "";
     setLookupPrompt((settings.lookupPrompt as string) || def);
   }, [settings]);
@@ -568,6 +865,10 @@ function Settings({
         knownLang: secondaryLang,
         whisperAutoGenerate: autoWhisper,
         furigana,
+        prestudyMinutes: Math.max(
+          1,
+          Math.min(120, Math.round(Number(prestudyMinutes)) || 10),
+        ),
         lookupPrompt,
       });
       setSettings(next);
@@ -621,6 +922,17 @@ function Settings({
             onChange={(e) => setFurigana(e.target.checked)}
           />
           <label htmlFor="furigana">Furigana on unknown kanji</label>
+        </div>
+        <div className="field">
+          <label htmlFor="prestudyMinutes">Pre-study window (minutes)</label>
+          <input
+            id="prestudyMinutes"
+            type="number"
+            min={1}
+            max={120}
+            value={prestudyMinutes}
+            onChange={(e) => setPrestudyMinutes(e.target.value)}
+          />
         </div>
         <div className="field">
           <label>Word-lookup prompt (Gemini)</label>

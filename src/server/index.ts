@@ -49,6 +49,12 @@ import {
   resolveMediaName,
 } from "../lib/anki.ts";
 import { readSettings, writeSettings } from "../lib/settings.ts";
+import {
+  logEvent,
+  logEvents,
+  statsSummary,
+  type TelemetryEvent,
+} from "../lib/telemetry.ts";
 
 const PUBLIC_DIR = join(import.meta.dir, "..", "..", "public");
 
@@ -192,6 +198,7 @@ async function pumpTranslateBatch(library: Library): Promise<void> {
         await Bun.write(sidecarPath(entry, item.targetLang), cuesToSrt(translated));
         await library.refresh();
         item.status = "done";
+        void logEvent("translate_done", { mediaId: item.entryId, lang: item.targetLang });
       } catch (e) {
         item.status = "error";
         item.error = e instanceof Error ? e.message : String(e);
@@ -344,11 +351,24 @@ async function buildSearchIndex(entry: LibraryEntry): Promise<SearchIndexEntry |
 export interface ServerHandle {
   port: number;
   url: string;
+  root: string;
   stop: () => void;
 }
 
-export async function startServer(root: string, preferredPort = 8417): Promise<ServerHandle> {
-  const library = new Library(root);
+/** Root resolution: explicit arg > settings.mediaRoot (if it's a dir) > cwd. */
+async function resolveRoot(explicit?: string): Promise<string> {
+  if (explicit) return explicit;
+  const settings = await readSettings();
+  const saved = typeof settings.mediaRoot === "string" ? settings.mediaRoot : "";
+  if (saved && (await stat(saved).catch(() => null))?.isDirectory()) return saved;
+  return process.cwd();
+}
+
+export async function startServer(rootArg?: string, preferredPort = 8417): Promise<ServerHandle> {
+  const root = await resolveRoot(rootArg);
+  // Re-assignable: POST /api/root swaps in a new Library instance.
+  let library = new Library(root);
+  let currentRoot = root;
   // Idempotent: relocate legacy generated sidecars (renames are atomic, so
   // this is safe even while the previous instance is still serving).
   await migrateGeneratedSidecars(root).catch((e) =>
@@ -497,6 +517,14 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
         const existing = whisperQueue.activeFor(entry.absPath, lang);
         if (existing) return json({ jobId: existing.id, status: existing.status });
         const job = whisperQueue.enqueue(entry.absPath, lang, sidecarPath(entry, lang));
+        const doneListener = (e: WhisperEvent) => {
+          if (e.type !== "status") return;
+          if (e.status === "done")
+            void logEvent("whisper_done", { mediaId: entry.id, lang });
+          if (e.status === "done" || e.status === "error" || e.status === "canceled")
+            job.listeners.delete(doneListener);
+        };
+        job.listeners.add(doneListener);
         return json({ jobId: job.id, status: job.status });
       }
 
@@ -705,6 +733,7 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
           body.context ?? "",
         );
         explainCachePut(cacheKey, res);
+        void logEvent("explain", { len: body.sentence.length });
         return json(res);
       }
 
@@ -755,6 +784,7 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
           }
         }
 
+        void logEvent("lookup", { word: body.word, mediaId: body.mediaId });
         return json(
           await lookupWord(
             body.word,
@@ -834,6 +864,7 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
           context,
           ...(image ? { image, image_field: "context" } : {}),
         });
+        void logEvent("anki_add", { word: body.word, mediaId: body.mediaId });
         return json({ ok: true });
       }
 
@@ -842,6 +873,42 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
         if (!body.front) return err("front required", 400);
         await deleteCard(body.front);
         return json({ ok: true });
+      }
+
+      // --- library root (current root + re-root) ---
+      if (path === "/api/root") {
+        if (req.method === "GET") {
+          return json({ root: currentRoot, count: library.list().length });
+        }
+        if (req.method === "POST") {
+          const body = (await req.json().catch(() => ({}))) as { path?: string };
+          const p = (body.path ?? "").trim();
+          if (!p) return err("path required", 400);
+          const st = await stat(p).catch(() => null);
+          if (!st?.isDirectory()) return err(`not a directory: ${p}`, 400);
+          library = new Library(p);
+          currentRoot = p;
+          await migrateGeneratedSidecars(p).catch(() => {});
+          await library.refresh();
+          searchIndex.clear();
+          // Persist so the next argument-less CLI start reuses this root.
+          await writeSettings({ mediaRoot: p });
+          return json({ root: currentRoot, count: library.list().length });
+        }
+      }
+
+      // --- telemetry: client event batches + summary ---
+      if (req.method === "POST" && path === "/api/events") {
+        const body = (await req.json().catch(() => ({}))) as {
+          events?: TelemetryEvent[];
+        };
+        if (!Array.isArray(body.events)) return err("events array required", 400);
+        await logEvents(body.events);
+        return json({ ok: true, count: body.events.length });
+      }
+
+      if (req.method === "GET" && path === "/api/stats/summary") {
+        return json(await statsSummary());
       }
 
       // --- settings ---
@@ -879,6 +946,7 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
   return {
     port: server.port ?? preferredPort,
     url: `http://localhost:${server.port}`,
+    root,
     stop: () => server.stop(true),
   };
 }

@@ -24,7 +24,9 @@ const DEFAULTS: Settings = {
   lookupPrompt: "",
 };
 
-const dir = join(homedir(), ".config", "zehntage-reactor");
+// ZR_CONFIG_DIR override keeps tests away from the user's real settings.
+const dir =
+  process.env.ZR_CONFIG_DIR || join(homedir(), ".config", "zehntage-reactor");
 const file = join(dir, "settings.json");
 
 export async function readSettings(): Promise<Settings> {
