@@ -128,8 +128,9 @@ export function ReadRoute({
     if (!popup) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setPopup(null);
-      // x toggles blacklist for the popup word (mirrors the player hotkey)
-      if (e.key === "x" || e.key === "X") {
+      // x toggles blacklist for the popup word (mirrors the player hotkey);
+      // e.code = physical key, so it works on non-Latin layouts too
+      if (e.code === "KeyX" && !e.ctrlKey && !e.metaKey && !e.altKey) {
         const key = popup.dictForm ?? popup.surface;
         setBlacklist((prev) => {
           const next = new Set(prev);

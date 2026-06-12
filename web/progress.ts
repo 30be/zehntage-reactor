@@ -1,4 +1,4 @@
-// Map Anki learning progress to a RED -> GREEN underline color.
+// Map Anki learning progress to token text colors.
 
 import type { AnkiWord, ProgressEntry } from "./api.ts";
 import { kataToHira } from "./tokenizer.ts";
@@ -88,4 +88,30 @@ export function progressBucket(intervalDays: number): number {
 export function progressColor(p?: ProgressEntry): string {
   const days = p ? Math.max(0, p.interval || 0) : 0;
   return PROGRESS_COLORS[progressBucket(days)]!;
+}
+
+// --- learning-word text color ------------------------------------------------
+//
+// Words in the deck render in BLUE that fades toward the ambient text color
+// as the SRS interval grows (OKLCH interpolation, hue-aware). At >= 21 days
+// (Anki "mature") the word is indistinguishable from plain text.
+// `--tok-ambient` is a CSS custom property (currentColor at the token), so
+// the same color works on the dark video overlay and the light sidebar.
+
+/** Fresh-learning blue (interval 0). */
+export const LEARNING_BLUE = "oklch(0.65 0.15 250)";
+/** Interval (days) at which a learning word reaches the ambient color. */
+export const LEARNING_MATURE_DAYS = 21;
+
+/**
+ * Text color for a word IN the deck: blue -> ambient as interval grows.
+ * Returns null at/after maturity (>= 21d) — render plain (ambient) text.
+ * No progress entry (e.g. remote path without intervals) = fresh blue.
+ */
+export function learningColor(p?: ProgressEntry): string | null {
+  const days = p ? Math.max(0, p.interval || 0) : 0;
+  const t = Math.min(1, days / LEARNING_MATURE_DAYS);
+  if (t >= 1) return null;
+  const pct = Math.round((1 - t) * 100);
+  return `color-mix(in oklch, ${LEARNING_BLUE} ${pct}%, var(--tok-ambient, currentColor))`;
 }

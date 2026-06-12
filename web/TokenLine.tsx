@@ -1,12 +1,18 @@
 // Shared token-line renderer: the SAME word rendering (hoverable/clickable
-// tokens, Anki progress gradient underline, furigana on unknown kanji) used by
+// tokens, learning-progress text color, furigana on unknown kanji) used by
 // both the video overlay and the cue-list sidebar.
+//
+// Word coloring:
+//   known / blacklisted  -> plain ambient text
+//   unknown (not in deck)-> muted red (.tok.unk)
+//   in deck (learning)   -> blue fading to ambient as the interval grows
+//   in deck (mature)     -> plain ambient text
 
 import { isLexical, kataToHira, type KToken } from "./tokenizer.ts";
 import {
   matchFront,
   progressBucket,
-  progressColor,
+  learningColor,
   type WordIndex,
 } from "./progress.ts";
 import { accentOf, accentPattern, morae } from "./accent.ts";
@@ -57,10 +63,10 @@ export interface TokenLineProps {
   tokens: KToken[] | null;
   fallbackText: string;
   wordIndex: WordIndex;
-  /** local mark-as-known set (zr.known): no underline, no furigana */
+  /** local mark-as-known set (zr.known): plain text, no furigana */
   knownWords: Set<string>;
   furiganaOn: boolean;
-  /** zr.blacklist lemmas: rendered plain (no underline/furigana/counting) */
+  /** zr.blacklist lemmas: rendered plain (no coloring/furigana/counting) */
   blacklist?: Set<string>;
   /** pitch-accent map (loadAccents()); null/undefined = plain furigana */
   accents?: Map<string, number> | null;
@@ -96,7 +102,8 @@ export function TokenLine({
           ? null
           : matchFront(wordIndex, tok.surface_form, tok.reading, tok.basic_form);
         const inDeck = front != null;
-        const color = inDeck ? progressColor(wordIndex.progress[front!]) : undefined;
+        const color = inDeck ? learningColor(wordIndex.progress[front!]) : null;
+        const unknown = !localKnown && !inDeck;
         const mature =
           inDeck &&
           progressBucket(wordIndex.progress[front!]?.interval ?? 0) >=
@@ -110,12 +117,8 @@ export function TokenLine({
         return (
           <span
             key={i}
-            className={`tok${inDeck ? " known" : ""}`}
-            style={
-              color
-                ? ({ ["--tok-color"]: color } as React.CSSProperties)
-                : undefined
-            }
+            className={`tok${inDeck ? " known" : ""}${unknown ? " unk" : ""}`}
+            style={color ? { color } : undefined}
             onMouseEnter={onWordEnter ? (e) => onWordEnter(tok, e) : undefined}
             onMouseLeave={onWordLeave}
             onClick={onWordClick ? (e) => onWordClick(tok, e) : undefined}

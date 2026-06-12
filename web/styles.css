@@ -151,9 +151,17 @@ a { color: inherit; }
 }
 .sub-secondary.show { filter: blur(0); }
 
-.tok { cursor: pointer; padding-bottom: 1px; border-radius: 2px; }
+.tok {
+  cursor: pointer;
+  padding-bottom: 1px;
+  border-radius: 2px;
+  /* ambient = the surrounding text color (dark overlay -> light text, light
+     sidebar -> dark text); learning-word colors mix toward it in OKLCH */
+  --tok-ambient: currentColor;
+}
 .tok:hover { background: rgba(255,255,255,0.18); }
-.tok.known { border-bottom: 3px solid var(--tok-color, #ef4444); }
+/* unknown (not in deck, not marked known/blacklisted): muted red */
+.tok.unk { color: #b35454; }
 
 /* ---- popup (zehntage-chrome style dark) ---- */
 .lookup {

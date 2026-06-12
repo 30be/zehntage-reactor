@@ -61,3 +61,46 @@ test("-/= change playbackRate, [/] show offset toast", async ({ page }) => {
   await page.keyboard.press("]");
   await expect(page.locator(".toast")).toContainText("subs +0.0s");
 });
+
+// --- wave 11: layout-independent (e.code) hotkeys + focused-element guard ---
+
+test("letter hotkeys bind to e.code (work on a Russian layout)", async ({ page }) => {
+  await openPlayer(page, "clip.mp4");
+  await seekTo(page, 8); // inside cue 2 (6–9s)
+  await waitForTokens(page);
+  // Russian layout: physical A key produces key "ф", code "KeyA" -> replay.
+  await page.evaluate(() => {
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ф", code: "KeyA", bubbles: true }),
+    );
+  });
+  const t = await page.evaluate(() => document.querySelector("video")!.currentTime);
+  expect(t).toBeGreaterThanOrEqual(5.9);
+  expect(t).toBeLessThan(6.5);
+});
+
+test("letter hotkeys still fire while a button/popover control has focus", async ({ page }) => {
+  await openPlayer(page, "clip.mp4");
+  await seekTo(page, 3);
+  await waitForTokens(page);
+  // open the CC popover and focus one of its controls
+  await page.locator(".vbar-cc").click();
+  await expect(page.locator(".cc-pop")).toBeVisible();
+  await page.locator('.cc-pop input[name="cc-primary"]').first().focus();
+  const before = await page.locator(".cue-sidebar").count();
+  await page.keyboard.press("l"); // toggle sidebar — must not be swallowed
+  await expect
+    .poll(() => page.locator(".cue-sidebar").count())
+    .toBe(before === 0 ? 1 : 0);
+  await page.keyboard.press("l"); // restore
+});
+
+test("Space passes through to a focused button instead of toggling playback", async ({ page }) => {
+  await openPlayer(page, "clip.mp4");
+  await expect(video(page)).toHaveJSProperty("paused", true);
+  await page.locator(".vbar-cc").focus();
+  await page.keyboard.press(" ");
+  // native button activation opens the CC popover; playback stays paused
+  await expect(page.locator(".cc-pop")).toBeVisible();
+  await expect(video(page)).toHaveJSProperty("paused", true);
+});

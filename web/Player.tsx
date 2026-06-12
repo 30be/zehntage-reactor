@@ -1228,15 +1228,22 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   useEffect(() => {
     const FRAME = 1 / 24; // ~one frame at 23.976/24 fps
     const RATES = [0.5, 0.75, 1, 1.25, 1.5];
+    // Letter hotkeys bind to e.code (physical key) so they keep working on
+    // non-Latin layouts (Russian, German…). Symbols/arrows/Space/Tab stay on
+    // e.key, which is layout-correct for them.
+    const LETTERS: Record<string, string> = {
+      KeyF: "f", KeyA: "a", KeyR: "r", KeyL: "l", KeyK: "k", KeyS: "s",
+      KeyH: "h", KeyU: "u", KeyW: "w", KeyB: "b", KeyI: "i", KeyX: "x",
+    };
     const HANDLED = new Set([
-      " ", "f", "F",
+      " ",
       "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
       ",", "<", ".", ">",
-      "a", "A", "r", "R", "-", "=", "[", "]", "\\",
-      "l", "L", "k", "K",
-      "Tab", "s", "S", "h", "H", "u", "U", "w", "W",
-      "b", "B", "i", "I", "x", "X",
+      "-", "=", "[", "]", "\\",
+      "Tab",
+      ...Object.values(LETTERS),
     ]);
+    const REPEAT_TOGGLES = new Set([" ", "f", "l", "k", "s", "h", "u", "w", "b", "i", "x"]);
     const isTextInput = (el: Element | null): boolean => {
       if (!el) return false;
       if (el.tagName === "TEXTAREA") return true;
@@ -1254,11 +1261,23 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       const v = videoRef.current;
       if (!v) return;
       const active = document.activeElement;
-      // Real text inputs keep their native behavior entirely. SELECTs too:
-      // arrow keys / typing must keep working for keyboard track selection.
-      const isSelect = (el: Element | null) => el?.tagName === "SELECT";
+      // Real text inputs keep their native behavior entirely.
       if (isTextInput(active) || isTextInput(e.target as Element | null)) return;
-      if (isSelect(active) || isSelect(e.target as Element | null)) return;
+      // Layout-independent letter token: physical key for letters, e.key else.
+      const kb = LETTERS[e.code] ?? e.key;
+      // Focused <select>/<button>: letter hotkeys still work (no conflict),
+      // but Space/Enter/Tab/arrows belong to the element — except Shift+←/→
+      // (episode nav), which selects/buttons don't use.
+      const passEl = (el: Element | null) =>
+        el?.tagName === "SELECT" || el?.tagName === "BUTTON";
+      const episodeNav =
+        e.shiftKey && (kb === "ArrowLeft" || kb === "ArrowRight");
+      if (
+        (passEl(active) || passEl(e.target as Element | null)) &&
+        !episodeNav &&
+        (kb === " " || kb === "Enter" || kb === "Tab" || kb.startsWith("Arrow"))
+      )
+        return;
       // Escape closes the lookup panel; otherwise leave it to native handling
       // (exit fullscreen etc.) — never eat it for nothing.
       if (e.key === "Escape") {
@@ -1279,9 +1298,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         }
         return;
       }
-      if (!HANDLED.has(e.key)) return;
+      if (!HANDLED.has(kb)) return;
       // Avoid double-toggle on key auto-repeat for toggling keys.
-      if (e.repeat && [" ", "f", "F", "l", "L", "k", "K", "s", "S", "h", "H", "u", "U", "w", "W", "b", "B", "i", "I", "x", "X"].includes(e.key)) {
+      if (e.repeat && REPEAT_TOGGLES.has(kb)) {
         e.preventDefault();
         e.stopPropagation();
         return;
@@ -1297,14 +1316,13 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       ) {
         active.blur();
       }
-      switch (e.key) {
+      switch (kb) {
         case " ":
           pausedByHoverRef.current = false; // user took control
           if (v.paused) void v.play().catch(() => {});
           else v.pause();
           break;
         case "f":
-        case "F":
           if (document.fullscreenElement) void document.exitFullscreen();
           else void stageRef.current?.requestFullscreen?.();
           break;
@@ -1333,9 +1351,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           v.currentTime = Math.min(v.duration || Infinity, v.currentTime + FRAME);
           break;
         case "a":
-        case "A":
-        case "r":
-        case "R": {
+        case "r": {
           // Replay: jump to the start of the current primary cue; if within
           // the first 0.3s (or between cues), step back to the previous one —
           // tapping `a` repeatedly walks backward cue by cue.
@@ -1362,7 +1378,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           let i = RATES.indexOf(v.playbackRate);
           if (i === -1) i = RATES.indexOf(1);
           i =
-            e.key === "="
+            kb === "="
               ? (i + 1) % RATES.length
               : (i + RATES.length - 1) % RATES.length;
           v.playbackRate = RATES[i]!;
@@ -1379,7 +1395,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           changeOffset(null);
           break;
         case "l":
-        case "L":
           toggleSidebar();
           break;
         case "Tab": {
@@ -1418,8 +1433,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           }
           break;
         }
-        case "s":
-        case "S": {
+        case "s": {
           // Shadowing loop on the current primary cue. Repeat count comes from
           // Settings ("Shadowing repeats", 0 = infinite). `s` again releases.
           if (loopRef.current) {
@@ -1440,19 +1454,15 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           break;
         }
         case "h":
-        case "H":
           toggleHardMode();
           break;
         case "w":
-        case "W":
           togglePreStudy();
           break;
         case "u":
-        case "U":
           toggleAutopause();
           break;
-        case "b":
-        case "B": {
+        case "b": {
           // hold = temporary unblur; quick double-press toggles for the session
           const now = Date.now();
           if (now - lastBDownRef.current < 350) {
@@ -1465,8 +1475,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           setSecHold(true);
           break;
         }
-        case "i":
-        case "I": {
+        case "i": {
           if (document.pictureInPictureElement) {
             void document.exitPictureInPicture().catch(() => {});
           } else if (typeof v.requestPictureInPicture === "function") {
@@ -1478,8 +1487,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           }
           break;
         }
-        case "k":
-        case "K": {
+        case "k": {
           // toggle mark-as-known for the popup word or the hovered word
           const key = popupKeyRef.current ?? hoveredKeyRef.current;
           if (!key) break;
@@ -1490,8 +1498,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           toast(adding ? `known: ${key}` : `unknown: ${key}`);
           break;
         }
-        case "x":
-        case "X": {
+        case "x": {
           // toggle blacklist for the popup word or the hovered word
           const key = popupKeyRef.current ?? hoveredKeyRef.current;
           if (!key) break;
@@ -1505,7 +1512,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     };
     // keyup re-blurs the secondary line after a `b` hold (harmless elsewhere)
     const onKeyUp = (e: KeyboardEvent) => {
-      if (e.key === "b" || e.key === "B") setSecHold(false);
+      if (e.code === "KeyB") setSecHold(false);
     };
     // alt-tab / focus loss while `b` is held: keyup never arrives — re-blur.
     const onWinBlur = () => setSecHold(false);

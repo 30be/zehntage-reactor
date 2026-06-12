@@ -5,22 +5,6 @@
   },
   "zr.tracks.2328ae29a728": {
     "v": "{\"primary\":\"sidecar:ja.srt\",\"secondary\":\"sidecar:gen:ru\"}",
-    "ts": 1781296030658
-  },
-  "zr.pos.2328ae29a728": {
-    "v": "0.575503",
-    "ts": 1781296003874
-  },
-  "zr.tracks.c4c16ec0b0a1": {
-    "v": "{\"primary\":\"sidecar:ja.srt\",\"secondary\":\"\"}",
-    "ts": 1781296052308
-  },
-  "zr.pos.c4c16ec0b0a1": {
-    "v": "7.104966",
-    "ts": 1781296052542
-  },
-  "zr.e2e.1781296060834": {
-    "v": "hello",
-    "ts": 1781296060834
+    "ts": 1781296842368
   }
 }

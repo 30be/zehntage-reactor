@@ -24,6 +24,21 @@ test("Add to Anki stores the card in the fake backend and marks the word", async
     })
     .toContain("勉強 [フェイク]");
 
-  // word index refresh marks the token as known (underline class)
-  await expect(page.locator(".sub-primary .tok.known").first()).toBeVisible();
+  // word index refresh marks the token as in-deck (.known) and colors it
+  // learning-blue (color-mix toward the ambient text color; the fake backend
+  // reports no interval -> fresh blue). The unknown-red .unk class is gone.
+  const tok = page.locator(".sub-primary .tok.known").first();
+  await expect(tok).toBeVisible();
+  await expect(tok).toHaveAttribute("style", /color-mix\(in oklch/);
+  await expect(tok).not.toHaveClass(/unk/);
+});
+
+test("unknown words render with the muted-red .unk class, no underline border", async ({ page }) => {
+  await openPlayer(page, "clip.mp4");
+  await seekTo(page, 3); // 勉強します。
+  await waitForTokens(page);
+  const unk = page.locator(".sub-primary .tok.unk").first();
+  await expect(unk).toBeVisible();
+  await expect(unk).toHaveCSS("color", "rgb(179, 84, 84)"); // #b35454
+  await expect(unk).toHaveCSS("border-bottom-width", "0px");
 });
