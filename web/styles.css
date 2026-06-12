@@ -138,7 +138,11 @@ a { color: inherit; }
   font-size: clamp(20px, 2.6vw, 30px);
   font-weight: 600;
   color: #fff;
-  text-shadow: 0 2px 6px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,0.9);
+  text-shadow:
+    0 2px 14px rgba(0,0,0,1),
+    0 0 10px rgba(0,0,0,0.95),
+    0 0 4px rgba(0,0,0,1),
+    0 1px 2px rgba(0,0,0,1);
   line-height: 1.4;
 }
 .sub-secondary {
@@ -160,8 +164,11 @@ a { color: inherit; }
   --tok-ambient: currentColor;
 }
 .tok:hover { background: rgba(255,255,255,0.18); }
-/* unknown (not in deck, not marked known/blacklisted): muted red */
-.tok.unk { color: #b35454; }
+/* unknown (not in deck, not marked known/blacklisted): two reds —
+   dark crimson on light backgrounds, pinkish light on the dark overlay */
+.tok.unk { color: #9e2f3a; }
+.sub-overlay .tok.unk,
+.fs-sidebar .tok.unk { color: #f2a0a8; }
 
 /* ---- popup (zehntage-chrome style dark) ---- */
 .lookup {
@@ -367,8 +374,9 @@ textarea.prompt {
 }
 .sub-primary rt {
   font-size: 0.45em;
-  font-weight: 400;
-  opacity: 0.7;
+  font-weight: 500;
+  opacity: 0.95;
+  text-shadow: 0 1px 3px rgba(0,0,0,0.95), 0 0 2px rgba(0,0,0,0.9);
   user-select: none;
   letter-spacing: 0;
 }
@@ -435,6 +443,11 @@ textarea.prompt {
   max-height: 100vh;
   object-fit: contain;
 }
+/* fullscreen: subtitle 25% larger */
+.video-stage:fullscreen .sub-primary {
+  font-size: clamp(25px, 3.25vw, 38px);
+}
+
 /* keep the subtitles over the lower part of the VIDEO, not the screen edge */
 .video-stage:fullscreen .sub-overlay {
   bottom: 10%;
@@ -1291,6 +1304,19 @@ textarea.prompt {
   overscroll-behavior: contain;
 }
 
+/* laconic scrollbars, app-wide: slim thumb, no track */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(128, 128, 128, 0.45) transparent;
+}
+*::-webkit-scrollbar { width: 6px; height: 6px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.45);
+  border-radius: 3px;
+}
+*::-webkit-scrollbar-thumb:hover { background: rgba(128, 128, 128, 0.7); }
+
 /* encounters list: scrollable, scroll stays inside the panel */
 .lookup .enc-list {
   max-height: 180px;
@@ -1298,51 +1324,17 @@ textarea.prompt {
   overscroll-behavior: contain;
 }
 
-/* ---- wave 10 (appended): translation tooltip, CC popover, centered title,
+/* ---- wave 10 (appended): CC popover, centered title,
    fullscreen sidebar overlay, stats polish ---- */
 
-/* translation hint: dim circle-less "?" at the JP line's right edge.
-   (Distinct from .explain-q, the CIRCLED ? for sentence-structure explain.)
-   Hidden until the JP line is hovered; brightens under the cursor. */
-.sec-hint {
-  position: relative;
-  display: inline-block;
-  margin-left: 0.45em;
-  font-size: 0.55em;
-  font-weight: 600;
-  line-height: 1;
-  color: #fff;
-  opacity: 0;
-  cursor: pointer;
-  vertical-align: middle;
-  transition: opacity 0.12s;
-  user-select: none;
-  padding: 0.2em 0.3em; /* forgiving hover target */
+/* sidebar translations: blurred like the on-screen RU line, revealed on
+   hovering the cue row (same hide-until-asked idea, laconic) */
+.cue-row .cue-sec {
+  filter: blur(4px);
+  transition: filter 0.15s;
+  cursor: default;
 }
-.sub-primary:hover .sec-hint { opacity: 0.35; }
-.sec-hint:hover, .sec-hint.open { opacity: 0.9; }
-
-/* the tooltip itself: minimal dark pill above the "?" — instant, unblurred */
-.sec-tip {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  right: -0.3em;
-  width: max-content;
-  max-width: min(60vw, 480px);
-  padding: 6px 10px;
-  background: rgba(0, 0, 0, 0.88);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 6px;
-  color: #e5e5e5;
-  font-size: clamp(13px, 1.4vw, 16px);
-  font-weight: 400;
-  line-height: 1.45;
-  text-align: left;
-  text-shadow: none;
-  white-space: normal;
-  pointer-events: none;
-  z-index: 6;
-}
+.cue-row:hover .cue-sec { filter: none; }
 
 /* CC button + popover (track selection moved off the page into the vbar) */
 .vbar-cc.on { opacity: 1; background: rgba(255, 255, 255, 0.14); }

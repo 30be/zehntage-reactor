@@ -39,7 +39,7 @@ import {
   ChevronRightIcon,
   BookOpenIcon,
 } from "./icons.tsx";
-import { useAnkiWordsLive } from "./ankicache.ts";
+import { refreshAnkiWords, useAnkiWordsLive } from "./ankicache.ts";
 
 // Module-level cue-token cache: tokenization results survive popup churn AND
 // episode changes (the kuromoji instance already does — getTokenizer() memos
@@ -196,7 +196,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   const [activeS, setActiveS] = useState(-1);
   // Translation tooltip (the dim "?" at the JP line's right edge) is open
   // because the cursor rests on the hint.
-  const [secTipOpen, setSecTipOpen] = useState(false);
+  const [secShow, setSecShow] = useState(false);
   // RU reveal: hold `b` = temporary tooltip; quick double-press `b` = session toggle.
   const [secHold, setSecHold] = useState(false);
   const [blurOff, setBlurOff] = useState(false);
@@ -299,10 +299,31 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   // add/delete write-throughs re-render the known-word underlines without an
   // explicit refreshAnki() roundtrip.
   const liveAnki = useAnkiWordsLive();
+  // Optimistic fronts not yet confirmed by the server cache: merged into every
+  // liveAnki snapshot so a background revalidation that raced an add can't
+  // un-mark a freshly-added word. Confirmed fronts drop out of the set.
+  const pendingFrontsRef = useRef<Set<string>>(new Set());
+  const markFrontOptimistic = useCallback((front: string) => {
+    pendingFrontsRef.current.add(front);
+    setKnownFronts((prev) => new Set(prev).add(front));
+  }, []);
+  const unmarkFrontOptimistic = useCallback((front: string) => {
+    pendingFrontsRef.current.delete(front);
+    setKnownFronts((prev) => {
+      const next = new Set(prev);
+      next.delete(front);
+      return next;
+    });
+  }, []);
   useEffect(() => {
     if (!liveAnki) return;
     setWordIndex(buildWordIndex(liveAnki.words, liveAnki.progress));
-    setKnownFronts(new Set(liveAnki.words.map((w) => w.front)));
+    const fronts = new Set(liveAnki.words.map((w) => w.front));
+    for (const f of pendingFrontsRef.current) {
+      if (fronts.has(f)) pendingFrontsRef.current.delete(f); // confirmed
+      else fronts.add(f); // still pending — keep the optimistic mark
+    }
+    setKnownFronts(fronts);
     deckCardsRef.current = new Map(liveAnki.words.map((w) => [w.front, w]));
   }, [liveAnki]);
 
@@ -774,15 +795,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   // starts as soon as the subs list arrives, the deck index fills in async.
   useEffect(() => {
     let cancelled = false;
-    void api
-      .ankiWords()
-      .catch(() => ({ words: [], progress: {} }))
-      .then((anki) => {
-        if (cancelled) return;
-        setWordIndex(buildWordIndex(anki.words, anki.progress));
-        setKnownFronts(new Set(anki.words.map((w) => w.front)));
-        deckCardsRef.current = new Map(anki.words.map((w) => [w.front, w]));
-      });
+    // Kick the deck fetch; useAnkiWordsLive is the SINGLE consumer of the
+    // result (cached snapshot renders immediately, fresh data arrives via the
+    // ankicache notify channel). No second setState path racing it here.
+    void api.ankiWords().catch(() => {});
     void (async () => {
       const ts = await api.subs(entry.id).catch(() => [] as SubTrackInfo[]);
       if (cancelled) return;
@@ -1528,7 +1544,13 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   }, [changeOffset, toast, clearCloseTimer, resumeFromHover, toggleSidebar, toggleKnown, toggleBlacklist, toggleHardMode, gotoEpisode, togglePreStudy, toggleAutopause]);
 
   const primaryText = activeP >= 0 && activeP < displayCues.length ? displayCues[activeP]!.text : "";
-  const secondaryText = activeS >= 0 ? secondaryCues[activeS]!.text : "";
+  // Bounds-checked: activeS can be stale for one render after the secondary
+  // track switches (off / another track) — secondaryCues shrinks before the
+  // timeupdate effect recomputes activeS.
+  const secondaryText =
+    activeS >= 0 && activeS < secondaryCues.length
+      ? secondaryCues[activeS]!.text
+      : "";
 
   // --- lazy tokenize the active primary cue ---
   // While the tokenizer is still initializing, TokenLine renders the cue text
@@ -1563,11 +1585,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   }, [primaryText]);
 
   const refreshAnki = useCallback(async () => {
-    const anki = await api.ankiWords().catch(() => null);
-    if (!anki) return;
-    setWordIndex(buildWordIndex(anki.words, anki.progress));
-    setKnownFronts(new Set(anki.words.map((w) => w.front)));
-    deckCardsRef.current = new Map(anki.words.map((w) => [w.front, w]));
+    // Force a fresh fetch; the result lands via the useAnkiWordsLive channel
+    // (single source of truth — no direct setState here).
+    await refreshAnkiWords().catch(() => {});
   }, []);
 
   // Pre-study bulk add: text-only lookup then a LIGHT Anki add (no mediaId /
@@ -1588,7 +1608,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       if (!mountedRef.current || !preStudyOpenRef.current) break;
       // OPTIMISTIC: mark the lemma known right away (underline flips
       // instantly); reverted below if the add fails.
-      setKnownFronts((prev) => new Set(prev).add(it.lemma));
+      markFrontOptimistic(it.lemma);
       // matching secondary (RU) cue at the word's first occurrence, if any
       const sIdx = activeCueIndex(
         secondaryCuesRef.current,
@@ -1615,7 +1635,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         });
         // optimistic known-marking (front format matches the server's card)
         const front = lk.reading ? `${it.lemma} [${lk.reading}]` : it.lemma;
-        setKnownFronts((prev) => new Set(prev).add(front));
+        markFrontOptimistic(front);
         setPreStudy((prev) =>
           prev
             ? {
@@ -1628,11 +1648,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         );
       } catch {
         // revert the optimistic known-marking for this lemma
-        setKnownFronts((prev) => {
-          const next = new Set(prev);
-          next.delete(it.lemma);
-          return next;
-        });
+        unmarkFrontOptimistic(it.lemma);
         failed++;
       }
       done++;
@@ -1645,7 +1661,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     setPreBusy(false);
     if (failed > 0) toast(`added ${done - failed}/${todo.length} (${failed} failed)`);
     void refreshAnki();
-  }, [preStudy, entry.id, entry.name, preFrames, toast, refreshAnki]);
+  }, [preStudy, entry.id, entry.name, preFrames, toast, refreshAnki, markFrontOptimistic, unmarkFrontOptimistic]);
 
   // --- word hover -> popup + lookup (with ~200ms hover-intent debounce) ---
   // We only OPEN the popup (and fire the lookup) once the cursor RESTS on a
@@ -2040,11 +2056,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     const front = popupFront;
     // OPTIMISTIC: immediately flip the button to the saved/Delete state by
     // marking the word known; POST in the background and revert on failure.
-    setKnownFronts((prev) => {
-      const next = new Set(prev);
-      next.add(front);
-      return next;
-    });
+    markFrontOptimistic(front);
     // i+1 example (client-side, mining.ts spirit): among the loaded cues find
     // one that contains the word and has exactly ONE unknown lexical token
     // (the word itself) — appended to notes when it differs from the context.
@@ -2083,14 +2095,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       void refreshAnki();
     } catch (e) {
       // revert the optimistic state
-      setKnownFronts((prev) => {
-        const next = new Set(prev);
-        next.delete(front);
-        return next;
-      });
+      unmarkFrontOptimistic(front);
       toast(`Add failed: ${e instanceof Error ? e.message : e}`);
     }
-  }, [popup, lookup, popupFront, primaryText, entry.id, refreshAnki, toast, cueBoundsAt]);
+  }, [popup, lookup, popupFront, primaryText, entry.id, refreshAnki, toast, cueBoundsAt, markFrontOptimistic, unmarkFrontOptimistic]);
 
   // Add the whole sentence as an Anki card (front = JP sentence, back =
   // translation, notes = breakdown + idioms). Same optimistic flow as words.
@@ -2098,11 +2106,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     if (!popup || popup.kind !== "sentence" || !explain) return;
     const v = videoRef.current;
     const front = popup.surface;
-    setKnownFronts((prev) => {
-      const next = new Set(prev);
-      next.add(front);
-      return next;
-    });
+    markFrontOptimistic(front);
     try {
       await api.ankiAdd({
         word: popup.surface,
@@ -2118,14 +2122,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       sessCardsRef.current += 1;
       void refreshAnki();
     } catch (e) {
-      setKnownFronts((prev) => {
-        const next = new Set(prev);
-        next.delete(front);
-        return next;
-      });
+      unmarkFrontOptimistic(front);
       toast(`Add failed: ${e instanceof Error ? e.message : e}`);
     }
-  }, [popup, explain, entry.id, refreshAnki, toast, cueBoundsAt]);
+  }, [popup, explain, entry.id, refreshAnki, toast, cueBoundsAt, markFrontOptimistic, unmarkFrontOptimistic]);
 
   // --- follow-up question (both panel kinds) ---
   const onAsk = useCallback(async () => {
@@ -2779,29 +2779,25 @@ export function Player({ entry, startAt, toast, settings }: Props) {
                 ?
               </span>
             )}
-            {primaryText && secondaryText && (
-              <span
-                className={`sec-hint${secTipOpen || secHold || blurOff ? " open" : ""}`}
-                title="Translation — hover to peek (or hold b)"
-                onMouseEnter={() => {
-                  secondaryHoveredRef.current = true;
-                  clearCloseTimer();
-                  setSecTipOpen(true);
-                  pauseForHover();
-                }}
-                onMouseLeave={() => {
-                  secondaryHoveredRef.current = false;
-                  setSecTipOpen(false);
-                  resumeFromHover();
-                }}
-              >
-                ?
-                {(secTipOpen || secHold || blurOff) && (
-                  <span className="sec-tip">{secondaryText}</span>
-                )}
-              </span>
-            )}
           </div>
+          {secondaryText && (
+            <div
+              className={`sub-secondary${secShow || secHold || blurOff ? " show" : ""}`}
+              onMouseEnter={() => {
+                secondaryHoveredRef.current = true;
+                clearCloseTimer();
+                setSecShow(true);
+                pauseForHover();
+              }}
+              onMouseLeave={() => {
+                secondaryHoveredRef.current = false;
+                setSecShow(false);
+                resumeFromHover();
+              }}
+            >
+              {secondaryText}
+            </div>
+          )}
         </div>
         <div className="vbar">
           <div

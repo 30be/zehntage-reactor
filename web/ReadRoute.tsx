@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type Cue, type LibraryEntry, type WordLookup } from "./api.ts";
 import { Read } from "./Read.tsx";
-import { TokenLine, AccentReading, wordKey } from "./TokenLine.tsx";
+import { TokenLine, AccentReading } from "./TokenLine.tsx";
 import { buildWordIndex, matchFront, type WordIndex } from "./progress.ts";
 import { getTokenizer, type KToken } from "./tokenizer.ts";
 import { accentOf, loadAccents } from "./accent.ts";
@@ -37,7 +37,7 @@ export function ReadRoute({
   const [secondaryCues, setSecondaryCues] = useState<Cue[] | null>(null);
   const [tokenize, setTokenize] = useState<((t: string) => KToken[]) | null>(null);
   const [wordIndex, setWordIndex] = useState<WordIndex>(() => buildWordIndex([], {}));
-  const [knownWords, setKnownWords] = useState<Set<string>>(() => {
+  const [knownWords] = useState<Set<string>>(() => {
     try {
       const raw = JSON.parse(localStorage.getItem("zr.known") ?? "[]");
       return new Set(Array.isArray(raw) ? raw.filter((w) => typeof w === "string") : []);

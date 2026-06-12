@@ -26,12 +26,8 @@ test("cue text appears at the seeked time", async ({ page }) => {
   await expect(page.locator(".sub-primary")).toContainText("勉強");
   await expect(page.locator(".sub-primary")).toContainText("します");
   await waitForTokens(page);
-  // The translation is no longer an always-visible line: it lives in the
-  // "?" hover tooltip at the line's right edge — `b` hold also reveals it.
-  await page.keyboard.down("b");
-  await expect(page.locator(".sec-tip")).toContainText("Я учусь.");
-  await page.keyboard.up("b");
-  await expect(page.locator(".sec-tip")).toHaveCount(0);
+  // RU line is on screen (blurred until hovered / b-held)
+  await expect(page.locator(".sub-secondary")).toContainText("Я учусь.");
   await seekTo(page, 7);
   await expect(page.locator(".sub-primary")).toContainText("図書館");
   await expect(page.locator(".sub-primary")).toContainText("ます");

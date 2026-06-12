@@ -39,6 +39,6 @@ test("unknown words render with the muted-red .unk class, no underline border", 
   await waitForTokens(page);
   const unk = page.locator(".sub-primary .tok.unk").first();
   await expect(unk).toBeVisible();
-  await expect(unk).toHaveCSS("color", "rgb(179, 84, 84)"); // #b35454
+  await expect(unk).toHaveCSS("color", "rgb(242, 160, 168)"); // #f2a0a8 (overlay red)
   await expect(unk).toHaveCSS("border-bottom-width", "0px");
 });

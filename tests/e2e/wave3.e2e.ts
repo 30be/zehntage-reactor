@@ -38,29 +38,29 @@ test("density strip canvas renders when cues exist", async ({ page }) => {
   await expect(page.locator(".density-marker")).toHaveCount(1);
 });
 
-test("b hold temporarily reveals the translation tooltip", async ({ page }) => {
+test("b hold temporarily unblurs the secondary line", async ({ page }) => {
   await openPlayer(page, "clip.mp4");
-  await seekTo(page, 3); // ja cue 2-5s, ru cue active
-  const hint = page.locator(".sec-hint");
-  await expect(hint).toBeVisible(); // dim "?" at the JP line's right edge
-  await expect(page.locator(".sec-tip")).toHaveCount(0);
+  await seekTo(page, 3); // ja cue 2-5s, ru line shown (blurred)
+  const sec = page.locator(".sub-secondary");
+  await expect(sec).toBeVisible();
+  await expect(sec).not.toHaveClass(/\bshow\b/);
   await page.keyboard.down("b");
-  await expect(page.locator(".sec-tip")).toBeVisible();
-  await expect(page.locator(".sec-tip")).toContainText("Я учусь.");
+  await expect(sec).toHaveClass(/\bshow\b/);
   await page.keyboard.up("b");
-  await expect(page.locator(".sec-tip")).toHaveCount(0);
+  await expect(sec).not.toHaveClass(/\bshow\b/);
 });
 
-test("hovering the ? shows the tooltip and pauses; leaving resumes", async ({ page }) => {
+test("hovering the secondary line unblurs it and pauses; leaving resumes", async ({ page }) => {
   await openPlayer(page, "clip.mp4");
   await seekTo(page, 2.2);
   await playVideo(page);
-  const hint = page.locator(".sec-hint");
-  await hint.hover();
-  await expect(page.locator(".sec-tip")).toContainText("Я учусь.");
+  const sec = page.locator(".sub-secondary");
+  await expect(sec).toBeVisible();
+  await sec.hover();
+  await expect(sec).toHaveClass(/\bshow\b/);
   await expect(page.locator("video")).toHaveJSProperty("paused", true);
-  // leave the hint → tooltip hides, playback resumes (we paused it)
+  // leave the line → re-blurs, playback resumes (we paused it)
   await page.mouse.move(10, 10);
-  await expect(page.locator(".sec-tip")).toHaveCount(0);
+  await expect(sec).not.toHaveClass(/\bshow\b/);
   await expect(page.locator("video")).toHaveJSProperty("paused", false);
 });
