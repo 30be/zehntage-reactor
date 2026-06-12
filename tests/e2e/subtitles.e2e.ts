@@ -3,8 +3,8 @@ import { openPlayer, seekTo, waitForTokens } from "./helpers.ts";
 
 test("tracks auto-select: ja primary, generated ru secondary", async ({ page }) => {
   await openPlayer(page, "clip.mp4");
-  const primary = page.locator(".track-pick", { hasText: "Primary" }).locator("select");
-  const secondary = page.locator(".track-pick", { hasText: "Secondary" }).locator("select");
+  const primary = page.getByLabel("Primary subtitle track");
+  const secondary = page.getByLabel("Secondary subtitle track");
   await expect(primary).toHaveValue("sidecar:ja.srt");
   await expect(secondary).toHaveValue("sidecar:gen:ru");
   // generated-origin track gets a friendly label

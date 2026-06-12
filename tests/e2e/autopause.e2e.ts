@@ -3,7 +3,9 @@ import { openPlayer, playVideo, seekTo, video } from "./helpers.ts";
 
 test("autopause stops playback at the cue end (±0.5s)", async ({ page }) => {
   await openPlayer(page, "clip.mp4");
-  await page.locator(".switch.inline input[type=checkbox]").check();
+  // autopause has no UI control anymore — the `u` hotkey toggles it
+  await page.keyboard.press("u");
+  await expect(page.locator(".toast")).toHaveText("autopause on");
   await seekTo(page, 3.5); // cue 1 ends at 5.0
   await playVideo(page);
   await expect(video(page)).toHaveJSProperty("paused", false);

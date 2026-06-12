@@ -36,7 +36,21 @@ import {
   RotateCwIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
+  BookOpenIcon,
 } from "./icons.tsx";
+
+// Module-level cue-token cache: tokenization results survive popup churn AND
+// episode changes (the kuromoji instance already does — getTokenizer() memos
+// its promise). Keyed by cue text; FIFO-capped.
+const cueTokenCache = new Map<string, KToken[]>();
+const CUE_TOKEN_CACHE_MAX = 2000;
+function cueTokensPut(text: string, toks: KToken[]): void {
+  if (!cueTokenCache.has(text) && cueTokenCache.size >= CUE_TOKEN_CACHE_MAX) {
+    const oldest = cueTokenCache.keys().next().value;
+    if (oldest !== undefined) cueTokenCache.delete(oldest);
+  }
+  cueTokenCache.set(text, toks);
+}
 
 interface Props {
   entry: LibraryEntry;
@@ -184,8 +198,27 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   const [blurOff, setBlurOff] = useState(false);
   const blurOffRef = useRef(false);
   const lastBDownRef = useRef(0);
-  const [autopause, setAutopause] = useState(false);
+  // Autopause: no UI control — toggled with the `u` hotkey, persisted.
+  const [autopause, setAutopause] = useState(() => {
+    try {
+      return localStorage.getItem("zr.autopause") === "1";
+    } catch {
+      return false;
+    }
+  });
   const autopauseRef = useRef(false);
+  const toggleAutopause = useCallback(() => {
+    setAutopause((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("zr.autopause", next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      toast(next ? "autopause on" : "autopause off");
+      return next;
+    });
+  }, [toast]);
   const prevActiveP = useRef(-1);
   // Autopause loop-guard: index of the cue we already autopaused on. We don't
   // pause again for that cue until playback naturally enters the next one.
@@ -226,6 +259,22 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   const [tokens, setTokens] = useState<KToken[] | null>(null);
   const tokenizerReady = useRef(false);
   const tracksLoaded = useRef(false);
+  // True while the selected primary track's cues are still being fetched —
+  // drives a dim "loading subtitles…" line in the overlay.
+  const [cuesLoading, setCuesLoading] = useState(false);
+
+  // Warm the tokenizer as soon as a primary track is selected, in parallel
+  // with its cue fetch: kuromoji's dictionary load takes seconds and used to
+  // start only after the first cue text appeared (serializing the delays).
+  // NOT at mount: the dict parse blocks the main thread and would delay the
+  // (milliseconds-fast) cue fetch + first plain-text subtitle render.
+  const warmTokenizer = useCallback(() => {
+    void getTokenizer()
+      .then(() => {
+        tokenizerReady.current = true;
+      })
+      .catch(() => {});
+  }, []);
 
   const [wordIndex, setWordIndex] = useState<WordIndex>(() =>
     buildWordIndex([], {}),
@@ -706,18 +755,23 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   } | null>(null);
 
   // --- load tracks + anki words ---
+  // The Anki word list is NOT awaited before track selection: cue fetching
+  // starts as soon as the subs list arrives, the deck index fills in async.
   useEffect(() => {
     let cancelled = false;
+    void api
+      .ankiWords()
+      .catch(() => ({ words: [], progress: {} }))
+      .then((anki) => {
+        if (cancelled) return;
+        setWordIndex(buildWordIndex(anki.words, anki.progress));
+        setKnownFronts(new Set(anki.words.map((w) => w.front)));
+        deckCardsRef.current = new Map(anki.words.map((w) => [w.front, w]));
+      });
     void (async () => {
-      const [ts, anki] = await Promise.all([
-        api.subs(entry.id).catch(() => []),
-        api.ankiWords().catch(() => ({ words: [], progress: {} })),
-      ]);
+      const ts = await api.subs(entry.id).catch(() => [] as SubTrackInfo[]);
       if (cancelled) return;
       setTracks(ts);
-      setWordIndex(buildWordIndex(anki.words, anki.progress));
-      setKnownFronts(new Set(anki.words.map((w) => w.front)));
-      deckCardsRef.current = new Map(anki.words.map((w) => [w.front, w]));
 
       // Auto-select sensible defaults: prefer a Japanese primary, ru/en secondary.
       const primLang = (settings.targetLang as string) || "ja";
@@ -770,19 +824,25 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   useEffect(() => {
     if (!primaryId) {
       setPrimaryCues([]);
+      setCuesLoading(false);
       return;
     }
     let cancelled = false;
+    setCuesLoading(true);
     void api
       .cues(entry.id, primaryId)
       .then((c) => {
         if (cancelled) return;
+        // cues are in — NOW start the (main-thread-heavy) dict init so the
+        // plain-text line renders first and tokens swap in when ready
+        warmTokenizer();
         setPrimaryCues(c);
         // No whisper job running → any leftover live cues are stale now.
         if (whisperJobRef.current == null)
           setWhisperCues((w) => (w.length ? [] : w));
       })
-      .catch(() => !cancelled && setPrimaryCues([]));
+      .catch(() => !cancelled && setPrimaryCues([]))
+      .finally(() => !cancelled && setCuesLoading(false));
     return () => {
       cancelled = true;
     };
@@ -1126,10 +1186,12 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       const cancel = (e: Event) => {
         cleanup();
         setSessionSummary(null);
-        // n/p navigate anyway (the hotkey handler runs first in capture
-        // order) — only the timer needs killing, the toast would mislead.
-        const k = (e as KeyboardEvent).key;
-        if (k === "n" || k === "N" || k === "p" || k === "P") return;
+        // Shift+arrows navigate anyway (the hotkey handler runs first in
+        // capture order) — only the timer needs killing, the toast would
+        // mislead.
+        const ke = e as KeyboardEvent;
+        if (ke.shiftKey && (ke.key === "ArrowRight" || ke.key === "ArrowLeft"))
+          return;
         toast("auto-next canceled");
       };
       const timer = window.setTimeout(() => {
@@ -1157,7 +1219,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       ",", "<", ".", ">",
       "a", "A", "-", "=", "[", "]", "\\",
       "l", "L", "k", "K",
-      "Tab", "s", "S", "h", "H", "n", "N", "p", "P", "w", "W",
+      "Tab", "s", "S", "h", "H", "u", "U", "w", "W",
       "b", "B", "i", "I", "x", "X",
     ]);
     const isTextInput = (el: Element | null): boolean => {
@@ -1204,7 +1266,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       }
       if (!HANDLED.has(e.key)) return;
       // Avoid double-toggle on key auto-repeat for toggling keys.
-      if (e.repeat && [" ", "f", "F", "l", "L", "k", "K", "s", "S", "h", "H", "n", "N", "p", "P", "w", "W", "b", "B", "i", "I", "x", "X"].includes(e.key)) {
+      if (e.repeat && [" ", "f", "F", "l", "L", "k", "K", "s", "S", "h", "H", "u", "U", "w", "W", "b", "B", "i", "I", "x", "X"].includes(e.key)) {
         e.preventDefault();
         e.stopPropagation();
         return;
@@ -1232,10 +1294,12 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           else void stageRef.current?.requestFullscreen?.();
           break;
         case "ArrowLeft":
-          v.currentTime = Math.max(0, v.currentTime - 5);
+          if (e.shiftKey) void gotoEpisode(-1); // prev episode
+          else v.currentTime = Math.max(0, v.currentTime - 5);
           break;
         case "ArrowRight":
-          v.currentTime = Math.min(v.duration || Infinity, v.currentTime + 5);
+          if (e.shiftKey) void gotoEpisode(1); // next episode
+          else v.currentTime = Math.min(v.duration || Infinity, v.currentTime + 5);
           break;
         case "ArrowUp":
           v.volume = Math.min(1, v.volume + 0.1);
@@ -1366,13 +1430,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         case "W":
           togglePreStudy();
           break;
-        case "n":
-        case "N":
-          void gotoEpisode(1);
-          break;
-        case "p":
-        case "P":
-          void gotoEpisode(-1);
+        case "u":
+        case "U":
+          toggleAutopause();
           break;
         case "b":
         case "B": {
@@ -1441,23 +1501,34 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       window.removeEventListener("keyup", onKeyUp, true);
       window.removeEventListener("blur", onWinBlur);
     };
-  }, [changeOffset, toast, clearCloseTimer, resumeFromHover, toggleSidebar, toggleKnown, toggleBlacklist, toggleHardMode, gotoEpisode, togglePreStudy]);
+  }, [changeOffset, toast, clearCloseTimer, resumeFromHover, toggleSidebar, toggleKnown, toggleBlacklist, toggleHardMode, gotoEpisode, togglePreStudy, toggleAutopause]);
 
   const primaryText = activeP >= 0 && activeP < displayCues.length ? displayCues[activeP]!.text : "";
   const secondaryText = activeS >= 0 ? secondaryCues[activeS]!.text : "";
 
   // --- lazy tokenize the active primary cue ---
+  // While the tokenizer is still initializing, TokenLine renders the cue text
+  // PLAIN (fallbackText) immediately — no blank overlay — and swaps to the
+  // tokenized line when ready. Repeat cues hit the module-level cache.
   useEffect(() => {
     if (!primaryText) {
       setTokens(null);
       return;
     }
+    const cached = cueTokenCache.get(primaryText);
+    if (cached) {
+      setTokens(cached);
+      return;
+    }
+    setTokens(null); // show the plain line until tokens arrive
     let cancelled = false;
     void getTokenizer()
       .then((tok) => {
         if (cancelled) return;
         tokenizerReady.current = true;
-        setTokens(tok.tokenize(primaryText));
+        const toks = tok.tokenize(primaryText);
+        cueTokensPut(primaryText, toks);
+        setTokens(toks);
       })
       .catch(() => {
         if (!cancelled) setTokens(null);
@@ -2554,7 +2625,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       <div className="episode-title-row">
         <button
           className="btn icon ep-nav"
-          title="previous episode (p)"
+          title="previous episode (shift+←)"
           aria-label="Previous episode"
           onClick={() => void gotoEpisode(-1)}
         >
@@ -2569,11 +2640,11 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           aria-label="Reading mode"
           href={`#/read/${entry.id}`}
         >
-          ¶
+          <BookOpenIcon size={16} />
         </a>
         <button
           className="btn icon ep-nav"
-          title="next episode (n)"
+          title="next episode (shift+→)"
           aria-label="Next episode"
           onClick={() => void gotoEpisode(1)}
         >
@@ -2606,6 +2677,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             hardMode && (isPaused || revealTail) ? " reveal" : ""
           }`}
         >
+          {cuesLoading && !primaryText && (
+            <div className="sub-loading">loading subtitles…</div>
+          )}
           <div className="sub-primary">
             <TokenLine
               tokens={tokens}
@@ -2919,31 +2993,34 @@ export function Player({ entry, startAt, toast, settings }: Props) {
               >
                 encounters: {encHits.reduce((s, h) => s + h.count, 0)}
               </div>
-              {encOpen &&
-                encHits
-                  .flatMap((h) =>
-                    h.cues.map((c) => ({
-                      mediaId: h.mediaId,
-                      name: h.name,
-                      start: c.start,
-                      text: c.text,
-                    })),
-                  )
-                  .slice(0, 5)
-                  .map((s, i) => (
-                    <div
-                      key={`${s.mediaId}:${s.start}:${i}`}
-                      className="enc-hit"
-                      onClick={() => {
-                        window.location.hash = `#/play/${s.mediaId}@${s.start}`;
-                      }}
-                    >
-                      <span className="enc-meta">
-                        {s.name.replace(/\.[^.]+$/, "")} · {fmtTime(s.start)}
-                      </span>{" "}
-                      {s.text}
-                    </div>
-                  ))}
+              {encOpen && (
+                <div className="enc-list">
+                  {encHits
+                    .flatMap((h) =>
+                      h.cues.map((c) => ({
+                        mediaId: h.mediaId,
+                        name: h.name,
+                        start: c.start,
+                        text: c.text,
+                      })),
+                    )
+                    .slice(0, 20)
+                    .map((s, i) => (
+                      <div
+                        key={`${s.mediaId}:${s.start}:${i}`}
+                        className="enc-hit"
+                        onClick={() => {
+                          window.location.hash = `#/play/${s.mediaId}@${s.start}`;
+                        }}
+                      >
+                        <span className="enc-meta">
+                          {s.name.replace(/\.[^.]+$/, "")} · {fmtTime(s.start)}
+                        </span>{" "}
+                        {s.text}
+                      </div>
+                    ))}
+                </div>
+              )}
             </div>
           )}
             </>
@@ -3084,8 +3161,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             in as the last option), otherwise the single relevant action. */}
         {tracks.length > 0 ? (
           <div className="track-pick">
-            <label>Primary</label>
             <select
+              aria-label="Primary subtitle track"
               title="Primary subtitle track (the language you're learning)"
               value={primaryId}
               onChange={(e) => {
@@ -3122,8 +3199,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         {/* Secondary slot: same pattern, "+ translate…" folded in. */}
         {tracks.length > 0 && (
           <div className="track-pick">
-            <label>Secondary</label>
             <select
+              aria-label="Secondary subtitle track"
               title="Secondary subtitle track (translation, blurred until hovered)"
               value={secondaryId}
               onChange={(e) => {
@@ -3146,18 +3223,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             </select>
           </div>
         )}
-        <label
-          className="switch inline"
-          title="Pause automatically at the end of every subtitle (learning aid)"
-        >
-          <input
-            type="checkbox"
-            checked={autopause}
-            onChange={(e) => setAutopause(e.target.checked)}
-          />
-          Autopause
-        </label>
-
         {translateBusy && <span className="spinner-line">Translating…</span>}
         {condenseBusy && <span className="spinner-line">Condensing audio…</span>}
         {whisperBusy && (

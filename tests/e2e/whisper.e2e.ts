@@ -17,7 +17,7 @@ test("whisper generate: progress UI streams, completes, ja track appears", async
     timeout: 15_000,
   });
   await expect(progress).toHaveCount(0);
-  const primary = page.locator(".track-pick", { hasText: "Primary" }).locator("select");
+  const primary = page.getByLabel("Primary subtitle track");
   await expect(primary).toHaveValue("sidecar:gen:ja");
   await expect(primary.locator("option[value='sidecar:gen:ja']")).toContainText("Japanese");
 });

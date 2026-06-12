@@ -22,6 +22,14 @@ import {
   type Rarity,
   type Stage,
 } from "./cardfilter.ts";
+import {
+  CardsIcon,
+  HomeIcon,
+  LibraryIcon,
+  SettingsIcon,
+  StatsIcon,
+  ViewIcon,
+} from "./icons.tsx";
 
 type Route =
   | { name: "library" }
@@ -119,7 +127,7 @@ export function App() {
 
   const navItem = (
     label: string,
-    icon: string,
+    icon: React.ReactNode,
     hash: string,
     active: boolean,
     disabled = false,
@@ -143,18 +151,18 @@ export function App() {
           <span className="side-label">zehntage</span>
         </a>
         <nav className="side-nav">
-          {navItem("Home", "⌂", "#/home", route.name === "home")}
-          {navItem("Library", "▤", "#/", route.name === "library")}
+          {navItem("Home", <HomeIcon />, "#/home", route.name === "home")}
+          {navItem("Library", <LibraryIcon />, "#/", route.name === "library")}
           {navItem(
             "View",
-            "▶",
+            <ViewIcon />,
             lastMedia ? `#/play/${lastMedia}` : "#/",
             route.name === "player",
             !lastMedia,
           )}
-          {navItem("Cards", "▣", "#/cards", route.name === "cards")}
-          {navItem("Stats", "∿", "#/stats", route.name === "stats")}
-          {navItem("Settings", "⚙", "#/settings", route.name === "settings")}
+          {navItem("Cards", <CardsIcon />, "#/cards", route.name === "cards")}
+          {navItem("Stats", <StatsIcon />, "#/stats", route.name === "stats")}
+          {navItem("Settings", <SettingsIcon />, "#/settings", route.name === "settings")}
         </nav>
       </aside>
 
@@ -265,7 +273,8 @@ const HOTKEYS: [string, string][] = [
   ["a", "replay current cue"],
   ["s", "shadowing loop current cue (count: Settings)"],
   ["Tab / Shift+Tab", "cycle subtitle tracks"],
-  ["n / p", "next / previous episode"],
+  ["Shift+→ / Shift+←", "next / previous episode"],
+  ["u", "toggle autopause"],
   ["h", "hard mode (hide JP while playing)"],
   ["k", "mark hovered word known"],
   ["l", "toggle cue-list sidebar"],
@@ -286,8 +295,7 @@ function Home({ go }: { go: (h: string) => void }) {
     <>
       <h1 className="h1">zehntage-reactor</h1>
       <p className="home-tagline">
-        Watch Japanese video, mine words as you go — lookups, grammar, and Anki
-        cards without leaving the player.
+        The minimalist local player that turns anime into your Anki deck.
       </p>
       <h2 className="h2">How it works</h2>
       <ol className="home-steps">
@@ -1688,177 +1696,193 @@ function Settings({
   return (
     <>
       <h1 className="h1">Settings</h1>
-      <div className="form">
-        <div className="field">
-          <label>Primary language (target)</label>
-          <input
-            type="text"
-            title="Language you're learning — preferred primary subtitle track (e.g. ja)"
-            value={primaryLang}
-            onChange={(e) => {
-              setPrimaryLang(e.target.value);
-              scheduleSave();
-            }}
-            onBlur={onBlurSave}
-            placeholder="ja"
-          />
-        </div>
-        <div className="field">
-          <label>Secondary language (known)</label>
-          <input
-            type="text"
-            title="Language you already know — preferred translation track (e.g. ru)"
-            value={secondaryLang}
-            onChange={(e) => {
-              setSecondaryLang(e.target.value);
-              scheduleSave();
-            }}
-            onBlur={onBlurSave}
-            placeholder="ru"
-          />
-        </div>
-        <div
-          className="switch"
-          title="Queue a Whisper transcription automatically for videos without Japanese subs"
-        >
-          <input
-            type="checkbox"
-            id="autoWhisper"
-            checked={autoWhisper}
-            onChange={(e) => {
-              setAutoWhisper(e.target.checked);
-              scheduleSave();
-            }}
-          />
-          <label htmlFor="autoWhisper">Auto-generate Japanese subtitles</label>
-        </div>
-        <div
-          className="switch"
-          title="Show readings above kanji you haven't learned yet"
-        >
-          <input
-            type="checkbox"
-            id="furigana"
-            checked={furigana}
-            onChange={(e) => {
-              setFurigana(e.target.checked);
-              scheduleSave();
-            }}
-          />
-          <label htmlFor="furigana">Furigana on unknown kanji</label>
-        </div>
-        <div
-          className="switch"
-          title="Mark pitch accent in furigana readings (overline = high, ꜜ = downstep)"
-        >
-          <input
-            type="checkbox"
-            id="pitchAccent"
-            checked={pitchAccent}
-            onChange={(e) => {
-              setPitchAccent(e.target.checked);
-              scheduleSave();
-            }}
-          />
-          <label htmlFor="pitchAccent">Pitch accent marks</label>
-        </div>
-        <div className="field">
-          <label htmlFor="prestudyMinutes">Pre-study window (minutes)</label>
-          <input
-            id="prestudyMinutes"
-            type="number"
-            min={1}
-            max={120}
-            title="How many minutes of upcoming dialogue the pre-study panel (w) scans for unknown words"
-            value={prestudyMinutes}
-            onChange={(e) => {
-              setPrestudyMinutes(e.target.value);
-              scheduleSave();
-            }}
-            onBlur={onBlurSave}
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="shadowRepeats">Shadowing repeats (0 = infinite)</label>
-          <input
-            id="shadowRepeats"
-            type="number"
-            min={0}
-            max={99}
-            title="How many times the s-loop repeats one line; 0 = endless"
-            value={shadowRepeats}
-            onChange={(e) => {
-              setShadowRepeats(e.target.value);
-              scheduleSave();
-            }}
-            onBlur={onBlurSave}
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="autopauseMode">Autopause mode</label>
-          <select
-            id="autopauseMode"
-            title="Pause at the end of every subtitle, or only on lines containing unknown words"
-            value={autopauseMode}
-            onChange={(e) => {
-              setAutopauseMode(e.target.value);
-              scheduleSave();
-            }}
-          >
-            <option value="every">every cue</option>
-            <option value="unknown">cues with unknown words</option>
-          </select>
-        </div>
-        <div className="field">
-          <label htmlFor="autopauseMinUnknown">
-            Autopause: min unknown words per cue
-          </label>
-          <input
-            id="autopauseMinUnknown"
-            type="number"
-            min={1}
-            max={20}
-            title="In 'unknown' mode, only pause when a line has at least this many unknown words"
-            value={autopauseMinUnknown}
-            onChange={(e) => {
-              setAutopauseMinUnknown(e.target.value);
-              scheduleSave();
-            }}
-            onBlur={onBlurSave}
-          />
-        </div>
-        <div className="field">
-          <label>Word-lookup prompt (Gemini)</label>
-          <textarea
-            className="prompt"
-            rows={12}
-            title="Prompt template used for word lookups; changes save automatically"
-            value={lookupPrompt}
-            onChange={(e) => {
-              setLookupPrompt(e.target.value);
-              scheduleSave();
-            }}
-            onBlur={onBlurSave}
-            placeholder={promptDefault}
-          />
-          <div className="hint">
-            Template placeholders: <code>{"{word}"}</code> <code>{"{context}"}</code>{" "}
-            <code>{"{source}"}</code> are substituted at lookup time.
+      <div className="form settings-form">
+        <section className="form-group">
+          <h2 className="group-title">Languages</h2>
+          <div className="field">
+            <label>Primary (target)</label>
+            <input
+              type="text"
+              title="Language you're learning — preferred primary subtitle track (e.g. ja)"
+              value={primaryLang}
+              onChange={(e) => {
+                setPrimaryLang(e.target.value);
+                scheduleSave();
+              }}
+              onBlur={onBlurSave}
+              placeholder="ja"
+            />
+            <div className="hint">Preferred primary subtitle track.</div>
           </div>
-          <div>
-            <button
-              type="button"
-              className="btn sm"
-              title="Restore the built-in lookup prompt"
-              onClick={() => {
-                setLookupPrompt(promptDefault);
+          <div className="field">
+            <label>Secondary (known)</label>
+            <input
+              type="text"
+              title="Language you already know — preferred translation track (e.g. ru)"
+              value={secondaryLang}
+              onChange={(e) => {
+                setSecondaryLang(e.target.value);
+                scheduleSave();
+              }}
+              onBlur={onBlurSave}
+              placeholder="ru"
+            />
+            <div className="hint">Translation track, blurred until hovered.</div>
+          </div>
+        </section>
+
+        <section className="form-group">
+          <h2 className="group-title">Player behavior</h2>
+          <div
+            className="switch"
+            title="Queue a Whisper transcription automatically for videos without Japanese subs"
+          >
+            <input
+              type="checkbox"
+              id="autoWhisper"
+              checked={autoWhisper}
+              onChange={(e) => {
+                setAutoWhisper(e.target.checked);
+                scheduleSave();
+              }}
+            />
+            <label htmlFor="autoWhisper">Auto-generate Japanese subtitles</label>
+          </div>
+          <div
+            className="switch"
+            title="Show readings above kanji you haven't learned yet"
+          >
+            <input
+              type="checkbox"
+              id="furigana"
+              checked={furigana}
+              onChange={(e) => {
+                setFurigana(e.target.checked);
+                scheduleSave();
+              }}
+            />
+            <label htmlFor="furigana">Furigana on unknown kanji</label>
+          </div>
+          <div
+            className="switch"
+            title="Mark pitch accent in furigana readings (overline = high, ꜜ = downstep)"
+          >
+            <input
+              type="checkbox"
+              id="pitchAccent"
+              checked={pitchAccent}
+              onChange={(e) => {
+                setPitchAccent(e.target.checked);
+                scheduleSave();
+              }}
+            />
+            <label htmlFor="pitchAccent">Pitch accent marks</label>
+          </div>
+          <div className="field">
+            <label htmlFor="prestudyMinutes">Pre-study window</label>
+            <input
+              id="prestudyMinutes"
+              type="number"
+              min={1}
+              max={120}
+              title="How many minutes of upcoming dialogue the pre-study panel (w) scans for unknown words"
+              value={prestudyMinutes}
+              onChange={(e) => {
+                setPrestudyMinutes(e.target.value);
+                scheduleSave();
+              }}
+              onBlur={onBlurSave}
+            />
+            <div className="hint">Minutes the pre-study panel (w) scans ahead.</div>
+          </div>
+          <div className="field">
+            <label htmlFor="shadowRepeats">Shadowing repeats</label>
+            <input
+              id="shadowRepeats"
+              type="number"
+              min={0}
+              max={99}
+              title="How many times the s-loop repeats one line; 0 = endless"
+              value={shadowRepeats}
+              onChange={(e) => {
+                setShadowRepeats(e.target.value);
+                scheduleSave();
+              }}
+              onBlur={onBlurSave}
+            />
+            <div className="hint">Repeats per s-loop; 0 = infinite.</div>
+          </div>
+          <div className="field">
+            <label htmlFor="autopauseMode">Autopause mode</label>
+            <select
+              id="autopauseMode"
+              title="Pause at the end of every subtitle, or only on lines containing unknown words"
+              value={autopauseMode}
+              onChange={(e) => {
+                setAutopauseMode(e.target.value);
                 scheduleSave();
               }}
             >
-              Reset to default
-            </button>
+              <option value="every">every cue</option>
+              <option value="unknown">cues with unknown words</option>
+            </select>
+            <div className="hint">Toggle autopause in the player with u.</div>
           </div>
-        </div>
+          <div className="field">
+            <label htmlFor="autopauseMinUnknown">Autopause threshold</label>
+            <input
+              id="autopauseMinUnknown"
+              type="number"
+              min={1}
+              max={20}
+              title="In 'unknown' mode, only pause when a line has at least this many unknown words"
+              value={autopauseMinUnknown}
+              onChange={(e) => {
+                setAutopauseMinUnknown(e.target.value);
+                scheduleSave();
+              }}
+              onBlur={onBlurSave}
+            />
+            <div className="hint">Min unknown words per cue (unknown mode).</div>
+          </div>
+        </section>
+
+        <section className="form-group">
+          <h2 className="group-title">AI &amp; prompt</h2>
+          <div className="field">
+            <label>Word-lookup prompt (Gemini)</label>
+            <textarea
+              className="prompt"
+              rows={12}
+              title="Prompt template used for word lookups; changes save automatically"
+              value={lookupPrompt}
+              onChange={(e) => {
+                setLookupPrompt(e.target.value);
+                scheduleSave();
+              }}
+              onBlur={onBlurSave}
+              placeholder={promptDefault}
+            />
+            <div className="hint">
+              Placeholders <code>{"{word}"}</code> <code>{"{context}"}</code>{" "}
+              <code>{"{source}"}</code> are substituted at lookup time.
+            </div>
+            <div>
+              <button
+                type="button"
+                className="btn sm"
+                title="Restore the built-in lookup prompt"
+                onClick={() => {
+                  setLookupPrompt(promptDefault);
+                  scheduleSave();
+                }}
+              >
+                Reset to default
+              </button>
+            </div>
+          </div>
+        </section>
+
         <div className="hint">Changes save automatically.</div>
       </div>
     </>

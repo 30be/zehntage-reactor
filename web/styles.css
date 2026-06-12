@@ -1202,3 +1202,90 @@ textarea.prompt {
 .jimaku-error { display: block; color: #b91c1c; }
 
 .home-attrib { margin-top: 6px; font-size: 12px; }
+
+/* ---- declutter pass (appended): icons, controls, settings, library ---- */
+
+/* lucide icons inherit currentColor; keep them optically centered */
+.side-icon { display: inline-flex; align-items: center; justify-content: center; }
+.side-icon svg { display: block; }
+.side-item.active svg { stroke: var(--accent-fg); }
+
+/* player controls row: compact, single quiet line */
+.controls { gap: 8px; }
+.track-pick select {
+  font-size: 12px;
+  padding: 4px 6px;
+  max-width: 260px;
+  color: var(--fg);
+}
+
+/* episode title row: quiet one-liner */
+.episode-title-row { gap: 6px; }
+.ep-nav { opacity: 0.7; }
+.ep-nav:hover { opacity: 1; }
+
+/* settings: titled groups, aligned fields, generous whitespace */
+.settings-form { max-width: 520px; gap: 32px; }
+.form-group { display: flex; flex-direction: column; gap: 14px; }
+.group-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 2px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.settings-form .field { gap: 4px; }
+.settings-form .field input[type="text"],
+.settings-form .field input[type="number"],
+.settings-form .field select {
+  width: 100%;
+  max-width: 280px;
+  font-size: 13px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+}
+.settings-form .field .hint { margin-top: 2px; }
+
+/* library: quieter badges, calmer cards */
+.grid { gap: 16px; }
+.card { padding: 14px 16px; }
+.card .name { font-size: 14px; line-height: 1.4; margin-bottom: 6px; }
+.badges { gap: 5px; margin-top: 8px; }
+.badge {
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  padding: 1px 6px;
+  background: transparent;
+  border-color: var(--border);
+  color: var(--muted);
+}
+.badge.jobstatus { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+
+/* subtitle overlay: dim loading indicator while cues are fetched */
+.sub-loading {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.55);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+  user-select: none;
+}
+
+/* lookup popup: never extend past the viewport */
+.lookup {
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* encounters list: scrollable, scroll stays inside the panel */
+.lookup .enc-list {
+  max-height: 180px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}

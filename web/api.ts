@@ -1,5 +1,12 @@
 // Typed client for the zehntage-reactor server API (same origin).
 
+import {
+  getAnkiWords,
+  refreshAnkiWords,
+  cacheAddWord,
+  cacheDeleteWord,
+} from "./ankicache.ts";
+
 export interface LibraryEntry {
   id: string;
   name: string;
@@ -254,8 +261,10 @@ export const api = {
     priorAnswer?: string;
     source?: string;
   }) => jpost<{ answer: string }>("/api/ask", p),
-  ankiWords: () => jget<AnkiWordsResponse>("/api/anki/words"),
-  ankiAdd: (p: {
+  // Stale-while-revalidate via localStorage (web/ankicache.ts): resolves
+  // instantly from the persisted deck, refreshes with ETag in the background.
+  ankiWords: () => getAnkiWords(),
+  ankiAdd: async (p: {
     word: string;
     reading: string;
     translation: string;
@@ -268,8 +277,20 @@ export const api = {
     cueEnd?: number;
     /** matching secondary (RU) cue text, shown as its own context line */
     sentenceTranslation?: string;
-  }) => jpost<{ ok: boolean }>("/api/anki/add", p),
-  ankiDelete: (front: string) => jpost<{ ok: boolean }>("/api/anki/delete", { front }),
+  }) => {
+    const r = await jpost<{ ok: boolean }>("/api/anki/add", p);
+    // Optimistic write-through: cached deck keeps instant underlines across
+    // reloads; the server cache was busted, so refresh picks up real data.
+    cacheAddWord(p.word, p.reading, p.translation, p.notes);
+    void refreshAnkiWords().catch(() => {});
+    return r;
+  },
+  ankiDelete: async (front: string) => {
+    const r = await jpost<{ ok: boolean }>("/api/anki/delete", { front });
+    cacheDeleteWord(front);
+    void refreshAnkiWords().catch(() => {});
+    return r;
+  },
   whisperStart: (id: string, lang: string) =>
     jpost<{ jobId: string; status: string }>(`/api/whisper/${id}`, { lang }),
   whisperActive: (id: string) =>

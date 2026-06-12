@@ -204,6 +204,45 @@ function explainCachePut(key: string, value: ExplainResult): void {
   }
   explainCache.set(key, value);
 }
+// --- /api/anki/words payload cache ---
+// listWords()+getProgress() can take seconds (remote anki-mcp roundtrip or
+// AnkiConnect over the whole deck), and the client fetches it on every Player
+// mount. Cache the serialized payload with a TTL: serve stale immediately,
+// refresh in the background; add/delete bust it and trigger an eager refresh.
+const ANKI_WORDS_TTL_MS = 60_000;
+interface AnkiWordsCacheEntry {
+  body: string; // serialized { words, progress }
+  etag: string; // strong ETag = hash of body
+  ts: number; // when the payload was fetched
+}
+let ankiWordsCache: AnkiWordsCacheEntry | null = null;
+let ankiWordsInflight: Promise<AnkiWordsCacheEntry> | null = null;
+
+function refreshAnkiWordsCache(): Promise<AnkiWordsCacheEntry> {
+  if (!ankiWordsInflight) {
+    ankiWordsInflight = (async () => {
+      const [words, progress] = await Promise.all([listWords(), getProgress()]);
+      const body = JSON.stringify({ words, progress });
+      const entry: AnkiWordsCacheEntry = {
+        body,
+        etag: `"${Bun.hash(body).toString(16)}"`,
+        ts: Date.now(),
+      };
+      ankiWordsCache = entry;
+      return entry;
+    })().finally(() => {
+      ankiWordsInflight = null;
+    });
+  }
+  return ankiWordsInflight;
+}
+
+/** Bust the cache after a mutation and refresh eagerly so the next GET is hot. */
+function bustAnkiWordsCache(): void {
+  ankiWordsCache = null;
+  void refreshAnkiWordsCache().catch(() => {});
+}
+
 let translatePumpRunning = false;
 
 async function pumpTranslateBatch(library: Library): Promise<void> {
@@ -950,9 +989,25 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       }
 
       // --- Anki ---
+      // Cached: serve the last payload immediately (stale-while-revalidate
+      // with a 60s TTL) and revalidate via ETag/If-None-Match.
       if (req.method === "GET" && path === "/api/anki/words") {
-        const [words, progress] = await Promise.all([listWords(), getProgress()]);
-        return json({ words, progress });
+        let c = ankiWordsCache;
+        if (!c) {
+          c = await refreshAnkiWordsCache();
+        } else if (Date.now() - c.ts > ANKI_WORDS_TTL_MS) {
+          // Stale: serve immediately, refresh in the background.
+          void refreshAnkiWordsCache().catch(() => {});
+        }
+        const headers = {
+          "Content-Type": "application/json",
+          ETag: c.etag,
+          "Cache-Control": "no-cache",
+        };
+        if (req.headers.get("if-none-match") === c.etag) {
+          return new Response(null, { status: 304, headers });
+        }
+        return new Response(c.body, { headers });
       }
 
       // Fuller card info for the Cards browser tab (front/back/notes/context).
@@ -1091,6 +1146,7 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
           context,
           ...(image ? { image, image_field: "context" } : {}),
         });
+        bustAnkiWordsCache();
         void logEvent("anki_add", { word: body.word, mediaId: body.mediaId });
         return json({ ok: true });
       }
@@ -1099,6 +1155,7 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         const body = (await req.json()) as { front?: string };
         if (!body.front) return err("front required", 400);
         await deleteCard(body.front);
+        bustAnkiWordsCache();
         return json({ ok: true });
       }
 
