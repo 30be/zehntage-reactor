@@ -63,6 +63,14 @@ import {
   toCsv,
   type TelemetryEvent,
 } from "../lib/telemetry.ts";
+import { readState, mergeIntoFile, type ZrState } from "../lib/state.ts";
+import {
+  searchEntries,
+  listFiles,
+  downloadFile,
+  JimakuError,
+} from "../lib/jimaku.ts";
+import { showFrequency } from "../lib/mining.ts";
 import {
   getIndex,
   clearIndexCache,
@@ -405,6 +413,42 @@ async function collectIndexes(
     if (ix) out.set(entry.id, ix);
   }
   return out;
+}
+
+// --- jimaku.cc subtitle search helpers ---
+
+/** Default jimaku search query from a video filename: strip the extension,
+ * bracketed release tags, resolution/codec noise and a trailing episode no. */
+export function jimakuQueryFromName(name: string): string {
+  return name
+    .replace(/\.[^.]+$/, "")
+    .replace(/\[[^\]]*\]|\([^)]*\)/g, " ")
+    .replace(
+      /\b(\d{3,4}p|[48]k|x26[45]|h\.?26[45]|hevc|av1|aac|flac|opus|10.?bit|hi10p?|bd(rip)?|bluray|blu-ray|web-?(dl|rip)|hdtv|dual.?audio|multi.?sub)\b/gi,
+      " ",
+    )
+    .replace(/[._]/g, " ")
+    .replace(/\s*-\s*(s\d{1,2}e)?\d{1,3}(v\d)?\s*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function jimakuErr(e: unknown): Response {
+  if (e instanceof JimakuError) {
+    const msg =
+      e.status === 401
+        ? "JIMAKU_API_KEY not set (env or ~/.env)"
+        : e.message;
+    return err(msg, e.status);
+  }
+  return err(e instanceof Error ? e.message : String(e));
+}
+
+/** Sidecar language for a downloaded jimaku file: ".<lang>.<ext>" suffix in
+ * the filename, else "ja" (jimaku hosts Japanese subs). */
+function jimakuLang(name: string): string {
+  const m = name.match(/\.([a-z]{2,3})(?:-[a-z]{2,4})?\.(?:srt|ass|ssa|vtt)$/i);
+  return m ? m[1]!.toLowerCase() : "ja";
 }
 
 /**
@@ -1211,6 +1255,86 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
           });
         }
         return json(out);
+      }
+
+      // --- show-local lemma frequency (pre-study ordering) ---
+      if (req.method === "GET" && path === "/api/index/showfreq") {
+        const ids = (url.searchParams.get("mediaIds") ?? "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const wanted = new Set(ids);
+        const scope = library.list().filter((e) => wanted.has(e.id));
+        const indexes = await collectIndexes(scope, Math.max(1, scope.length));
+        return json(Object.fromEntries(showFrequency(indexes.values())));
+      }
+
+      // --- zr.* localStorage state sync (web/sync.ts <-> src/lib/state.ts) ---
+      if (path === "/api/state") {
+        if (req.method === "GET") return json(await readState());
+        if (req.method === "POST") {
+          const body = (await req.json().catch(() => ({}))) as ZrState;
+          return json(await mergeIntoFile(body));
+        }
+      }
+
+      // --- jimaku.cc subtitle directory ---
+      if (req.method === "GET" && path === "/api/jimaku/search") {
+        let query = (url.searchParams.get("query") ?? "").trim();
+        const mediaId = url.searchParams.get("mediaId") ?? "";
+        if (!query && mediaId) {
+          const entry = library.get(mediaId);
+          if (entry) query = jimakuQueryFromName(entry.name);
+        }
+        if (!query) return err("query or mediaId required", 400);
+        try {
+          return json({ query, entries: await searchEntries(query) });
+        } catch (e) {
+          return jimakuErr(e);
+        }
+      }
+
+      if (req.method === "GET" && path === "/api/jimaku/files") {
+        const entryId = parseInt(url.searchParams.get("entryId") ?? "", 10);
+        if (!Number.isFinite(entryId)) return err("entryId required", 400);
+        const epRaw = url.searchParams.get("episode");
+        const episode = epRaw != null && epRaw !== "" ? parseInt(epRaw, 10) : undefined;
+        try {
+          return json(
+            await listFiles(
+              entryId,
+              episode != null && Number.isFinite(episode) ? episode : undefined,
+            ),
+          );
+        } catch (e) {
+          return jimakuErr(e);
+        }
+      }
+
+      if (req.method === "POST" && path === "/api/jimaku/download") {
+        const body = (await req.json().catch(() => ({}))) as {
+          mediaId?: string;
+          url?: string;
+          name?: string;
+        };
+        if (!body.mediaId || !body.url || !body.name)
+          return err("mediaId, url and name required", 400);
+        const entry = library.get(body.mediaId);
+        if (!entry) return err("not found", 404);
+        const ext = extname(body.name).toLowerCase() || ".srt";
+        const lang = jimakuLang(body.name);
+        // External-origin sidecar: next to the video as <base>.<lang>.<ext>
+        // (files under subs/ would be classified as generated).
+        const base = basename(entry.absPath, extname(entry.absPath));
+        const dest = join(dirname(entry.absPath), `${base}.${lang}${ext}`);
+        try {
+          const bytes = await downloadFile(body.url, dest);
+          await library.refresh();
+          void logEvent("jimaku_download", { mediaId: entry.id, name: body.name });
+          return json({ ok: true, path: dest, lang, bytes });
+        } catch (e) {
+          return jimakuErr(e);
+        }
       }
 
       // --- settings ---

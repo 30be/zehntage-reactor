@@ -1,0 +1,26 @@
+{
+  "zr.lastMedia": {
+    "v": "2328ae29a728",
+    "ts": 0
+  },
+  "zr.tracks.2328ae29a728": {
+    "v": "{\"primary\":\"sidecar:ja.srt\",\"secondary\":\"sidecar:gen:ru\"}",
+    "ts": 1781286612537
+  },
+  "zr.pos.2328ae29a728": {
+    "v": "3.5",
+    "ts": 1781286587188
+  },
+  "zr.tracks.c4c16ec0b0a1": {
+    "v": "{\"primary\":\"sidecar:ja.srt\",\"secondary\":\"\"}",
+    "ts": 1781286627419
+  },
+  "zr.pos.c4c16ec0b0a1": {
+    "v": "7",
+    "ts": 1781286627472
+  },
+  "zr.e2e.1781286634870": {
+    "v": "hello",
+    "ts": 1781286634871
+  }
+}

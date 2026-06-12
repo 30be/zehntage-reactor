@@ -30,7 +30,10 @@ interface RowProps {
   onSeek: () => void;
   wordIndex: WordIndex;
   knownWords: Set<string>;
+  blacklist?: Set<string>;
   furiganaOn: boolean;
+  accents?: Map<string, number> | null;
+  pitchAccentOn?: boolean;
   onWordEnter: (tok: KToken, e: React.MouseEvent, ctx: string) => void;
   onWordLeave: () => void;
   onWordClick: (tok: KToken, e: React.MouseEvent, ctx: string) => void;
@@ -45,7 +48,10 @@ function CueRow({
   onSeek,
   wordIndex,
   knownWords,
+  blacklist,
   furiganaOn,
+  accents,
+  pitchAccentOn,
   onWordEnter,
   onWordLeave,
   onWordClick,
@@ -90,7 +96,10 @@ function CueRow({
             fallbackText={cue.text}
             wordIndex={wordIndex}
             knownWords={knownWords}
+            blacklist={blacklist}
             furiganaOn={furiganaOn}
+            accents={accents}
+            pitchAccentOn={pitchAccentOn}
             onWordEnter={(tok, e) => onWordEnter(tok, e, cue.text)}
             onWordLeave={onWordLeave}
             onWordClick={(tok, e) => onWordClick(tok, e, cue.text)}
@@ -110,7 +119,10 @@ export interface SidebarProps {
   onSeek: (videoTime: number) => void;
   wordIndex: WordIndex;
   knownWords: Set<string>;
+  blacklist?: Set<string>;
   furiganaOn: boolean;
+  accents?: Map<string, number> | null;
+  pitchAccentOn?: boolean;
   onWordEnter: (tok: KToken, e: React.MouseEvent, ctx: string) => void;
   onWordLeave: () => void;
   onWordClick: (tok: KToken, e: React.MouseEvent, ctx: string) => void;
@@ -124,7 +136,10 @@ export function Sidebar({
   onSeek,
   wordIndex,
   knownWords,
+  blacklist,
   furiganaOn,
+  accents,
+  pitchAccentOn,
   onWordEnter,
   onWordLeave,
   onWordClick,
@@ -234,7 +249,10 @@ export function Sidebar({
         onSeek={() => onSeek(Math.max(0, cue.start + subOffset))}
         wordIndex={wordIndex}
         knownWords={knownWords}
+        blacklist={blacklist}
         furiganaOn={furiganaOn}
+        accents={accents}
+        pitchAccentOn={pitchAccentOn}
         onWordEnter={onWordEnter}
         onWordLeave={onWordLeave}
         onWordClick={onWordClick}

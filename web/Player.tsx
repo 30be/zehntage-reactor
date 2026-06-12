@@ -20,8 +20,11 @@ import {
 import { activeCueIndex, contextAround } from "./cues.ts";
 import { getTokenizer, isLexical, kataToHira, type KToken } from "./tokenizer.ts";
 import { buildWordIndex, matchFront, type WordIndex } from "./progress.ts";
-import { TokenLine, wordKey } from "./TokenLine.tsx";
+import { TokenLine, AccentReading, wordKey } from "./TokenLine.tsx";
 import { Sidebar } from "./Sidebar.tsx";
+import { heatBins, heatAlpha } from "./heat.ts";
+import { accentOf, loadAccents } from "./accent.ts";
+import { readBlacklist, writeBlacklist } from "./blacklist.ts";
 import { freqRank, freqRankOf, freqTier, loadFreq } from "./freq.ts";
 import { tmHeartbeat, tmEvent } from "./telemetry.ts";
 import {
@@ -280,6 +283,37 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   // word the cursor currently rests on (for the `k` hotkey before any popup)
   const hoveredKeyRef = useRef<string | null>(null);
 
+  // --- blacklist (zr.blacklist, toggled with `x`): no underline/furigana,
+  // excluded from unknown counts (smart autopause + heat) and pre-study ---
+  const [blacklist, setBlacklist] = useState<Set<string>>(() => readBlacklist());
+  const blacklistRef = useRef(blacklist);
+  useEffect(() => {
+    blacklistRef.current = blacklist;
+  }, [blacklist]);
+  const toggleBlacklist = useCallback((key: string) => {
+    setBlacklist((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      writeBlacklist(next);
+      return next;
+    });
+  }, []);
+
+  // --- pitch accent: lazy Kanjium map; settings toggle (default on) ---
+  const pitchOn = settings.pitchAccent !== false;
+  const [accents, setAccents] = useState<Map<string, number> | null>(null);
+  useEffect(() => {
+    if (!pitchOn) return;
+    let cancelled = false;
+    void loadAccents()
+      .then((m) => !cancelled && setAccents(m))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [pitchOn]);
+
   // --- pre-study panel (`w`): unknown lemmas in the next 10 minutes ---
   const [preStudy, setPreStudy] = useState<PreStudyState | null>(null);
   const preStudyOpenRef = useRef(false);
@@ -346,9 +380,14 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     const cues = primaryCuesRef.current.filter(
       (c) => c.end >= t && c.start <= t + prestudyMinRef.current * 60,
     );
-    const [tok, freq] = await Promise.all([
+    const [tok, freq, showFreq] = await Promise.all([
       getTokenizer(),
       loadFreq().catch(() => new Map<string, number>()),
+      // show-local lemma counts (server lemma index) for prestudy ordering;
+      // null on failure → fall back to pure global-frequency order.
+      fetch(`/api/index/showfreq?mediaIds=${entry.id}`)
+        .then((r) => (r.ok ? (r.json() as Promise<Record<string, number>>) : null))
+        .catch(() => null),
     ]);
     const seen = new Map<string, PreStudyItem>();
     for (const cue of cues) {
@@ -359,6 +398,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         const key = wordKey(tk);
         if (seen.has(key)) continue;
         if (knownWordsRef.current.has(key)) continue;
+        if (blacklistRef.current.has(key)) continue;
         if (
           matchFront(
             wordIndexRef.current,
@@ -379,12 +419,18 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         });
       }
     }
-    const items = [...seen.values()].sort(
-      (a, b) => (a.rank ?? Infinity) - (b.rank ?? Infinity),
-    );
+    // mining.prestudyRank order: show-local count desc, global rank asc tiebreak
+    const items = [...seen.values()].sort((a, b) => {
+      if (showFreq) {
+        const ca = showFreq[a.lemma] ?? 0;
+        const cb = showFreq[b.lemma] ?? 0;
+        if (ca !== cb) return cb - ca;
+      }
+      return (a.rank ?? Infinity) - (b.rank ?? Infinity);
+    });
     // only fill in if the panel is still open
     setPreStudy((prev) => (prev ? { loading: false, items } : prev));
-  }, []);
+  }, [entry.id]);
 
   const togglePreStudy = useCallback(() => {
     setPreStudy((prev) => {
@@ -607,10 +653,15 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   // --- smart autopause: per-cue unknown-lexical-token counts (memoized) ---
   // null while not computed (or mode "every") — the autopause branch treats
   // null as "pause" so the legacy behavior is the safe default.
+  // Always computed (not only in "unknown" autopause mode) — the difficulty
+  // heat strip reuses these counts. State drives the heat redraw; the ref
+  // feeds the autopause branch without re-running its effect.
   const cueUnknownsRef = useRef<number[] | null>(null);
+  const [cueUnknowns, setCueUnknowns] = useState<number[] | null>(null);
   useEffect(() => {
     cueUnknownsRef.current = null;
-    if (apMode !== "unknown" || displayCues.length === 0) return;
+    setCueUnknowns(null);
+    if (displayCues.length === 0) return;
     let cancelled = false;
     void getTokenizer()
       .then((tok) => {
@@ -620,20 +671,24 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           for (const t of tok.tokenize(c.text)) {
             if (!isLexical(t)) continue;
             if (t.pos === "助詞" || t.pos === "助動詞") continue; // particles/aux
-            if (knownWords.has(wordKey(t))) continue;
+            const key = wordKey(t);
+            if (knownWords.has(key) || blacklist.has(key)) continue;
             if (matchFront(wordIndex, t.surface_form, t.reading, t.basic_form) != null)
               continue;
             n++;
           }
           return n;
         });
-        if (!cancelled) cueUnknownsRef.current = counts;
+        if (!cancelled) {
+          cueUnknownsRef.current = counts;
+          setCueUnknowns(counts);
+        }
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [displayCues, wordIndex, knownWords, apMode]);
+  }, [displayCues, wordIndex, knownWords, blacklist]);
 
   // --- session counters (for the end-of-episode summary overlay) ---
   const sessionStartRef = useRef(Date.now());
@@ -1103,7 +1158,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       "a", "A", "-", "=", "[", "]", "\\",
       "l", "L", "k", "K",
       "Tab", "s", "S", "h", "H", "n", "N", "p", "P", "w", "W",
-      "b", "B", "i", "I",
+      "b", "B", "i", "I", "x", "X",
     ]);
     const isTextInput = (el: Element | null): boolean => {
       if (!el) return false;
@@ -1149,7 +1204,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       }
       if (!HANDLED.has(e.key)) return;
       // Avoid double-toggle on key auto-repeat for toggling keys.
-      if (e.repeat && [" ", "f", "F", "l", "L", "k", "K", "s", "S", "h", "H", "n", "N", "p", "P", "w", "W", "b", "B", "i", "I"].includes(e.key)) {
+      if (e.repeat && [" ", "f", "F", "l", "L", "k", "K", "s", "S", "h", "H", "n", "N", "p", "P", "w", "W", "b", "B", "i", "I", "x", "X"].includes(e.key)) {
         e.preventDefault();
         e.stopPropagation();
         return;
@@ -1358,6 +1413,17 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           toast(adding ? `known: ${key}` : `unknown: ${key}`);
           break;
         }
+        case "x":
+        case "X": {
+          // toggle blacklist for the popup word or the hovered word
+          const key = popupKeyRef.current ?? hoveredKeyRef.current;
+          if (!key) break;
+          const adding = !blacklistRef.current.has(key);
+          toggleBlacklist(key);
+          tmEvent("blacklist", { word: key, on: adding });
+          toast(adding ? `blacklisted: ${key}` : `unblacklisted: ${key}`);
+          break;
+        }
       }
     };
     // keyup re-blurs the secondary line after a `b` hold (harmless elsewhere)
@@ -1375,7 +1441,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       window.removeEventListener("keyup", onKeyUp, true);
       window.removeEventListener("blur", onWinBlur);
     };
-  }, [changeOffset, toast, clearCloseTimer, resumeFromHover, toggleSidebar, toggleKnown, toggleHardMode, gotoEpisode, togglePreStudy]);
+  }, [changeOffset, toast, clearCloseTimer, resumeFromHover, toggleSidebar, toggleKnown, toggleBlacklist, toggleHardMode, gotoEpisode, togglePreStudy]);
 
   const primaryText = activeP >= 0 && activeP < displayCues.length ? displayCues[activeP]!.text : "";
   const secondaryText = activeS >= 0 ? secondaryCues[activeS]!.text : "";
@@ -1884,12 +1950,33 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       next.add(front);
       return next;
     });
+    // i+1 example (client-side, mining.ts spirit): among the loaded cues find
+    // one that contains the word and has exactly ONE unknown lexical token
+    // (the word itself) — appended to notes when it differs from the context.
+    let iPlusOne: string | undefined;
+    {
+      const counts = cueUnknownsRef.current;
+      const cues = primaryCuesRef.current;
+      if (counts) {
+        const target = popup.dictForm ?? popup.surface;
+        for (let i = 0; i < cues.length; i++) {
+          const text = cues[i]!.text;
+          if (counts[i] !== 1) continue;
+          if (!text.includes(popup.surface) && !text.includes(target)) continue;
+          if (text.trim() === primaryText.trim()) continue;
+          iPlusOne = text.trim();
+          break;
+        }
+      }
+    }
     try {
       await api.ankiAdd({
         word: popup.surface,
         reading: lookup.reading || popup.reading || "",
         translation: lookup.translation,
-        notes: lookup.notes,
+        notes: iPlusOne
+          ? `${lookup.notes ? `${lookup.notes}\n` : ""}例: ${iPlusOne}`
+          : lookup.notes,
         context: primaryText,
         ...(popup.secondary ? { sentenceTranslation: popup.secondary } : {}),
         mediaId: entry.id,
@@ -2242,18 +2329,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   useEffect(() => {
     const c = densityCanvasRef.current;
     if (!c || !hasDensity) return;
-    const BIN = 2;
-    const nBins = Math.max(1, Math.ceil(videoDuration / BIN));
-    const speech = new Float32Array(nBins);
-    for (const cue of displayCues) {
-      const s = Math.max(0, cue.start);
-      const e = Math.min(videoDuration, cue.end);
-      for (let b = Math.max(0, Math.floor(s / BIN)); b < nBins && b * BIN < e; b++) {
-        speech[b] =
-          (speech[b] ?? 0) +
-          Math.max(0, Math.min(e, (b + 1) * BIN) - Math.max(s, b * BIN));
-      }
-    }
+    // Difficulty heat (web/heat.ts): 2s bins; brightness encodes the unknown-
+    // word ratio per cue (heatAlpha), empty bins stay transparent. Degrades to
+    // plain density while the per-cue unknown counts are still computing.
+    const bins = heatBins(displayCues, cueUnknowns ?? [], 2, videoDuration);
     const draw = () => {
       const dpr = window.devicePixelRatio || 1;
       const cssW = c.clientWidth || 640;
@@ -2263,11 +2342,11 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       if (!ctx) return;
       ctx.fillStyle = "rgba(0,0,0,0.6)";
       ctx.fillRect(0, 0, c.width, c.height);
-      const px = c.width / nBins;
-      for (let b = 0; b < nBins; b++) {
-        const a = Math.min(1, speech[b]! / BIN);
+      const px = c.width / Math.max(1, bins.length);
+      for (let b = 0; b < bins.length; b++) {
+        const a = heatAlpha(bins[b]!);
         if (a <= 0.01) continue;
-        ctx.fillStyle = `rgba(255,255,255,${(0.4 * a).toFixed(3)})`;
+        ctx.fillStyle = `rgba(255,255,255,${a.toFixed(3)})`;
         ctx.fillRect(b * px, 0, Math.ceil(px), c.height);
       }
     };
@@ -2277,7 +2356,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     const ro = new ResizeObserver(draw);
     ro.observe(c);
     return () => ro.disconnect();
-  }, [displayCues, videoDuration, hasDensity]);
+  }, [displayCues, videoDuration, hasDensity, cueUnknowns]);
   // current-position marker: cheap direct-DOM left% update, no React re-render
   useEffect(() => {
     const v = videoRef.current;
@@ -2484,6 +2563,14 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         <div className="episode-title" title={entry.name}>
           {entry.name.replace(/\.[^.]+$/, "")}
         </div>
+        <a
+          className="btn icon ep-nav read-link"
+          title="reading mode"
+          aria-label="Reading mode"
+          href={`#/read/${entry.id}`}
+        >
+          ¶
+        </a>
         <button
           className="btn icon ep-nav"
           title="next episode (n)"
@@ -2525,7 +2612,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
               fallbackText={primaryText}
               wordIndex={wordIndex}
               knownWords={knownWords}
+              blacklist={blacklist}
               furiganaOn={furiganaOn}
+              accents={accents}
+              pitchAccentOn={pitchOn}
               onWordEnter={onWordEnter}
               onWordLeave={onWordLeave}
               onWordClick={onWordClick}
@@ -2581,7 +2671,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
               <canvas
                 ref={densityCanvasRef}
                 className="density-strip"
-                title="Dialogue density — click to seek"
+                title="Dialogue density — brighter = more unknown words; click to seek"
               />
             )}
             <div ref={playedRef} className="seek-played" />
@@ -2731,7 +2821,21 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           <div>
             <span className="word">{popup.surface}</span>
             {(lookup?.reading || popup.reading) && (
-              <span className="reading">{lookup?.reading || popup.reading}</span>
+              <span className="reading popup-reading">
+                {pitchOn && accents ? (
+                  <AccentReading
+                    reading={(lookup?.reading || popup.reading)!}
+                    accent={accentOf(
+                      accents,
+                      popup.surface,
+                      (lookup?.reading || popup.reading)!,
+                      popup.dictForm,
+                    )}
+                  />
+                ) : (
+                  lookup?.reading || popup.reading
+                )}
+              </span>
             )}
             {freqMap && (
               <span
@@ -2755,6 +2859,14 @@ export function Player({ entry, startAt, toast, settings }: Props) {
                 title="Marked as known — press k to toggle"
               >
                 known
+              </span>
+            )}
+            {blacklist.has(popup.dictForm ?? popup.surface) && (
+              <span
+                className="known-flag"
+                title="Blacklisted — never counted as unknown; press x to toggle"
+              >
+                blacklisted
               </span>
             )}
           </div>
@@ -2956,7 +3068,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           onSeek={sidebarSeek}
           wordIndex={wordIndex}
           knownWords={knownWords}
+          blacklist={blacklist}
           furiganaOn={furiganaOn}
+          accents={accents}
+          pitchAccentOn={pitchOn}
           onWordEnter={onWordEnter}
           onWordLeave={onWordLeave}
           onWordClick={onWordClick}

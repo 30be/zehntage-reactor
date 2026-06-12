@@ -8,6 +8,9 @@ import {
   type Overview,
 } from "./api.ts";
 import { Player } from "./Player.tsx";
+import { ReadRoute } from "./ReadRoute.tsx";
+import { startSync } from "./sync.ts";
+import { readBlacklist } from "./blacklist.ts";
 import { computeCoverage, readKnownWords, type Coverage } from "./coverage.ts";
 import { buildWordIndex } from "./progress.ts";
 import { kataToHira } from "./tokenizer.ts";
@@ -23,6 +26,7 @@ import {
 type Route =
   | { name: "library" }
   | { name: "player"; id: string; t?: number }
+  | { name: "read"; id: string }
   | { name: "settings" }
   | { name: "stats" }
   | { name: "cards" }
@@ -38,6 +42,7 @@ function parseHash(): Route {
     const t = at >= 0 ? parseFloat(rest.slice(at + 1)) : NaN;
     return { name: "player", id, ...(Number.isFinite(t) && t >= 0 ? { t } : {}) };
   }
+  if (h.startsWith("read/")) return { name: "read", id: h.slice("read/".length) };
   if (h === "settings") return { name: "settings" };
   if (h === "stats") return { name: "stats" };
   if (h === "cards") return { name: "cards" };
@@ -75,6 +80,13 @@ export function App() {
   useEffect(() => {
     void api.getSettings().then(setSettings).catch(() => {});
     tmStart();
+  }, []);
+
+  // zr.* localStorage <-> server state sync (web/sync.ts contract): pull on
+  // start, then push changed keys debounced. Once per app lifetime.
+  useEffect(() => {
+    const handle = startSync();
+    return () => handle.stop();
   }, []);
 
   // Telemetry: one route_change event per navigation.
@@ -153,6 +165,9 @@ export function App() {
         {route.name === "cards" && <Cards go={go} toast={toast} />}
         {route.name === "settings" && (
           <Settings settings={settings} setSettings={setSettings} toast={toast} />
+        )}
+        {route.name === "read" && (
+          <ReadRoute key={route.id} id={route.id} settings={settings} />
         )}
         {route.name === "player" && (
           <PlayerRoute
@@ -292,6 +307,9 @@ function Home({ go }: { go: (h: string) => void }) {
       </div>
       <div className="home-root muted">
         Current library: {root ? `${root.root} · ${root.count} entries` : "…"}
+      </div>
+      <div className="home-attrib muted">
+        Pitch accent data: Kanjium (Uros O.), CC BY-SA 4.0
       </div>
     </>
   );
@@ -439,6 +457,175 @@ function RootChooser({
   );
 }
 
+// --- jimaku.cc "find subs" panel (entries without any subtitles) ---
+
+interface JimakuEntryRow {
+  id: number;
+  name: string;
+  english_name: string | null;
+  japanese_name: string | null;
+}
+
+interface JimakuFileRow {
+  url: string;
+  name: string;
+  size: number;
+}
+
+/** Best-effort episode number from a video filename (release tags stripped). */
+function guessEpisode(name: string): number | null {
+  const clean = name
+    .replace(/\.[^.]+$/, "")
+    .replace(/\[[^\]]*\]|\([^)]*\)/g, " ")
+    .replace(/\b\d{3,4}p\b|\bx26[45]\b|\b10.?bit\b/gi, " ");
+  const m =
+    clean.match(/(?:e|ep|episode|第)\s*0*(\d{1,3})/i) ??
+    clean.match(/(?:^|[\s._-])0*(\d{1,3})(?:v\d)?(?=[\s._-]*$)/);
+  if (!m) return null;
+  const n = parseInt(m[1]!, 10);
+  return Number.isFinite(n) && n > 0 && n < 1000 ? n : null;
+}
+
+function JimakuFind({
+  entry,
+  toast,
+  onDownloaded,
+}: {
+  entry: LibraryEntry;
+  toast: (m: string) => void;
+  onDownloaded: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [results, setResults] = useState<JimakuEntryRow[] | null>(null);
+  const [files, setFiles] = useState<JimakuFileRow[] | null>(null);
+  const [picked, setPicked] = useState<JimakuEntryRow | null>(null);
+
+  const fail = (e: unknown, status?: number) => {
+    setError(
+      status === 401
+        ? "set JIMAKU_API_KEY in ~/.env"
+        : e instanceof Error
+          ? e.message
+          : String(e),
+    );
+  };
+
+  const search = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await fetch(`/api/jimaku/search?mediaId=${entry.id}`);
+      const j = (await r.json()) as { error?: string; entries?: JimakuEntryRow[] };
+      if (!r.ok) return fail(new Error(j.error ?? `HTTP ${r.status}`), r.status);
+      setResults(j.entries ?? []);
+    } catch (e) {
+      fail(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pick = async (je: JimakuEntryRow) => {
+    setPicked(je);
+    setFiles(null);
+    setBusy(true);
+    setError(null);
+    try {
+      const ep = guessEpisode(entry.name);
+      const r = await fetch(
+        `/api/jimaku/files?entryId=${je.id}${ep != null ? `&episode=${ep}` : ""}`,
+      );
+      const j = (await r.json()) as JimakuFileRow[] | { error?: string };
+      if (!r.ok)
+        return fail(new Error((j as { error?: string }).error ?? `HTTP ${r.status}`), r.status);
+      setFiles(j as JimakuFileRow[]);
+    } catch (e) {
+      fail(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const download = async (f: JimakuFileRow) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await fetch("/api/jimaku/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mediaId: entry.id, url: f.url, name: f.name }),
+      });
+      const j = (await r.json()) as { error?: string; lang?: string };
+      if (!r.ok) return fail(new Error(j.error ?? `HTTP ${r.status}`), r.status);
+      toast(`Subtitle downloaded (${j.lang ?? "ja"}): ${f.name}`);
+      setOpen(false);
+      onDownloaded();
+    } catch (e) {
+      fail(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <span className="jimaku" onClick={(e) => e.stopPropagation()}>
+      <span
+        className="jimaku-link muted"
+        title="Search jimaku.cc for subtitles"
+        onClick={() => {
+          setOpen((o) => !o);
+          if (!open && results == null) void search();
+        }}
+      >
+        find subs
+      </span>
+      {open && (
+        <span className="jimaku-panel">
+          {busy && <span className="muted">…</span>}
+          {error && <span className="jimaku-error">{error}</span>}
+          {!picked &&
+            results?.map((je) => (
+              <span key={je.id} className="jimaku-row" onClick={() => void pick(je)}>
+                {je.name}
+                {je.english_name ? ` · ${je.english_name}` : ""}
+              </span>
+            ))}
+          {!picked && results?.length === 0 && !busy && !error && (
+            <span className="muted">no matches</span>
+          )}
+          {picked && files == null && !busy && !error && (
+            <span className="muted">no files</span>
+          )}
+          {picked &&
+            files?.map((f) => (
+              <span key={f.url} className="jimaku-row" onClick={() => void download(f)}>
+                {f.name} · {fmtSize(f.size)}
+              </span>
+            ))}
+          {picked && files?.length === 0 && !busy && (
+            <span className="muted">
+              no files{guessEpisode(entry.name) != null ? " for this episode" : ""}
+            </span>
+          )}
+          {picked && (
+            <span
+              className="jimaku-row muted"
+              onClick={() => {
+                setPicked(null);
+                setFiles(null);
+              }}
+            >
+              ← back
+            </span>
+          )}
+        </span>
+      )}
+    </span>
+  );
+}
+
 function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) => void }) {
   const [entries, setEntries] = useState<LibraryEntry[] | null>(null);
   // --- transcript search (debounced 300ms; Esc clears) ---
@@ -488,7 +675,7 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
     try {
       // known set = local zr.known + Anki card lemmas (front sans reading)
       const anki = await api.ankiWords().catch(() => ({ words: [], progress: {} }));
-      const known = new Set<string>(readKnownWords());
+      const known = new Set<string>([...readKnownWords(), ...readBlacklist()]);
       for (const w of anki.words) known.add(w.front.replace(/\s*\[.*$/, "").trim());
       const rows = await api.indexComprehensibility([...known]);
       setKnownPct(new Map(rows.map((r) => [r.mediaId, r.pctKnown])));
@@ -536,7 +723,8 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
         .catch(() => ({ words: [], progress: {} }));
       if (signal.aborted) return;
       const wordIndex = buildWordIndex(anki.words, anki.progress);
-      const known = readKnownWords();
+      // blacklisted lemmas count as "known" — excluded from coverage %
+      const known = new Set([...readKnownWords(), ...readBlacklist()]);
       for (const e of entries) {
         if (signal.aborted) return;
         if (e.subLangs.length === 0) continue;
@@ -696,7 +884,12 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
               })()}
             </div>
             <div className="badges">
-              {e.subLangs.length === 0 && <span className="badge">no subs</span>}
+              {e.subLangs.length === 0 && (
+                <>
+                  <span className="badge">no subs</span>
+                  <JimakuFind entry={e} toast={toast} onDownloaded={loadEntries} />
+                </>
+              )}
               {e.subLangs.map((l, i) => (
                 <span key={i} className="badge">
                   {l}
@@ -803,7 +996,8 @@ function Stats({ go }: { go: (h: string) => void }) {
     const { signal } = ctrl;
     void (async () => {
       const wordIndex = buildWordIndex(anki.words, anki.progress);
-      const known = readKnownWords();
+      // blacklisted lemmas count as "known" — excluded from coverage %
+      const known = new Set([...readKnownWords(), ...readBlacklist()]);
       for (const e of entries) {
         if (signal.aborted) return;
         if (e.subLangs.length === 0) continue;
@@ -1383,6 +1577,7 @@ function Settings({
     Boolean(settings.whisperAutoGenerate),
   );
   const [furigana, setFurigana] = useState(settings.furigana !== false);
+  const [pitchAccent, setPitchAccent] = useState(settings.pitchAccent !== false);
   const [prestudyMinutes, setPrestudyMinutes] = useState(
     String(Number(settings.prestudyMinutes) || 10),
   );
@@ -1405,6 +1600,7 @@ function Settings({
     setSecondaryLang((settings.knownLang as string) || "ru");
     setAutoWhisper(Boolean(settings.whisperAutoGenerate));
     setFurigana(settings.furigana !== false);
+    setPitchAccent(settings.pitchAccent !== false);
     setPrestudyMinutes(String(Number(settings.prestudyMinutes) || 10));
     setShadowRepeats(String(Math.max(0, Math.round(Number(settings.shadowRepeats)) || 0)));
     setAutopauseMode(settings.autopauseMode === "unknown" ? "unknown" : "every");
@@ -1422,6 +1618,7 @@ function Settings({
     secondaryLang,
     autoWhisper,
     furigana,
+    pitchAccent,
     prestudyMinutes,
     shadowRepeats,
     autopauseMode,
@@ -1433,6 +1630,7 @@ function Settings({
     secondaryLang,
     autoWhisper,
     furigana,
+    pitchAccent,
     prestudyMinutes,
     shadowRepeats,
     autopauseMode,
@@ -1452,6 +1650,7 @@ function Settings({
         knownLang: s.secondaryLang,
         whisperAutoGenerate: s.autoWhisper,
         furigana: s.furigana,
+        pitchAccent: s.pitchAccent,
         prestudyMinutes: Math.max(
           1,
           Math.min(120, Math.round(Number(s.prestudyMinutes)) || 10),
@@ -1547,6 +1746,21 @@ function Settings({
             }}
           />
           <label htmlFor="furigana">Furigana on unknown kanji</label>
+        </div>
+        <div
+          className="switch"
+          title="Mark pitch accent in furigana readings (overline = high, ꜜ = downstep)"
+        >
+          <input
+            type="checkbox"
+            id="pitchAccent"
+            checked={pitchAccent}
+            onChange={(e) => {
+              setPitchAccent(e.target.checked);
+              scheduleSave();
+            }}
+          />
+          <label htmlFor="pitchAccent">Pitch accent marks</label>
         </div>
         <div className="field">
           <label htmlFor="prestudyMinutes">Pre-study window (minutes)</label>

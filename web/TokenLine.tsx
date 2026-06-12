@@ -9,6 +9,7 @@ import {
   progressColor,
   type WordIndex,
 } from "./progress.ts";
+import { accentOf, accentPattern, morae } from "./accent.ts";
 
 const HAS_KANJI = /[一-龯々]/;
 const MATURE_BUCKET = 4;
@@ -20,6 +21,38 @@ export function wordKey(tok: KToken): string {
     : tok.surface_form;
 }
 
+/**
+ * Kana reading rendered as per-mora spans: overline (border-top) on high
+ * morae, ꜜ marker where the pitch drops (after mora `accent` for accent>=1).
+ * accent == null → plain text (no pitch info available).
+ */
+export function AccentReading({
+  reading,
+  accent,
+}: {
+  reading: string;
+  accent: number | null;
+}) {
+  const kana = kataToHira(reading);
+  if (accent == null) return <>{kana}</>;
+  const ms = morae(kana);
+  const pattern = accentPattern(kana, accent);
+  return (
+    <>
+      {ms.map((m, i) => (
+        <span key={i} className={`mora${pattern[i] ? " hi" : ""}`}>
+          {m}
+          {accent >= 1 && i === accent - 1 ? (
+            <span className="acc-drop" aria-hidden>
+              ꜜ
+            </span>
+          ) : null}
+        </span>
+      ))}
+    </>
+  );
+}
+
 export interface TokenLineProps {
   tokens: KToken[] | null;
   fallbackText: string;
@@ -27,6 +60,12 @@ export interface TokenLineProps {
   /** local mark-as-known set (zr.known): no underline, no furigana */
   knownWords: Set<string>;
   furiganaOn: boolean;
+  /** zr.blacklist lemmas: rendered plain (no underline/furigana/counting) */
+  blacklist?: Set<string>;
+  /** pitch-accent map (loadAccents()); null/undefined = plain furigana */
+  accents?: Map<string, number> | null;
+  /** settings toggle (default on) for pitch-accent marks in furigana */
+  pitchAccentOn?: boolean;
   onWordEnter?: (tok: KToken, e: React.MouseEvent) => void;
   onWordLeave?: () => void;
   onWordClick?: (tok: KToken, e: React.MouseEvent) => void;
@@ -38,6 +77,9 @@ export function TokenLine({
   wordIndex,
   knownWords,
   furiganaOn,
+  blacklist,
+  accents,
+  pitchAccentOn,
   onWordEnter,
   onWordLeave,
   onWordClick,
@@ -47,7 +89,9 @@ export function TokenLine({
     <>
       {tokens.map((tok, i) => {
         if (!isLexical(tok)) return <span key={i}>{tok.surface_form}</span>;
-        const localKnown = knownWords.has(wordKey(tok));
+        const key = wordKey(tok);
+        const blacklisted = blacklist?.has(key) ?? false;
+        const localKnown = knownWords.has(key) || blacklisted;
         const front = localKnown
           ? null
           : matchFront(wordIndex, tok.surface_form, tok.reading, tok.basic_form);
@@ -79,7 +123,21 @@ export function TokenLine({
             {showFuri ? (
               <ruby>
                 {tok.surface_form}
-                <rt>{kataToHira(tok.reading!)}</rt>
+                <rt>
+                  {pitchAccentOn !== false && accents ? (
+                    <AccentReading
+                      reading={tok.reading!}
+                      accent={accentOf(
+                        accents,
+                        tok.surface_form,
+                        tok.reading!,
+                        tok.basic_form,
+                      )}
+                    />
+                  ) : (
+                    kataToHira(tok.reading!)
+                  )}
+                </rt>
               </ruby>
             ) : (
               tok.surface_form

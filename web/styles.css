@@ -1157,3 +1157,48 @@ textarea.prompt {
 }
 .cards-count { font-size: 12px; }
 .cards-more { margin-top: 10px; }
+
+/* ---- wave 7+8: pitch accent, reading mode, jimaku, blacklist (appended) ---- */
+/* pitch accent: overline on high morae, ꜜ at the downstep */
+.mora { padding: 0 0.02em; }
+.mora.hi { border-top: 1px solid currentColor; }
+.acc-drop {
+  font-size: 0.85em;
+  opacity: 0.75;
+  user-select: none;
+}
+/* popup reading: same treatment, slightly larger than furigana */
+.lookup .reading .mora { font-size: 1.05em; }
+
+/* reading-mode link in the player title row */
+.read-link { text-decoration: none; }
+
+/* reading-mode simplified popup */
+.read-popup { max-width: 340px; }
+.read-mode .tok:hover { background: rgba(0, 0, 0, 0.08); }
+
+/* jimaku "find subs" inline panel on library cards */
+.jimaku { display: inline; }
+.jimaku-link {
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+.jimaku-link:hover { color: var(--fg); }
+.jimaku-panel {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+}
+.jimaku-row {
+  display: block;
+  padding: 2px 0;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.jimaku-row:hover { text-decoration: underline; }
+.jimaku-error { display: block; color: #b91c1c; }
+
+.home-attrib { margin-top: 6px; font-size: 12px; }
