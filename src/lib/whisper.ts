@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import type { Cue } from "./subs.ts";
-import { collapseRepeatedCues, cuesToSrt, parseTimestamp } from "./subs.ts";
+import { collapseRepeatedCues, cuesToSrt, findCoverageHoles, parseTimestamp } from "./subs.ts";
 
 const MODEL_PATH = join(homedir(), "models", "ggml-medium.bin");
 const THREADS = 12;
@@ -19,6 +19,8 @@ export interface WhisperJob {
   outPath: string;
   status: WhisperJobStatus;
   cues: Cue[];
+  /** Non-fatal problems (e.g. coverage holes that survived repair passes). */
+  warnings: string[];
   error?: string;
   listeners: Set<(event: WhisperEvent) => void>;
   proc?: ReturnType<typeof Bun.spawn>;
@@ -27,7 +29,8 @@ export interface WhisperJob {
 
 export type WhisperEvent =
   | { type: "status"; status: WhisperJobStatus; error?: string }
-  | { type: "cue"; cue: Cue };
+  | { type: "cue"; cue: Cue }
+  | { type: "warning"; message: string };
 
 /** Parse whisper-cli progressive output lines:
  *  [00:00:00.000 --> 00:00:04.500]   text here
@@ -85,6 +88,7 @@ class WhisperQueue {
       outPath,
       status: "queued",
       cues: [],
+      warnings: [],
       listeners: new Set(),
       canceled: false,
     };
@@ -177,42 +181,100 @@ class WhisperQueue {
       }
       if (job.canceled) return;
 
-      // 2. Run whisper-cli, streaming segments from stdout.
+      // 2. Run whisper-cli over the whole file, streaming segments from stdout.
       this.setStatus(job, "running");
-      const proc = Bun.spawn(
-        ["whisper-cli", "-m", MODEL_PATH, "-t", String(THREADS), "-l", job.lang, "-f", wavPath],
-        { stdout: "pipe", stderr: "pipe" },
-      );
-      job.proc = proc;
-
-      const decoder = new TextDecoder();
-      let buffer = "";
-      for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
-        buffer += decoder.decode(chunk, { stream: true });
-        let nl;
-        while ((nl = buffer.indexOf("\n")) !== -1) {
-          const line = buffer.slice(0, nl);
-          buffer = buffer.slice(nl + 1);
-          const cue = parseWhisperLine(line);
-          if (cue) {
-            job.cues.push(cue);
-            this.emit(job, { type: "cue", cue });
-          }
-        }
-      }
-      const code = await proc.exited;
+      await this.whisperPass(job, wavPath, []);
       if (job.canceled) return;
-      if (code !== 0) {
-        throw new Error(`whisper-cli exited with ${code}: ${(await new Response(proc.stderr as ReadableStream).text()).slice(0, 300)}`);
+
+      // 3. Collapse hallucinated repeat-runs. Collapsing keeps only the first
+      // cue of a loop, so a loop that ate minutes of audio now shows up as a
+      // coverage hole — re-run whisper on just those ranges with context
+      // conditioning disabled (-mc 0), which is what breaks repeat loops.
+      let cues = collapseRepeatedCues(job.cues);
+      const durationSec = await wavDurationSec(wavPath);
+      const holes = findCoverageHoles(cues, durationSec);
+      for (const hole of holes.slice(0, 4)) {
+        if (job.canceled) return;
+        const pad = 1;
+        const offsetMs = Math.max(0, Math.round((hole.start - pad) * 1000));
+        const durMs = Math.round((hole.end - hole.start + 2 * pad) * 1000);
+        const repair = await this.whisperPass(job, wavPath, [
+          "-ot", String(offsetMs),
+          "-d", String(durMs),
+          "-mc", "0", // no past-text conditioning: the anti-loop knob
+        ]);
+        if (job.canceled) return;
+        const fixed = collapseRepeatedCues(repair).filter(
+          (c) => c.end > hole.start && c.start < hole.end,
+        );
+        cues = [...cues, ...fixed].sort((a, b) => a.start - b.start);
       }
 
-      // 3. Save sidecar SRT (hallucinated repeat-runs collapsed).
-      await Bun.write(job.outPath, cuesToSrt(collapseRepeatedCues(job.cues)));
+      // 4. Anything still uncovered is a real problem — surface it.
+      for (const hole of findCoverageHoles(cues, durationSec)) {
+        const msg = `no subtitles between ${fmtMin(hole.start)} and ${fmtMin(hole.end)} (whisper produced no usable output there)`;
+        job.warnings.push(msg);
+        console.warn(`[whisper] ${job.mediaPath}: ${msg}`);
+        this.emit(job, { type: "warning", message: msg });
+      }
+
+      // 5. Save sidecar SRT.
+      await Bun.write(job.outPath, cuesToSrt(cues));
       this.setStatus(job, "done");
     } finally {
       await unlink(wavPath).catch(() => {});
     }
   }
+
+  /** One whisper-cli invocation. Streams cues (pushed to job.cues + emitted)
+   * and returns just this pass's cues. */
+  private async whisperPass(job: WhisperJob, wavPath: string, extraArgs: string[]): Promise<Cue[]> {
+    const proc = Bun.spawn(
+      ["whisper-cli", "-m", MODEL_PATH, "-t", String(THREADS), "-l", job.lang, ...extraArgs, "-f", wavPath],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    job.proc = proc;
+    const passCues: Cue[] = [];
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
+      buffer += decoder.decode(chunk, { stream: true });
+      let nl;
+      while ((nl = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        const cue = parseWhisperLine(line);
+        if (cue) {
+          passCues.push(cue);
+          job.cues.push(cue);
+          this.emit(job, { type: "cue", cue });
+        }
+      }
+    }
+    const code = await proc.exited;
+    if (!job.canceled && code !== 0) {
+      throw new Error(
+        `whisper-cli exited with ${code}: ${(await new Response(proc.stderr as ReadableStream).text()).slice(0, 300)}`,
+      );
+    }
+    return passCues;
+  }
+}
+
+async function wavDurationSec(wavPath: string): Promise<number> {
+  const proc = Bun.spawn(
+    ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", wavPath],
+    { stdout: "pipe", stderr: "ignore" },
+  );
+  const out = await new Response(proc.stdout as ReadableStream).text();
+  const sec = Number.parseFloat(out.trim());
+  return Number.isFinite(sec) ? sec : 0;
+}
+
+function fmtMin(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 export const whisperQueue = new WhisperQueue();

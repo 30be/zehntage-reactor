@@ -4,7 +4,7 @@
 //   zehntage-reactor subtitle <lang> [<lang2>] <f>  headless subtitle generation
 
 import { stat } from "node:fs/promises";
-import { dirname, extname, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { startServer } from "./server/index.ts";
 import { whisperQueue } from "./lib/whisper.ts";
 import { parseSrt, cuesToSrt } from "./lib/subs.ts";
@@ -23,8 +23,11 @@ function usage(): never {
   process.exit(1);
 }
 
+/** Same layout as the server's sidecarPath: <videodir>/subs/<base>.<lang>.srt.
+ * (Previously wrote next to the video, where the server couldn't find it until
+ * a library-scan migration moved it.) */
 function sidecarFor(file: string, lang: string): string {
-  return file.slice(0, -extname(file).length) + `.${lang}.srt`;
+  return join(dirname(file), "subs", `${basename(file, extname(file))}.${lang}.srt`);
 }
 
 async function runSubtitle(args: string[]): Promise<void> {

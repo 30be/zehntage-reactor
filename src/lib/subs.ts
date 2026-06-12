@@ -193,10 +193,26 @@ export function parseSubtitleText(text: string, ext: string): Cue[] {
 
 /** Normalization for repeat detection: trim + strip JP/ASCII punctuation. */
 function repeatNorm(text: string): string {
-  return text
-    .replace(/[。、．，！？!?…‥・「」『』（）()\[\]【】〜~ー―\-—\s]/g, "")
+  const norm = text
+    .replace(/[。、．，！？!?…‥・「」『』（）()\[\]【】《》〈〉“”"'’〜~ー―\-—♪♫♬♩〽\s]/g, "")
     .trim();
+  // Pure punctuation/music cues (♪~) normalize to "": fall back to the trimmed
+  // text so note-spam loops are still detected as runs.
+  return norm !== "" ? norm : text.trim();
 }
+
+/** Near-duplicate check for hallucination runs: identical after punctuation
+ * stripping, or one is a substring of the other (whisper loops often drift by
+ * a trailing particle / honorific, e.g. おれきほうたろお vs おれきほうたろお殿). */
+function repeatNear(a: string, b: string): boolean {
+  if (a === "" || b === "") return a === b;
+  return a === b || a.includes(b) || b.includes(a);
+}
+
+/** Cap for the single cue kept from a collapsed hallucination run. The old
+ * behavior merged the whole run into one cue spanning minutes, which papered
+ * over the fact that the underlying audio was never really transcribed. */
+const COLLAPSED_CUE_MAX_SEC = 10;
 
 /**
  * Whisper hallucinates on music/silence by repeating the same phrase as many
@@ -212,17 +228,53 @@ export function collapseRepeatedCues(cues: Cue[], minRun = 4, spanSec = 20): Cue
   while (i < cues.length) {
     const norm = repeatNorm(cues[i]!.text);
     let j = i + 1;
-    while (j < cues.length && norm !== "" && repeatNorm(cues[j]!.text) === norm) j++;
+    while (j < cues.length && norm !== "" && repeatNear(repeatNorm(cues[j]!.text), norm)) j++;
     const run = j - i;
     const span = cues[j - 1]!.end - cues[i]!.start;
     if (run >= minRun || (run >= 3 && span > spanSec)) {
-      out.push({ start: cues[i]!.start, end: cues[j - 1]!.end, text: cues[i]!.text });
+      // Keep only the first occurrence, duration-capped. Do NOT stretch it over
+      // the whole run: a loop spanning minutes means whisper never transcribed
+      // that audio — leave a visible gap so findCoverageHoles() can trigger a
+      // repair pass instead of hiding an 11-minute hole inside one mega-cue.
+      const first = cues[i]!;
+      out.push({
+        start: first.start,
+        end: Math.min(first.end, first.start + COLLAPSED_CUE_MAX_SEC),
+        text: first.text,
+      });
     } else {
       for (let k = i; k < j; k++) out.push(cues[k]!);
     }
     i = j;
   }
   return out;
+}
+
+export interface CoverageHole {
+  start: number;
+  end: number;
+}
+
+/**
+ * Find stretches of `minGapSec`+ seconds with no cues, including a hole at the
+ * head and (minus `tailSlackSec` for credits/ED) at the tail. Input cues must
+ * be in start order (whisper output is).
+ */
+export function findCoverageHoles(
+  cues: Cue[],
+  durationSec: number,
+  minGapSec = 45,
+  tailSlackSec = 30,
+): CoverageHole[] {
+  const holes: CoverageHole[] = [];
+  let covered = 0;
+  for (const c of cues) {
+    if (c.start - covered >= minGapSec) holes.push({ start: covered, end: c.start });
+    covered = Math.max(covered, c.end);
+  }
+  const tail = durationSec - tailSlackSec;
+  if (tail - covered >= minGapSec) holes.push({ start: covered, end: durationSec });
+  return holes;
 }
 
 export function cuesToSrt(cues: Cue[]): string {

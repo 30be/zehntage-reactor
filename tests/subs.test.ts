@@ -10,6 +10,7 @@ import {
   trackLabel,
   parseSidecarTrackId,
   collapseRepeatedCues,
+  findCoverageHoles,
   type SubTrack,
 } from "../src/lib/subs.ts";
 
@@ -180,9 +181,11 @@ describe("collapseRepeatedCues", () => {
       cue(10, 12, "次の台詞"),
     ];
     const out = collapseRepeatedCues(cues);
+    // run collapses to its FIRST cue only (duration-capped) — the rest of the
+    // loop's span is left uncovered so hole detection can kick in.
     expect(out).toEqual([
       cue(0, 2, "こんにちは"),
-      cue(2, 10, "おれきほうたろお殿"),
+      cue(2, 4, "おれきほうたろお殿"),
       cue(10, 12, "次の台詞"),
     ]);
   });
@@ -210,7 +213,7 @@ describe("collapseRepeatedCues", () => {
       cue(25, 27, "次の台詞"),
     ];
     expect(collapseRepeatedCues(cues)).toEqual([
-      cue(0, 25, "ご視聴ありがとうございました"),
+      cue(0, 8, "ご視聴ありがとうございました"),
       cue(25, 27, "次の台詞"),
     ]);
   });
@@ -224,7 +227,57 @@ describe("collapseRepeatedCues", () => {
     expect(collapseRepeatedCues([])).toEqual([]);
     const cues = Array.from({ length: 10 }, (_, i) => cue(i, i + 1, "ループ"));
     const once = collapseRepeatedCues(cues);
-    expect(once).toEqual([cue(0, 10, "ループ")]);
+    expect(once).toEqual([cue(0, 1, "ループ")]);
     expect(collapseRepeatedCues(once)).toEqual(once);
+  });
+});
+
+describe("collapseRepeatedCues hallucination handling", () => {
+  const mk = (start: number, end: number, text: string) => ({ start, end, text });
+  test("near-duplicate loop (punctuation/substring drift) collapses to one capped cue", () => {
+    const cues = [
+      mk(0, 2, "おれきほうたろお殿"),
+      mk(2, 4, "おれきほうたろお 殿"),
+      mk(4, 6, "おれきほうたろお"),
+      mk(6, 300, "おれきほうたろお殿。"),
+      mk(300, 302, "本物のセリフ"),
+    ];
+    const out = collapseRepeatedCues(cues);
+    expect(out).toHaveLength(2);
+    expect(out[0]!.text).toBe("おれきほうたろお殿");
+    // capped: must NOT span the whole loop and hide the coverage hole
+    expect(out[0]!.end).toBeLessThanOrEqual(10);
+    expect(out[1]!.text).toBe("本物のセリフ");
+  });
+  test("legit short repeats survive", () => {
+    const cues = [mk(0, 1, "待って！"), mk(1, 2, "待って！"), mk(2, 3, "待って！")];
+    expect(collapseRepeatedCues(cues)).toHaveLength(3);
+  });
+  test("musical-note loop collapses", () => {
+    const cues = [mk(0, 5, "♪~"), mk(5, 10, "♪~"), mk(10, 15, "♪"), mk(15, 60, "♪~")];
+    const out = collapseRepeatedCues(cues);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.end).toBeLessThanOrEqual(10);
+  });
+});
+
+describe("findCoverageHoles", () => {
+  const mk = (start: number, end: number) => ({ start, end, text: "x" });
+  test("detects head, middle and tail holes", () => {
+    const cues = [mk(100, 105), mk(106, 110), mk(400, 405)];
+    const holes = findCoverageHoles(cues, 1000);
+    expect(holes).toEqual([
+      { start: 0, end: 100 },
+      { start: 110, end: 400 },
+      { start: 405, end: 1000 },
+    ]);
+  });
+  test("no holes for dense coverage with credit slack", () => {
+    const cues = [mk(0, 500), mk(500, 960)];
+    expect(findCoverageHoles(cues, 1000)).toEqual([]);
+  });
+  test("gaps under threshold ignored", () => {
+    const cues = [mk(0, 100), mk(140, 990)];
+    expect(findCoverageHoles(cues, 1000)).toEqual([]);
   });
 });
