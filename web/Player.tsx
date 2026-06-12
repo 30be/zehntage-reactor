@@ -208,6 +208,49 @@ export function Player({ entry, toast, settings }: Props) {
   // word the cursor currently rests on (for the `k` hotkey before any popup)
   const hoveredKeyRef = useRef<string | null>(null);
 
+  // --- shadowing loop (`s`): kept in refs to avoid re-renders on every cue ---
+  // idx = primary-cue index being looped; remaining = repeats left (Infinity
+  // until a digit 1-9 is pressed right after `s`).
+  const loopRef = useRef<{ idx: number; remaining: number } | null>(null);
+  const loopArmTimeRef = useRef(0); // digit-count window opens when `s` arms
+
+  // --- hard mode (`h`): hide JP text while playing, reveal on pause/hover/tail ---
+  const [hardMode, setHardMode] = useState(() => {
+    try {
+      return localStorage.getItem("zr.hardmode") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const hardModeRef = useRef(hardMode);
+  const toggleHardMode = useCallback(() => {
+    const next = !hardModeRef.current;
+    hardModeRef.current = next;
+    setHardMode(next);
+    try {
+      localStorage.setItem("zr.hardmode", next ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+    toast(next ? "hard mode on" : "hard mode off");
+  }, [toast]);
+  // delayed-reveal: true in the last 0.2s of the active cue (listen first,
+  // read after); driven from the timeupdate handler below.
+  const [revealTail, setRevealTail] = useState(false);
+  const [isPaused, setIsPaused] = useState(true);
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const upd = () => setIsPaused(v.paused);
+    v.addEventListener("play", upd);
+    v.addEventListener("pause", upd);
+    upd();
+    return () => {
+      v.removeEventListener("play", upd);
+      v.removeEventListener("pause", upd);
+    };
+  }, [entry.id]);
+
   // --- cue-list sidebar (toggled with `l`, persisted) ---
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     try {
@@ -534,6 +577,35 @@ export function Player({ entry, toast, settings }: Props) {
       // Track-time for the PRIMARY track: subtract the user's sync offset.
       const t = v.currentTime - subOffset;
       const idx = activeCueIndex(displayCues, t);
+      // Hard-mode tail reveal: show the JP text in the last 0.2s of the cue.
+      setRevealTail(
+        hardModeRef.current &&
+          idx >= 0 &&
+          displayCues[idx] != null &&
+          displayCues[idx]!.end - t <= 0.2,
+      );
+      // Shadowing loop: on reaching the looped cue's end, seek back to its
+      // start and keep playing. Takes precedence over autopause (the early
+      // return below skips the autopause branch entirely while looping).
+      const loop = loopRef.current;
+      if (loop && !wasFirst && !v.seeking && !v.paused) {
+        const cue = displayCues[loop.idx];
+        if (!cue) {
+          loopRef.current = null; // cue list changed under us — release
+        } else if (t >= cue.end) {
+          if (loop.remaining !== Infinity && --loop.remaining <= 0) {
+            loopRef.current = null; // count exhausted → release and continue
+            toast("loop done");
+          } else {
+            internalSeekRef.current = true;
+            v.currentTime = Math.max(0, cue.start + subOffset);
+            prevActiveP.current = loop.idx;
+            setActiveP(loop.idx);
+            setActiveS(activeCueIndex(secondaryCues, v.currentTime));
+            return;
+          }
+        }
+      }
       // Autopause: pause exactly at the END of the cue the user just heard.
       // By the time `idx` changes the next subtitle would already be shown, so
       // we seek back to just before the finished cue's end — it stays rendered
@@ -570,6 +642,7 @@ export function Player({ entry, toast, settings }: Props) {
         return;
       }
       lastAutopausedIdx.current = -1;
+      loopRef.current = null; // manual seek releases the shadowing loop
       prevActiveP.current = activeCueIndex(displayCues, v.currentTime - subOffset);
     };
     v.addEventListener("timeupdate", onTime);
@@ -579,7 +652,7 @@ export function Player({ entry, toast, settings }: Props) {
       v.removeEventListener("timeupdate", onTime);
       v.removeEventListener("seeking", onSeeking);
     };
-  }, [displayCues, secondaryCues, subOffset]);
+  }, [displayCues, secondaryCues, subOffset, toast]);
 
   // keep refs in sync for the (deps-stable) hotkey handler
   useEffect(() => {
@@ -598,6 +671,100 @@ export function Player({ entry, toast, settings }: Props) {
         : null;
   }, [popup]);
 
+  // --- episode navigation (`n`/`p`, auto-next on ended) ---
+  // Next/previous library entry alphabetically by name; navigates the hash
+  // router. If the target episode has no persisted track choice yet, carry the
+  // current track LANGUAGES forward (pick its tracks with matching lang).
+  const navBusyRef = useRef(false);
+  const gotoEpisode = useCallback(
+    async (dir: 1 | -1) => {
+      if (navBusyRef.current) return;
+      navBusyRef.current = true;
+      try {
+        const lib = await api.library();
+        const sorted = lib.slice().sort((a, b) => a.name.localeCompare(b.name));
+        const i = sorted.findIndex((e) => e.id === entry.id);
+        const next = i >= 0 ? sorted[i + dir] : undefined;
+        if (!next) {
+          toast(dir > 0 ? "no next episode" : "no previous episode");
+          return;
+        }
+        const saved = readSavedTracks(next.id);
+        const curPLang = tracks.find((t) => t.id === primaryId)?.lang;
+        const curSLang = tracks.find((t) => t.id === secondaryId)?.lang;
+        if ((!saved.primary && curPLang) || (!saved.secondary && curSLang)) {
+          try {
+            const nts = await api.subs(next.id);
+            const pick = (lang?: string, not?: string): string =>
+              lang
+                ? nts.find((t) => t.lang === lang && t.id !== not)?.id ??
+                  nts.find(
+                    (t) =>
+                      t.lang.slice(0, 2) === lang.slice(0, 2) && t.id !== not,
+                  )?.id ??
+                  ""
+                : "";
+            const p = saved.primary ?? pick(curPLang);
+            // never persist the same track for both slots
+            const s = saved.secondary ?? pick(curSLang, p || undefined);
+            if (p || s) saveTracks(next.id, p, s);
+          } catch {
+            /* best-effort — auto-selection will kick in */
+          }
+        }
+        window.location.hash = `#/play/${next.id}`;
+      } catch (e) {
+        toast(`Navigation failed: ${e instanceof Error ? e.message : e}`);
+      } finally {
+        navBusyRef.current = false;
+      }
+    },
+    [entry.id, tracks, primaryId, secondaryId, toast],
+  );
+
+  // Auto-next: on `ended`, count down 5s (any keypress/click cancels), then go.
+  // gotoEpisode is reached through a ref so this effect never re-runs when
+  // tracks/track-ids change — a re-run would silently kill a live countdown.
+  const gotoEpisodeRef = useRef(gotoEpisode);
+  useEffect(() => {
+    gotoEpisodeRef.current = gotoEpisode;
+  }, [gotoEpisode]);
+  const cancelAutoNextRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const onEnded = () => {
+      cancelAutoNextRef.current?.();
+      toast("Next episode in 5s…");
+      const cleanup = () => {
+        window.clearTimeout(timer);
+        window.removeEventListener("keydown", cancel, true);
+        window.removeEventListener("pointerdown", cancel, true);
+        cancelAutoNextRef.current = null;
+      };
+      const cancel = (e: Event) => {
+        cleanup();
+        // n/p navigate anyway (the hotkey handler runs first in capture
+        // order) — only the timer needs killing, the toast would mislead.
+        const k = (e as KeyboardEvent).key;
+        if (k === "n" || k === "N" || k === "p" || k === "P") return;
+        toast("auto-next canceled");
+      };
+      const timer = window.setTimeout(() => {
+        cleanup();
+        void gotoEpisodeRef.current(1);
+      }, 5000);
+      window.addEventListener("keydown", cancel, true);
+      window.addEventListener("pointerdown", cancel, true);
+      cancelAutoNextRef.current = cleanup;
+    };
+    v.addEventListener("ended", onEnded);
+    return () => {
+      v.removeEventListener("ended", onEnded);
+      cancelAutoNextRef.current?.();
+    };
+  }, [toast]);
+
   // --- global hotkeys: work regardless of focus (except real text inputs) ---
   useEffect(() => {
     const FRAME = 1 / 24; // ~one frame at 23.976/24 fps
@@ -608,6 +775,7 @@ export function Player({ entry, toast, settings }: Props) {
       ",", "<", ".", ">",
       "a", "A", "-", "=", "[", "]", "\\",
       "l", "L", "k", "K",
+      "Tab", "s", "S", "h", "H", "n", "N", "p", "P",
     ]);
     const isTextInput = (el: Element | null): boolean => {
       if (!el) return false;
@@ -643,9 +811,21 @@ export function Player({ entry, toast, settings }: Props) {
         }
         return;
       }
+      // Digits 1-9 pressed right after `s` set the shadowing-loop count.
+      if (
+        /^[1-9]$/.test(e.key) &&
+        loopRef.current &&
+        Date.now() - loopArmTimeRef.current < 3000
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        loopRef.current.remaining = parseInt(e.key, 10);
+        toast(`loop ×${e.key}`);
+        return;
+      }
       if (!HANDLED.has(e.key)) return;
       // Avoid double-toggle on key auto-repeat for toggling keys.
-      if (e.repeat && [" ", "f", "F", "l", "L", "k", "K"].includes(e.key)) {
+      if (e.repeat && [" ", "f", "F", "l", "L", "k", "K", "s", "S", "h", "H", "n", "N", "p", "P"].includes(e.key)) {
         e.preventDefault();
         e.stopPropagation();
         return;
@@ -742,6 +922,75 @@ export function Player({ entry, toast, settings }: Props) {
         case "L":
           toggleSidebar();
           break;
+        case "Tab": {
+          // Next/previous dialogue line. If a popup is open (incl. pinned),
+          // Tab closes it first — mirror Escape — then seeks.
+          if (popupOpenRef.current) {
+            clearCloseTimer();
+            askFocusedRef.current = false;
+            setPinned(false);
+            setPopup(null);
+            resumeFromHover();
+          }
+          loopRef.current = null; // Tab releases the shadowing loop
+          const off = subOffsetRef.current;
+          const cues = primaryCuesRef.current;
+          if (cues.length === 0) break;
+          const tt = v.currentTime - off;
+          const LEAD = 0.15; // small lead-in before the cue starts
+          if (e.shiftKey) {
+            // previous cue start — same walk-back as `a`
+            let i = activeCueIndex(cues, tt);
+            if (i < 0) {
+              for (let k = cues.length - 1; k >= 0; k--) {
+                if (cues[k]!.start <= tt) {
+                  i = k;
+                  break;
+                }
+              }
+            } else if (tt - cues[i]!.start < 0.3 && i > 0) {
+              i -= 1;
+            }
+            if (i >= 0) v.currentTime = Math.max(0, cues[i]!.start + off - LEAD);
+          } else {
+            const next = cues.find((c) => c.start > tt + 0.01);
+            if (next) v.currentTime = Math.max(0, next.start + off - LEAD);
+          }
+          break;
+        }
+        case "s":
+        case "S": {
+          // Shadowing loop on the current primary cue. Digits 1-9 right after
+          // arm a repeat count; default infinite. `s` again releases.
+          if (loopRef.current) {
+            loopRef.current = null;
+            toast("loop off");
+            break;
+          }
+          const off = subOffsetRef.current;
+          const cues = primaryCuesRef.current;
+          const i = activeCueIndex(cues, v.currentTime - off);
+          if (i < 0) {
+            toast("no cue to loop");
+            break;
+          }
+          loopRef.current = { idx: i, remaining: Infinity };
+          loopArmTimeRef.current = Date.now();
+          toast("loop on");
+          break;
+        }
+        case "h":
+        case "H":
+          toggleHardMode();
+          break;
+        case "n":
+        case "N":
+          void gotoEpisode(1);
+          break;
+        case "p":
+        case "P":
+          void gotoEpisode(-1);
+          break;
         case "k":
         case "K": {
           // toggle mark-as-known for the popup word or the hovered word
@@ -757,7 +1006,7 @@ export function Player({ entry, toast, settings }: Props) {
     // capture phase: run before any focused element's own key handling
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [changeOffset, toast, clearCloseTimer, resumeFromHover, toggleSidebar, toggleKnown]);
+  }, [changeOffset, toast, clearCloseTimer, resumeFromHover, toggleSidebar, toggleKnown, toggleHardMode, gotoEpisode]);
 
   const primaryText = activeP >= 0 && activeP < displayCues.length ? displayCues[activeP]!.text : "";
   const secondaryText = activeS >= 0 ? secondaryCues[activeS]!.text : "";
@@ -1452,7 +1701,11 @@ export function Player({ entry, toast, settings }: Props) {
           controls
           controlsList="nofullscreen"
         />
-        <div className="sub-overlay">
+        <div
+          className={`sub-overlay${hardMode ? " hardmode" : ""}${
+            hardMode && (isPaused || revealTail) ? " reveal" : ""
+          }`}
+        >
           <div className="sub-primary">
             <TokenLine
               tokens={tokens}

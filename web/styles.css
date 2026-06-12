@@ -455,3 +455,16 @@ textarea.prompt {
   vertical-align: middle;
   user-select: none;
 }
+
+/* --- hard mode (`h`): hide the JP subtitle text while playing, keeping the
+   layout (opacity, not display). Revealed when paused, on overlay hover (the
+   parent class toggles before per-word hover-lookup timers fire), or in the
+   last 0.2s of the cue (delayed reveal, set from the player). */
+.sub-overlay.hardmode .sub-primary {
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.sub-overlay.hardmode .sub-primary:hover,
+.sub-overlay.hardmode.reveal .sub-primary {
+  opacity: 1;
+}

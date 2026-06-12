@@ -86,10 +86,12 @@ async function runServer(arg: string): Promise<void> {
     process.exit(1);
   }
   const root = st.isDirectory() ? target : dirname(target);
-  const handle = await startServer(root, 8417);
+  const handle = await startServer(root, Number(process.env.PORT) || 8417);
   console.log(`zehntage-reactor serving ${root}`);
   console.log(`  ${handle.url}`);
-  Bun.spawn(["xdg-open", handle.url], { stdout: "ignore", stderr: "ignore" }).unref();
+  if (process.env.ZR_NO_OPEN !== "1") {
+    Bun.spawn(["xdg-open", handle.url], { stdout: "ignore", stderr: "ignore" }).unref();
+  }
 }
 
 const argv = process.argv.slice(2);

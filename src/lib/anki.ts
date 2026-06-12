@@ -14,6 +14,10 @@ export interface AnkiCard {
   [key: string]: unknown;
 }
 
+// e2e fake mode: ANKI_FAKE=1 operates on an in-memory map, no network.
+const ankiFake = () => process.env.ANKI_FAKE === "1";
+const fakeCards = new Map<string, AnkiCard>();
+
 async function ankiBase(): Promise<{ base: string; key: string }> {
   const { ankiUrl, ankiKey } = await loadSecrets();
   if (!ankiUrl || !ankiKey) {
@@ -31,6 +35,7 @@ export async function uploadImage(
   bytes: Uint8Array,
   mimeType = "image/jpeg",
 ): Promise<string> {
+  if (ankiFake()) return "fake/upload.jpg";
   const { base } = await ankiBase();
   const resp = await fetch(`${base}/upload`, {
     method: "POST",
@@ -56,6 +61,7 @@ export async function uploadMedia(
   mimeType: string,
   filename: string,
 ): Promise<string> {
+  if (ankiFake()) return `fake/${filename}`;
   const { base } = await ankiBase();
   const form = new FormData();
   form.append("file", new Blob([bytes], { type: mimeType }), filename);
@@ -115,12 +121,14 @@ async function zehntageRequest(
 }
 
 export async function listWords(): Promise<AnkiCard[]> {
+  if (ankiFake()) return [...fakeCards.values()];
   const list = await zehntageRequest("/zehntage/list", "GET");
   return Array.isArray(list) ? (list as AnkiCard[]) : [];
 }
 
 /** New endpoint; may not exist yet on the server — callers fall back gracefully. */
 export async function getProgress(): Promise<Record<string, number> | null> {
+  if (ankiFake()) return {};
   try {
     const data = await zehntageRequest("/zehntage/progress", "GET");
     return data && typeof data === "object" ? (data as Record<string, number>) : null;
@@ -130,9 +138,17 @@ export async function getProgress(): Promise<Record<string, number> | null> {
 }
 
 export async function addCard(card: AnkiCard): Promise<void> {
+  if (ankiFake()) {
+    fakeCards.set(card.front, { ...card });
+    return;
+  }
   await zehntageRequest("/zehntage/add", "POST", card);
 }
 
 export async function deleteCard(front: string): Promise<void> {
+  if (ankiFake()) {
+    fakeCards.delete(front);
+    return;
+  }
   await zehntageRequest("/zehntage/delete", "POST", { front });
 }

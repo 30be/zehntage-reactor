@@ -133,8 +133,33 @@ class WhisperQueue {
     }
   }
 
+  // e2e fake mode: WHISPER_FAKE=1 streams scripted cues over ~2s, no ffmpeg/whisper.
+  private async runFake(job: WhisperJob): Promise<void> {
+    const FAKE_CUES: Cue[] = [
+      { start: 0.5, end: 2.0, text: "勉強します。" },
+      { start: 2.5, end: 4.0, text: "図書館へ行きます。" },
+      { start: 4.5, end: 6.0, text: "気になります。" },
+      { start: 6.5, end: 8.0, text: "本を読みました。" },
+      { start: 8.5, end: 10.0, text: "友達と話します。" },
+      { start: 10.5, end: 12.0, text: "明日も来ます。" },
+    ];
+    this.setStatus(job, "extracting");
+    await new Promise((r) => setTimeout(r, 150));
+    if (job.canceled) return;
+    this.setStatus(job, "running");
+    for (const cue of FAKE_CUES) {
+      await new Promise((r) => setTimeout(r, 300));
+      if (job.canceled) return;
+      job.cues.push(cue);
+      this.emit(job, { type: "cue", cue });
+    }
+    await Bun.write(job.outPath, cuesToSrt(job.cues));
+    this.setStatus(job, "done");
+  }
+
   private async run(job: WhisperJob): Promise<void> {
     if (job.canceled) return;
+    if (process.env.WHISPER_FAKE === "1") return this.runFake(job);
     // 1. Extract 16 kHz mono wav (whisper-cli wants wav input).
     this.setStatus(job, "extracting");
     const wavPath = join(tmpdir(), `zehntage-${job.id}.wav`);

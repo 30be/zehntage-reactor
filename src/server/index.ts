@@ -333,6 +333,9 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
       // --- subtitles ---
       const subsList = path.match(/^\/api\/subs\/([a-f0-9]+)$/);
       if (req.method === "GET" && subsList) {
+        // Refresh so sidecars written since the last scan (e.g. a whisper job
+        // that just finished) show up without requiring a /api/library hit.
+        await library.refresh();
         const entry = library.get(subsList[1]!);
         if (!entry) return err("not found", 404);
         const tracks = await subTracksFor(entry);

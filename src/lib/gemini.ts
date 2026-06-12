@@ -5,6 +5,10 @@ import { loadSecrets } from "./env.ts";
 import { readSettings } from "./settings.ts";
 import type { Cue } from "./subs.ts";
 
+// e2e fake mode: GEMINI_FAKE=1 returns canned fixtures after ~50ms, no network.
+const geminiFake = () => process.env.GEMINI_FAKE === "1";
+const fakeDelay = () => new Promise<void>((r) => setTimeout(r, 50));
+
 const GEMINI_URL =
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent";
 
@@ -137,6 +141,15 @@ export async function lookupWord(
   image?: GeminiImage,
   secondary?: string,
 ): Promise<WordLookup> {
+  if (geminiFake()) {
+    await fakeDelay();
+    return {
+      reading: "フェイク",
+      translation: `перевод(${word})`,
+      notes: `fake-notes(${word})`,
+      context: `<b>${word}</b>のテスト文です。`,
+    };
+  }
   const settings = await readSettings();
   const template = typeof settings.lookupPrompt === "string" ? settings.lookupPrompt : "";
   const ctx = secondary
@@ -191,6 +204,14 @@ export async function explainSentence(
   source: string,
   context = "",
 ): Promise<ExplainResult> {
+  if (geminiFake()) {
+    await fakeDelay();
+    return {
+      breakdown: `fake-breakdown(${sentence})`,
+      idioms: "fake-idioms",
+      translation: `fake-перевод(${sentence})`,
+    };
+  }
   return (await callGemini(
     buildExplainPrompt(sentence, secondary, source, context),
     EXPLAIN_SCHEMA,
@@ -227,6 +248,10 @@ Question: ${p.question}`;
 }
 
 export async function askQuestion(p: AskParams): Promise<{ answer: string }> {
+  if (geminiFake()) {
+    await fakeDelay();
+    return { answer: `fake-answer(${p.question})` };
+  }
   return (await callGemini(buildAskPrompt(p), ASK_SCHEMA)) as { answer: string };
 }
 
@@ -258,6 +283,11 @@ export async function translateCues(
   targetLang: string,
   onProgress?: (done: number, total: number) => void,
 ): Promise<Cue[]> {
+  if (geminiFake()) {
+    await fakeDelay();
+    onProgress?.(cues.length, cues.length);
+    return cues.map((c) => ({ start: c.start, end: c.end, text: `[${targetLang}] ${c.text}` }));
+  }
   const out: Cue[] = [];
   for (let i = 0; i < cues.length; i += BATCH_SIZE) {
     const batch = cues.slice(i, i + BATCH_SIZE);
