@@ -142,11 +142,17 @@ interface AcCardInfo {
 }
 
 async function acProgress(): Promise<Record<string, unknown>> {
-  const [fm, cardIds] = await Promise.all([
+  const [fm, cardIds, dueIds] = await Promise.all([
     acFieldMap(),
     acRaw<number[]>("findCards", { query: `deck:${AC_DECK}` }),
+    // Anki resolves "is:due" itself — no client-side decoding of the
+    // column-encoded `due` field (days vs epoch-seconds depending on queue).
+    acRaw<number[]>("findCards", { query: `deck:${AC_DECK} is:due` }).catch(
+      () => [] as number[],
+    ),
   ]);
   if (cardIds.length === 0) return {};
+  const dueSet = new Set(dueIds);
   const infos = await acRaw<AcCardInfo[]>("cardsInfo", { cards: cardIds });
   const out: Record<string, unknown> = {};
   for (const c of infos) {
@@ -160,6 +166,7 @@ async function acProgress(): Promise<Record<string, unknown>> {
       ease: c.factor,
       queue: c.queue,
       type: c.type,
+      isDue: dueSet.has(c.cardId),
     };
   }
   return out;

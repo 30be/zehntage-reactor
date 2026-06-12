@@ -71,6 +71,8 @@ export interface ProgressEntry {
   ease: number;
   queue: number;
   type: number;
+  /** Anki "is:due" right now (local AnkiConnect path; absent on remote). */
+  isDue?: boolean;
 }
 
 export interface AnkiWordsResponse {

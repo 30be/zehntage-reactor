@@ -1,7 +1,9 @@
 // #/read/<id> — reading mode: fetches the same ja + secondary cues as the
 // Player, injects the tokenizer and a TokenLine-based renderer into <Read>
-// with a simplified click-pinned word popup (deck card first, Gemini lookup
-// otherwise). Jumping a timestamp navigates back to the player.
+// with a click-pinned word popup at parity with the player popup: deck-card
+// or Gemini lookup, Add to Anki (sentence-context mining, no frame/audio),
+// k mark-known, x blacklist, and the ask… follow-up field.
+// Jumping a timestamp navigates back to the player.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type Cue, type LibraryEntry, type WordLookup } from "./api.ts";
@@ -11,6 +13,7 @@ import { buildWordIndex, matchFront, type WordIndex } from "./progress.ts";
 import { getTokenizer, type KToken } from "./tokenizer.ts";
 import { accentOf, loadAccents } from "./accent.ts";
 import { readBlacklist, writeBlacklist } from "./blacklist.ts";
+import { isTextInput } from "./keys.ts";
 import { tmEvent } from "./telemetry.ts";
 
 const isJaLang = (l: string) => l === "ja" || l === "jpn" || l.startsWith("ja");
@@ -22,6 +25,13 @@ interface ReadPopup {
   reading?: string;
   dictForm?: string;
   context: string;
+  /** RU translation of the paragraph (mining context), if present */
+  secondary?: string;
+}
+
+interface QaItem {
+  q: string;
+  a: string | null; // null while loading
 }
 
 export function ReadRoute({
@@ -37,7 +47,7 @@ export function ReadRoute({
   const [secondaryCues, setSecondaryCues] = useState<Cue[] | null>(null);
   const [tokenize, setTokenize] = useState<((t: string) => KToken[]) | null>(null);
   const [wordIndex, setWordIndex] = useState<WordIndex>(() => buildWordIndex([], {}));
-  const [knownWords] = useState<Set<string>>(() => {
+  const [knownWords, setKnownWords] = useState<Set<string>>(() => {
     try {
       const raw = JSON.parse(localStorage.getItem("zr.known") ?? "[]");
       return new Set(Array.isArray(raw) ? raw.filter((w) => typeof w === "string") : []);
@@ -50,10 +60,18 @@ export function ReadRoute({
   const [popup, setPopup] = useState<ReadPopup | null>(null);
   const [lookup, setLookup] = useState<WordLookup | null>(null);
   const [lookupLoading, setLookupLoading] = useState(false);
+  // deck fronts (for the Add/Delete button state), optimistically updated
+  const [knownFronts, setKnownFronts] = useState<Set<string>>(new Set());
   const deckCardsRef = useRef<Map<string, { front: string; back: string; notes: string }>>(
     new Map(),
   );
   const panelRef = useRef<HTMLDivElement>(null);
+
+  // ask… follow-up thread (cleared when the popup retargets/closes)
+  const [qa, setQa] = useState<QaItem[]>([]);
+  const [askText, setAskText] = useState("");
+  const [askBusy, setAskBusy] = useState(false);
+  const askInputRef = useRef<HTMLInputElement>(null);
 
   const furiganaOn = settings.furigana !== false;
   const pitchOn = settings.pitchAccent !== false;
@@ -113,6 +131,11 @@ export function ReadRoute({
         if (cancelled) return;
         setWordIndex(buildWordIndex(a.words, a.progress));
         deckCardsRef.current = new Map(a.words.map((w) => [w.front, w]));
+        setKnownFronts((prev) => {
+          const next = new Set(a.words.map((w) => w.front));
+          for (const f of prev) next.add(f); // keep optimistic adds
+          return next;
+        });
       })
       .catch(() => {});
     void loadAccents()
@@ -123,22 +146,49 @@ export function ReadRoute({
     };
   }, []);
 
-  // close the popup on Esc / outside click
+  const toggleKnown = useCallback((key: string) => {
+    setKnownWords((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      try {
+        localStorage.setItem("zr.known", JSON.stringify([...next]));
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleBlacklist = useCallback((key: string) => {
+    setBlacklist((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      writeBlacklist(next);
+      return next;
+    });
+  }, []);
+
+  // close on Esc / outside click; k/x toggle known/blacklist for the popup
+  // word (mirrors the player hotkeys; e.code = physical key, layout-proof)
   useEffect(() => {
     if (!popup) return;
+    const key = popup.dictForm ?? popup.surface;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setPopup(null);
-      // x toggles blacklist for the popup word (mirrors the player hotkey);
-      // e.code = physical key, so it works on non-Latin layouts too
-      if (e.code === "KeyX" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        const key = popup.dictForm ?? popup.surface;
-        setBlacklist((prev) => {
-          const next = new Set(prev);
-          if (next.has(key)) next.delete(key);
-          else next.add(key);
-          writeBlacklist(next);
-          return next;
-        });
+      if (e.key === "Escape") {
+        setPopup(null);
+        return;
+      }
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      // typing in the ask… field keeps its native behavior
+      if (isTextInput(e.target as Element | null)) return;
+      if (e.code === "KeyX") {
+        toggleBlacklist(key);
+        tmEvent("blacklist", { word: key });
+      } else if (e.code === "KeyK") {
+        toggleKnown(key);
+        tmEvent("mark_known", { word: key });
       }
     };
     const onDown = (e: MouseEvent) => {
@@ -153,7 +203,7 @@ export function ReadRoute({
       window.removeEventListener("keydown", onKey);
       document.removeEventListener("mousedown", onDown);
     };
-  }, [popup]);
+  }, [popup, toggleKnown, toggleBlacklist]);
 
   // simplified lookup: deck card if present, else Gemini
   useEffect(() => {
@@ -191,24 +241,35 @@ export function ReadRoute({
     };
   }, [popup?.surface, popup?.context]);
 
-  const onWordClick = useCallback((tok: KToken, e: React.MouseEvent, ctx: string) => {
-    e.stopPropagation();
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setPopup({
-      x: Math.min(rect.left, window.innerWidth - 340),
-      y: rect.bottom + 6 + window.scrollY,
-      surface: tok.surface_form,
-      reading: tok.reading,
-      dictForm:
-        tok.basic_form && tok.basic_form !== "*" && tok.basic_form !== tok.surface_form
-          ? tok.basic_form
-          : undefined,
-      context: ctx,
-    });
-  }, []);
+  // reset the ask… thread when the popup retargets or closes
+  useEffect(() => {
+    setQa([]);
+    setAskText("");
+    setAskBusy(false);
+  }, [popup?.surface, popup?.context]);
+
+  const onWordClick = useCallback(
+    (tok: KToken, e: React.MouseEvent, ctx: string, secondary?: string) => {
+      e.stopPropagation();
+      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      setPopup({
+        x: Math.min(rect.left, window.innerWidth - 340),
+        y: rect.bottom + 6 + window.scrollY,
+        surface: tok.surface_form,
+        reading: tok.reading,
+        dictForm:
+          tok.basic_form && tok.basic_form !== "*" && tok.basic_form !== tok.surface_form
+            ? tok.basic_form
+            : undefined,
+        context: ctx,
+        secondary,
+      });
+    },
+    [],
+  );
 
   const renderTokenLine = useCallback(
-    (tokens: KToken[] | null, fallback: string) => (
+    (tokens: KToken[] | null, fallback: string, secondary?: string) => (
       <TokenLine
         tokens={tokens}
         fallbackText={fallback}
@@ -218,7 +279,7 @@ export function ReadRoute({
         furiganaOn={furiganaOn}
         accents={accents}
         pitchAccentOn={pitchOn}
-        onWordClick={(tok, e) => onWordClick(tok, e, fallback)}
+        onWordClick={(tok, e) => onWordClick(tok, e, fallback, secondary)}
       />
     ),
     [wordIndex, knownWords, blacklist, furiganaOn, accents, pitchOn, onWordClick],
@@ -230,6 +291,94 @@ export function ReadRoute({
     },
     [id],
   );
+
+  // Same front format as the player popup ("word [reading]").
+  const popupFront = useMemo(() => {
+    if (!popup) return null;
+    const reading = lookup?.reading || popup.reading;
+    return reading ? `${popup.surface} [${reading}]` : popup.surface;
+  }, [popup, lookup]);
+  const popupSaved = popupFront ? knownFronts.has(popupFront) : false;
+
+  // Add to Anki: mining flow with the paragraph as context — no video frame/
+  // audio (no mediaId/timestamp → the server skips capture). Context format:
+  // "JP sentence<br>RU translation<br>source: <doc name>".
+  const onAdd = useCallback(async () => {
+    if (!popup || !lookup || !popupFront || !entry) return;
+    const front = popupFront;
+    setKnownFronts((prev) => new Set(prev).add(front)); // optimistic
+    const docName = entry.name.replace(/\.[^.]+$/, "");
+    try {
+      await (api.ankiAdd as (p: Record<string, unknown>) => Promise<unknown>)({
+        word: popup.surface,
+        reading: lookup.reading || popup.reading || "",
+        translation: lookup.translation,
+        notes: lookup.notes,
+        context: [popup.context, popup.secondary, `source: ${docName}`]
+          .filter((s): s is string => Boolean(s && s.trim()))
+          .join("<br>"),
+      });
+      tmEvent("anki_add_read", { word: popup.surface, mediaId: id });
+    } catch {
+      // revert the optimistic state
+      setKnownFronts((prev) => {
+        const next = new Set(prev);
+        next.delete(front);
+        return next;
+      });
+    }
+  }, [popup, lookup, popupFront, entry, id]);
+
+  const onDelete = useCallback(async () => {
+    if (!popupFront) return;
+    try {
+      await api.ankiDelete(popupFront);
+      setKnownFronts((prev) => {
+        const next = new Set(prev);
+        next.delete(popupFront);
+        return next;
+      });
+      deckCardsRef.current.delete(popupFront);
+    } catch {
+      /* keep the saved state — delete failed */
+    }
+  }, [popupFront]);
+
+  // ask… follow-up (same contract as the player popup)
+  const onAsk = useCallback(async () => {
+    if (!popup || askBusy) return;
+    const q = askText.trim();
+    if (!q) return;
+    setAskText("");
+    setAskBusy(true);
+    setQa((prev) => [...prev, { q, a: null }]);
+    const priorAnswer = [lookup?.reading, lookup?.translation, lookup?.notes]
+      .filter(Boolean)
+      .join("\n");
+    try {
+      const res = await api.ask({
+        question: q,
+        word: popup.surface,
+        sentence: popup.context,
+        priorAnswer,
+        source: entry?.name ?? "",
+      });
+      setQa((prev) =>
+        prev.map((item, i) => (i === prev.length - 1 ? { ...item, a: res.answer } : item)),
+      );
+    } catch (e) {
+      setQa((prev) =>
+        prev.map((item, i) =>
+          i === prev.length - 1
+            ? { ...item, a: `error: ${e instanceof Error ? e.message : e}` }
+            : item,
+        ),
+      );
+    } finally {
+      setAskBusy(false);
+      askInputRef.current?.focus();
+    }
+  }, [popup, askText, askBusy, lookup, entry]);
 
   const popupKey = popup ? popup.dictForm ?? popup.surface : null;
   const readingNode = useMemo(() => {
@@ -287,7 +436,7 @@ export function ReadRoute({
               </span>
             )}
             {popupKey && knownWords.has(popupKey) && (
-              <span className="known-flag" title="Marked as known">
+              <span className="known-flag" title="Marked as known — press k to toggle">
                 known
               </span>
             )}
@@ -300,10 +449,50 @@ export function ReadRoute({
             </>
           )}
           <div className="row">
+            {popupSaved ? (
+              <button
+                className="btn danger"
+                onClick={() => void onDelete()}
+                title="Remove this word from Anki"
+              >
+                Delete
+              </button>
+            ) : (
+              <button
+                className="btn"
+                disabled={!lookup}
+                onClick={() => void onAdd()}
+                title="Add this word to Anki with the sentence as context (no frame/audio)"
+              >
+                Add to Anki
+              </button>
+            )}
             <button className="btn" onClick={() => setPopup(null)}>
               Close
             </button>
           </div>
+          {qa.length > 0 && (
+            <div className="qa">
+              {qa.map((item, i) => (
+                <div key={i} className="qa-item">
+                  <div className="qa-q">{item.q}</div>
+                  <div className="qa-a">{item.a ?? "…"}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          <input
+            ref={askInputRef}
+            className="ask-input"
+            type="text"
+            placeholder="ask…"
+            value={askText}
+            onChange={(e) => setAskText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void onAsk();
+              else if (e.key === "Escape") setPopup(null);
+            }}
+          />
         </div>
       )}
     </>

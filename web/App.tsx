@@ -9,6 +9,8 @@ import {
 } from "./api.ts";
 import { Player } from "./Player.tsx";
 import { ReadRoute } from "./ReadRoute.tsx";
+import { Palette } from "./Palette.tsx";
+import { HOTKEYS } from "./commands.ts";
 import { startSync } from "./sync.ts";
 import { readBlacklist } from "./blacklist.ts";
 import { computeCoverage, readKnownWords, type Coverage } from "./coverage.ts";
@@ -189,6 +191,7 @@ export function App() {
       </main>
 
       {toastMsg && <div className="toast">{toastMsg}</div>}
+      <Palette go={go} toast={toast} settings={settings} setSettings={setSettings} />
     </div>
   );
 }
@@ -264,27 +267,7 @@ function highlightMatch(text: string, q: string): React.ReactNode {
 }
 
 // --- Home / onboarding ---
-
-const HOTKEYS: [string, string][] = [
-  ["space", "play / pause"],
-  ["f", "fullscreen"],
-  ["← →", "prev / next cue (seek)"],
-  ["↑ ↓", "volume"],
-  ["a / r", "replay current cue"],
-  ["s", "shadowing loop current cue (count: Settings)"],
-  ["Tab / Shift+Tab", "cycle subtitle tracks"],
-  ["Shift+→ / Shift+←", "next / previous episode"],
-  ["u", "toggle autopause"],
-  ["h", "hard mode (hide JP while playing)"],
-  ["k", "mark hovered word known"],
-  ["l", "toggle cue-list sidebar"],
-  ["w", "pre-study panel (upcoming words)"],
-  ["b", "hold to peek at the translation"],
-  ["i", "toggle furigana"],
-  ["- / =", "playback speed"],
-  ["[ / ] / \\", "subtitle offset − / + / reset"],
-  ["Esc", "close popups / panels"],
-];
+// (hotkey data lives in web/commands.ts — shared with the `?` overlay)
 
 function Home({ go }: { go: (h: string) => void }) {
   const [root, setRoot] = useState<{ root: string; count: number } | null>(null);
@@ -306,10 +289,10 @@ function Home({ go }: { go: (h: string) => void }) {
       </ol>
       <h2 className="h2">Hotkeys</h2>
       <div className="hotkey-grid">
-        {HOTKEYS.map(([k, desc]) => (
-          <div key={k} className="hotkey-row">
-            <span className="hotkey-key">{k}</span>
-            <span className="hotkey-desc">{desc}</span>
+        {HOTKEYS.map((h) => (
+          <div key={h.keys} className="hotkey-row">
+            <span className="hotkey-key">{h.keys}</span>
+            <span className="hotkey-desc">{h.what}</span>
           </div>
         ))}
       </div>
@@ -707,7 +690,11 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
         .map((w) => w.front)
         .filter((f) => {
           const p = anki.progress[f];
-          return p != null && p.interval > 0 && (p.queue === 1 || p.queue === 2);
+          if (p == null) return false;
+          // Real "is:due" flag from the local AnkiConnect path when present;
+          // otherwise the old interval/queue approximation.
+          if (p.isDue != null) return p.isDue;
+          return p.interval > 0 && (p.queue === 1 || p.queue === 2);
         });
       if (dueFronts.length === 0) return;
       const rows = await api.indexDue(dueFronts).catch(() => null);

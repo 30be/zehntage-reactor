@@ -40,6 +40,9 @@ import {
   BookOpenIcon,
 } from "./icons.tsx";
 import { refreshAnkiWords, useAnkiWordsLive } from "./ankicache.ts";
+import { isModalOpen } from "./keys.ts";
+import { registerCommands } from "./commands.ts";
+import { rankPreStudy } from "./prestudy.ts";
 
 // Module-level cue-token cache: tokenization results survive popup churn AND
 // episode changes (the kuromoji instance already does — getTokenizer() memos
@@ -89,6 +92,10 @@ interface PreStudyItem {
   time: number; // first-occurrence cue midpoint in FILE time (for frame capture)
   checked: boolean;
   added: boolean;
+  /** the only unknown in >=1 window cue — instantly minable (web/prestudy.ts) */
+  iPlusOne?: boolean;
+  /** every occurrence cue is unknown-heavy — demoted, unchecked by default */
+  muddy?: boolean;
 }
 
 interface PreStudyState {
@@ -475,13 +482,16 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         .catch(() => null),
     ]);
     const seen = new Map<string, PreStudyItem>();
+    // per-cue unknown lemma lists, reusing this same tokenization pass —
+    // feeds the i+1 / muddy ranking (web/prestudy.ts)
+    const cueUnknownLemmas: string[][] = [];
     for (const cue of cues) {
+      const unknowns: string[] = [];
       for (const tk of tok.tokenize(cue.text)) {
         if (!isLexical(tk)) continue;
         // particles/auxiliaries aren't study material
         if (tk.pos === "助詞" || tk.pos === "助動詞") continue;
         const key = wordKey(tk);
-        if (seen.has(key)) continue;
         if (knownWordsRef.current.has(key)) continue;
         if (blacklistRef.current.has(key)) continue;
         if (
@@ -493,6 +503,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           ) != null
         )
           continue;
+        unknowns.push(key);
+        if (seen.has(key)) continue;
         seen.set(key, {
           lemma: key,
           reading: tk.reading ? kataToHira(tk.reading) : undefined,
@@ -503,9 +515,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           added: false,
         });
       }
+      cueUnknownLemmas.push(unknowns);
     }
     // mining.prestudyRank order: show-local count desc, global rank asc tiebreak
-    const items = [...seen.values()].sort((a, b) => {
+    const base = [...seen.values()].sort((a, b) => {
       if (showFreq) {
         const ca = showFreq[a.lemma] ?? 0;
         const cb = showFreq[b.lemma] ?? 0;
@@ -513,6 +526,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       }
       return (a.rank ?? Infinity) - (b.rank ?? Infinity);
     });
+    // retention-aware re-rank: i+1 candidates first, muddy ones demoted
+    // (and unchecked by default, top 5 stay checked)
+    const items: PreStudyItem[] = rankPreStudy(base, cueUnknownLemmas);
     // only fill in if the panel is still open
     setPreStudy((prev) => (prev ? { loading: false, items } : prev));
   }, [entry.id]);
@@ -927,6 +943,49 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     [entry.id, primaryId, toast],
   );
 
+  // --- subtitle scale (Shift+= / Shift+-): multiplies the overlay's clamp()
+  // font sizes via the --sub-scale CSS var; persisted in settings.subScale ---
+  const clampSubScale = (v: number) =>
+    Math.min(2, Math.max(0.6, Math.round(v * 10) / 10));
+  const [subScale, setSubScale] = useState(() => {
+    const v = Number(settings.subScale);
+    return Number.isFinite(v) && v > 0 ? clampSubScale(v) : 1;
+  });
+  // settings load async — adopt the saved value once it arrives, unless the
+  // user already adjusted the scale this session
+  const subScaleTouchedRef = useRef(false);
+  useEffect(() => {
+    if (subScaleTouchedRef.current) return;
+    const v = Number(settings.subScale);
+    if (Number.isFinite(v) && v > 0) setSubScale(clampSubScale(v));
+  }, [settings.subScale]);
+  const subScaleSaveTimer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (subScaleSaveTimer.current != null)
+        window.clearTimeout(subScaleSaveTimer.current);
+    },
+    [],
+  );
+  const adjustSubScale = useCallback(
+    (delta: number) => {
+      subScaleTouchedRef.current = true;
+      setSubScale((prev) => {
+        const next = clampSubScale(prev + delta);
+        toast(`subs ×${next.toFixed(1)}`);
+        // debounce the autosave (same settings store the Settings page uses)
+        if (subScaleSaveTimer.current != null)
+          window.clearTimeout(subScaleSaveTimer.current);
+        subScaleSaveTimer.current = window.setTimeout(() => {
+          subScaleSaveTimer.current = null;
+          void api.saveSettings({ subScale: next }).catch(() => {});
+        }, 600);
+        return next;
+      });
+    },
+    [toast],
+  );
+
   // --- resume position: save throttled while playing, restore on metadata ---
   // A deep-link start time (#/play/<id>@t) wins over the saved position, once.
   const startAtRef = useRef<number | null>(
@@ -1272,6 +1331,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       return false;
     };
     const onKey = (e: KeyboardEvent) => {
+      // A modal overlay (command palette / cheatsheet) owns the keyboard.
+      if (isModalOpen()) return;
       // Browser-level combos (Ctrl+L, Cmd+R, Alt+…) are never ours.
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const v = videoRef.current;
@@ -1312,6 +1373,14 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           setPopup(null);
           resumeFromHover();
         }
+        return;
+      }
+      // Shift+= / Shift+- : subtitle scale (e.code = physical key, so it is
+      // layout-independent; plain -/= without shift stay playback speed).
+      if (e.shiftKey && (e.code === "Equal" || e.code === "Minus")) {
+        e.preventDefault();
+        e.stopPropagation();
+        adjustSubScale(e.code === "Equal" ? 0.1 : -0.1);
         return;
       }
       if (!HANDLED.has(kb)) return;
@@ -1541,7 +1610,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       window.removeEventListener("keyup", onKeyUp, true);
       window.removeEventListener("blur", onWinBlur);
     };
-  }, [changeOffset, toast, clearCloseTimer, resumeFromHover, toggleSidebar, toggleKnown, toggleBlacklist, toggleHardMode, gotoEpisode, togglePreStudy, toggleAutopause]);
+  }, [changeOffset, adjustSubScale, toast, clearCloseTimer, resumeFromHover, toggleSidebar, toggleKnown, toggleBlacklist, toggleHardMode, gotoEpisode, togglePreStudy, toggleAutopause]);
 
   const primaryText = activeP >= 0 && activeP < displayCues.length ? displayCues[activeP]!.text : "";
   // Bounds-checked: activeS can be stale for one render after the secondary
@@ -2681,6 +2750,76 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     if (v) v.currentTime = Math.min(v.duration || Infinity, Math.max(0, t));
   }, []);
 
+  // --- command palette: expose player actions (web/commands.ts registry).
+  // Registered once per episode; closures read the latest callbacks via a ref
+  // so the registration never churns with re-renders.
+  const cmdCtxRef = useRef({
+    toggleAutopause,
+    toggleHardMode,
+    toggleSidebar,
+    togglePreStudy,
+    toggleFullscreen,
+    changeOffset,
+    gotoEpisode,
+    onGenerateJa,
+    onTranslateRu,
+    onCondense,
+    primaryText,
+    toast,
+  });
+  cmdCtxRef.current = {
+    toggleAutopause,
+    toggleHardMode,
+    toggleSidebar,
+    togglePreStudy,
+    toggleFullscreen,
+    changeOffset,
+    gotoEpisode,
+    onGenerateJa,
+    onTranslateRu,
+    onCondense,
+    primaryText,
+    toast,
+  };
+  useEffect(() => {
+    const c = () => cmdCtxRef.current;
+    return registerCommands("player", [
+      { id: "pl.autopause", title: "player: toggle autopause", hint: "u", run: () => c().toggleAutopause() },
+      { id: "pl.hard", title: "player: toggle hard mode", hint: "h", run: () => c().toggleHardMode() },
+      { id: "pl.sidebar", title: "player: toggle cue sidebar", hint: "l", run: () => c().toggleSidebar() },
+      { id: "pl.prestudy", title: "player: pre-study panel", hint: "w", run: () => c().togglePreStudy() },
+      { id: "pl.fs", title: "player: fullscreen", hint: "f", run: () => c().toggleFullscreen() },
+      { id: "pl.offset0", title: "player: reset subtitle offset", hint: "\\", run: () => c().changeOffset(null) },
+      { id: "pl.next", title: "player: next episode", hint: "⇧→", run: () => void c().gotoEpisode(1) },
+      { id: "pl.prev", title: "player: previous episode", hint: "⇧←", run: () => void c().gotoEpisode(-1) },
+      {
+        id: "pl.read",
+        title: "player: open in read mode",
+        run: () => {
+          window.location.hash = `#/read/${entry.id}`;
+        },
+      },
+      {
+        id: "pl.copy",
+        title: "player: copy current cue",
+        run: () => {
+          const text = c().primaryText;
+          if (!text) {
+            c().toast("no cue");
+            return;
+          }
+          void navigator.clipboard
+            .writeText(text)
+            .then(() => c().toast("copied"))
+            .catch(() => c().toast("copy failed"));
+        },
+      },
+      { id: "pl.genja", title: "player: generate ja subtitles (whisper)", run: () => void c().onGenerateJa() },
+      { id: "pl.ru", title: "player: translate → ru", run: () => void c().onTranslateRu() },
+      { id: "pl.condense", title: "player: condensed audio", run: () => void c().onCondense() },
+    ]);
+  }, [entry.id]);
+
   const hasJa = tracks.some((t) => isJaLang(t.lang));
   // Only a GENERATED (synced) RU track hides the Translate button; external or
   // embedded RU tracks are often out of sync with the JA track.
@@ -2743,6 +2882,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           className={`sub-overlay${hardMode ? " hardmode" : ""}${
             hardMode && (isPaused || revealTail) ? " reveal" : ""
           }`}
+          style={{ "--sub-scale": subScale } as React.CSSProperties}
         >
           {cuesLoading && !primaryText && (
             <div className="sub-loading">loading subtitles…</div>
@@ -3288,6 +3428,22 @@ export function Player({ entry, startAt, toast, settings }: Props) {
                 >
                   {freqTier(it.rank)}
                 </span>
+                {it.iPlusOne && (
+                  <span
+                    className="badge iplus"
+                    title="The only unknown word in at least one upcoming line — makes a clean card"
+                  >
+                    i+1
+                  </span>
+                )}
+                {it.muddy && (
+                  <span
+                    className="badge muddy"
+                    title="Only appears in lines crowded with unknown words — unchecked by default"
+                  >
+                    muddy
+                  </span>
+                )}
                 {it.added && <span className="ps-added">✓</span>}
               </label>
             ))}

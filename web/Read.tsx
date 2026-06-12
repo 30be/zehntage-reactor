@@ -47,8 +47,13 @@ export interface ReadProps {
   mediaId: string;
   /** Sync tokenizer, or null while kuromoji is still loading. */
   tokenize: ((text: string) => KToken[]) | null;
-  /** Inject the app's TokenLine (already bound to wordIndex/popup handlers). */
-  renderTokenLine: (tokens: KToken[] | null, fallbackText: string) => ReactNode;
+  /** Inject the app's TokenLine (already bound to wordIndex/popup handlers).
+   * `secondary` = the paragraph's RU translation, for mining context. */
+  renderTokenLine: (
+    tokens: KToken[] | null,
+    fallbackText: string,
+    secondary?: string,
+  ) => ReactNode;
   /** Jump playback to t seconds (timestamp margin link click). */
   onJump: (t: number) => void;
   settings?: ReadSettings;
@@ -205,7 +210,11 @@ export function Read({
           </a>
           <div style={{ flex: 1, minWidth: 0 }}>
             <p style={{ margin: 0 }} lang="ja">
-              {renderTokenLine(tokenized?.[i] ?? null, p.lines.join(" "))}
+              {renderTokenLine(
+                tokenized?.[i] ?? null,
+                p.lines.join(" "),
+                p.secondary || undefined,
+              )}
             </p>
             {showSecondary && p.secondary ? (
               <p

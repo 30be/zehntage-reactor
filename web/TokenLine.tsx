@@ -103,6 +103,8 @@ export function TokenLine({
           : matchFront(wordIndex, tok.surface_form, tok.reading, tok.basic_form);
         const inDeck = front != null;
         const color = inDeck ? learningColor(wordIndex.progress[front!]) : null;
+        // due for review right now → subtle dotted underline (SRS hint)
+        const due = inDeck && wordIndex.progress[front!]?.isDue === true;
         const unknown = !localKnown && !inDeck;
         const mature =
           inDeck &&
@@ -117,7 +119,7 @@ export function TokenLine({
         return (
           <span
             key={i}
-            className={`tok${inDeck ? " known" : ""}${unknown ? " unk" : ""}`}
+            className={`tok${inDeck ? " known" : ""}${due ? " due" : ""}${unknown ? " unk" : ""}`}
             style={color ? { color } : undefined}
             onMouseEnter={onWordEnter ? (e) => onWordEnter(tok, e) : undefined}
             onMouseLeave={onWordLeave}

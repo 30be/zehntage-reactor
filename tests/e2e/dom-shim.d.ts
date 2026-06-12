@@ -3,3 +3,4 @@
 declare var document: any;
 declare var window: any;
 declare var KeyboardEvent: any;
+declare var getComputedStyle: any;

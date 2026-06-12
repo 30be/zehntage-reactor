@@ -6,52 +6,83 @@ The minimalist local player that turns anime into your Anki deck.
 
 ## Features
 
-- Local library of your video files — nothing leaves your machine except AI lookups
-- Hover/click any subtitle word for an instant AI lookup with reading and notes
-- One-click Anki cards with video frame, sentence audio, and i+1 example lines
-- Whisper-generated Japanese subtitles for raw video, streamed live while transcribing
-- AI translation of any track into a synced secondary (blurred-until-hover) line
-- Furigana on unknown kanji, with Kanjium pitch-accent marks
-- Smart autopause: stop only on lines that contain unknown words
-- Pre-study panel: bulk-add the unknown words of the next N minutes
-- Hard mode, shadowing loops, per-cue replay, subtitle sync nudging
-- Difficulty heat strip on the seek bar, OP/ED skip, condensed-audio export
-- Reading mode, full-text transcript search, jimaku.cc subtitle search
-- Stats: activity grid, watch time, mining pace, per-episode word coverage
+- Whisper subtitle generation for raw video, streamed live while transcribing,
+  with anti-hallucination cleanup (repeated-cue runs on music/silence collapsed)
+- Gemini word and sentence lookups: hover/click a word for reading + notes,
+  sentence explanations, AI translation into a synced secondary (blurred) line
+- Anki integration: local AnkiConnect when reachable, remote fallback otherwise;
+  one-click cards with video frame and sentence audio
+- Word coloring by Anki interval: new words highlighted, learning words fade
+  from blue to ambient as the SRS interval grows; furigana on unknown kanji
+- Pre-study mode: bulk-add the unknown words of the upcoming minutes
+- Shadowing loops, per-cue replay, smart autopause on lines with unknown words
+- Difficulty heat strip on the seek bar
+- Read mode: full transcripts with the same lookups and hotkeys
+- Stats: activity grid, watch time, mining pace, per-episode coverage
+- jimaku.cc subtitle search
+- Deep links: `#/play/<id>@<seconds>` jumps straight into an episode
 
-## Hotkeys (short list)
-
-| key | action |
-| --- | --- |
-| space / f | play–pause / fullscreen |
-| ← → / Tab | seek / next dialogue line |
-| Shift+→ / Shift+← | next / previous episode |
-| a / s | replay cue / shadowing loop |
-| u | toggle autopause |
-| h / b | hard mode / unblur translation |
-| k / x | mark word known / blacklist |
-| w / l | pre-study panel / cue sidebar |
-| [ ] \\ | subtitle offset −/+/reset |
-
-The Home page in the app lists the full set.
-
-## Install & run
+## Quickstart
 
 ```sh
 bun install
-bun run build:web
-bun run start /path/to/your/library   # opens http://localhost:8417
+bun run src/cli.ts /path/to/media/dir   # serves http://localhost:8417
 ```
 
-Optional tooling for subtitle generation: `ffmpeg` and `whisper-cli`
-(model at `~/models/ggml-medium.bin`), plus a running Anki with AnkiConnect.
+Keys go in `~/.env` (names only — never commit values):
 
-## Environment (~/.env)
+- `GEMINI_API_KEY` — lookups, explanations, translation
+- `ZEHNTAGE_ANKI_URL` / `ZEHNTAGE_ANKI_KEY` — remote Anki fallback
+- `JIMAKU_API_KEY` — jimaku.cc subtitle search
+- `ANKICONNECT_URL` — optional, defaults to local AnkiConnect
 
-- `GEMINI_API_KEY` — word lookups, sentence explanations, translation
-- `JIMAKU_API_KEY` — optional, jimaku.cc subtitle search
-- `ANKICONNECT_URL` — optional, defaults to the local AnkiConnect
-- `PORT` — optional server port
+Subtitle generation needs `ffmpeg` and `whisper-cli`. Other CLI modes:
+`subtitle <lang> [<lang2>] <file>`, `backup [<dir>]`, `backups`.
+
+## Hotkeys
+
+Bindings match physical keys (`e.code`), so they work on any layout.
+`?` in the app shows the full cheatsheet.
+
+| keys | action |
+| --- | --- |
+| space / f | play–pause / fullscreen |
+| ← → / ↑ ↓ | seek ±5s / volume |
+| Tab / Shift+Tab | next / previous cue |
+| a or r / s | replay cue / shadowing loop |
+| , . | frame step back / forward |
+| - = / Shift+- = | speed / subtitle size |
+| [ ] \\ | subtitle offset − / + / reset |
+| Shift+← → | previous / next episode |
+| u / h | autopause / hard mode |
+| l / w | cue sidebar / pre-study panel |
+| b / bb | peek translation / toggle blur |
+| i | picture-in-picture |
+| k / x | mark word known / blacklist |
+| Ctrl+K / ? / Esc | palette / cheatsheet / close |
+
+## Architecture
+
+- Bun server (`src/server/index.ts`) + React SPA (`web/`), hash routing
+- Sidecar subtitles: `subs/<base>.<lang>.srt` next to each video
+- Config + synced `zr.*` state: `~/.config/zehntage-reactor`
+  (override with `ZR_CONFIG_DIR`)
+- Telemetry and backups: `~/.local/share/zehntage-reactor`
+- Pure logic lives in `src/lib/` and `web/*.ts`, bun-testable without DOM
+
+## Development
+
+Gates before shipping:
+
+```sh
+bunx tsc --noEmit
+bun test
+bun run build:web
+bun run test:e2e
+```
+
+E2E (Playwright) runs against port 8499 with `GEMINI_FAKE=1`,
+`WHISPER_FAKE=1`, `ANKI_FAKE=1` — no real keys or Anki needed.
 
 ## Attribution
 
