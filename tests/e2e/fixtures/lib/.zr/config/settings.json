@@ -1,0 +1,12 @@
+{
+  "targetLang": "ja",
+  "knownLang": "ru",
+  "blurSecondary": true,
+  "lookupPrompt": "The learner is a native Russian speaker, fluent in English, learning Japanese. They are studying the word \"{word}\", which appeared in the subtitle lines below. The line containing the word may be marked \"(current)\", with the surrounding \"(prev)\"/\"(next)\" lines included for context; a translation of the current line into a language the learner knows may also be included.\n\nImportant: the word may be a quoted loanword, a proper name, or wordplay rather than its ordinary dictionary sense (e.g. もっと quoted as the loanword \"motto\" = девиз). Use the surrounding lines and the known-language translation line to disambiguate. If the translation line conflicts with the dictionary meaning, prefer the contextual reading and note the dictionary meaning briefly.\n\nProvide four fields:\n- reading: if \"{word}\" is Japanese, its reading in kana (hiragana for native/Sino-Japanese words, katakana for loanwords). Otherwise an empty string.\n- translation: \"{word}\" translated into Russian — or into English if the word is itself Russian. Expand abbreviations using the text.\n- notes: If the studied word is a proper noun naming a real person, place, work, or brand, give a one-sentence encyclopedic abstract — who or what it is and what it is best known for (max ~30 words). Otherwise a short explanation (max ~25 words) that makes the word stick: when the translation loses nuance say what it actually means, and add a memory hook — a kanji breakdown, a genuine cognate or known loanword, a sound-alike, or a vivid image. Never leave this empty.\n- context: the single sentence from the text below that best shows the word in use, trimmed to just that sentence, with the studied word wrapped in <b></b>. If the text below has no usable sentence, invent a short natural one.\n\nExamples:\n- \"図書館\" → reading: \"としょかん\", translation: \"библиотека\", notes: \"図 (рисунок/план) + 書 (книга) + 館 (здание) — 'здание для книг и документов'.\"\n- \"気になる\" → reading: \"きになる\", translation: \"беспокоить, интересовать\", notes: \"буквально 'становиться ки (духом/вниманием)' — что-то засело в голове, фирменная фраза Читанды из «Хёки».\"\n\nSource: {source}\n\nText:\n{context}",
+  "whisperAutoGenerate": false,
+  "furigana": true,
+  "prestudyMinutes": 10,
+  "shadowRepeats": 0,
+  "autopauseMode": "every",
+  "autopauseMinUnknown": 1
+}

@@ -15,6 +15,7 @@ import {
   type SubTrackInfo,
   type WordLookup,
   type ExplainResult,
+  type EncounterHit,
 } from "./api.ts";
 import { activeCueIndex, contextAround } from "./cues.ts";
 import { getTokenizer, isLexical, kataToHira, type KToken } from "./tokenizer.ts";
@@ -196,6 +197,20 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   useEffect(() => {
     autopauseRef.current = autopause;
   }, [autopause]);
+
+  // Smart autopause (from Settings): "every" pauses on every cue end (legacy
+  // behavior), "unknown" only when the cue contains >= N unknown lexical
+  // tokens (no Anki match, not in zr.known). The checkbox stays the master
+  // toggle; mode/threshold live in Settings.
+  const apMode: "every" | "unknown" =
+    settings.autopauseMode === "unknown" ? "unknown" : "every";
+  const apMin = Math.max(1, Math.round(Number(settings.autopauseMinUnknown)) || 1);
+  const apModeRef = useRef(apMode);
+  const apMinRef = useRef(apMin);
+  useEffect(() => {
+    apModeRef.current = apMode;
+    apMinRef.current = apMin;
+  }, [apMode, apMin]);
 
   // Primary-subtitle timing offset (seconds). Positive = subs appear later.
   // Persisted per media+track; applied client-side when computing active cues.
@@ -478,6 +493,11 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   const lookupCache = useRef<Map<string, WordLookup>>(new Map());
   const inflight = useRef<Map<string, Promise<WordLookup>>>(new Map());
 
+  // --- encounter history (word popup): lazy "encounters: N" line ---
+  const [encHits, setEncHits] = useState<EncounterHit[] | null>(null);
+  const [encOpen, setEncOpen] = useState(false);
+  const encCache = useRef<Map<string, EncounterHit[]>>(new Map());
+
   // sentence-structure explain panel state (same panel chrome as word lookups)
   const [explain, setExplain] = useState<ExplainResult | null>(null);
   const [explainLoading, setExplainLoading] = useState(false);
@@ -575,6 +595,52 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   const whisperLive =
     whisperCues.length > 0 && (!primaryId || primaryId === "sidecar:gen:ja");
   const displayCues = whisperLive ? whisperCues : primaryCues;
+
+  // --- smart autopause: per-cue unknown-lexical-token counts (memoized) ---
+  // null while not computed (or mode "every") — the autopause branch treats
+  // null as "pause" so the legacy behavior is the safe default.
+  const cueUnknownsRef = useRef<number[] | null>(null);
+  useEffect(() => {
+    cueUnknownsRef.current = null;
+    if (apMode !== "unknown" || displayCues.length === 0) return;
+    let cancelled = false;
+    void getTokenizer()
+      .then((tok) => {
+        if (cancelled) return;
+        const counts = displayCues.map((c) => {
+          let n = 0;
+          for (const t of tok.tokenize(c.text)) {
+            if (!isLexical(t)) continue;
+            if (t.pos === "助詞" || t.pos === "助動詞") continue; // particles/aux
+            if (knownWords.has(wordKey(t))) continue;
+            if (matchFront(wordIndex, t.surface_form, t.reading, t.basic_form) != null)
+              continue;
+            n++;
+          }
+          return n;
+        });
+        if (!cancelled) cueUnknownsRef.current = counts;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [displayCues, wordIndex, knownWords, apMode]);
+
+  // --- session counters (for the end-of-episode summary overlay) ---
+  const sessionStartRef = useRef(Date.now());
+  const sessCuesRef = useRef(0); // distinct cue entries during playback
+  const sessLookupsRef = useRef(0); // word popups opened
+  const sessCardsRef = useRef(0); // anki cards added (popup + sentence + bulk)
+  const sessKnownRef = useRef(0); // words marked known via `k`
+  const [sessionSummary, setSessionSummary] = useState<{
+    min: number;
+    cues: number;
+    lookups: number;
+    cards: number;
+    known: number;
+    streak: number | null;
+  } | null>(null);
 
   // --- load tracks + anki words ---
   useEffect(() => {
@@ -826,6 +892,18 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         const leftCue =
           prevCue != null && (idx !== prev || t >= prevCue.end);
         if (leftCue && lastAutopausedIdx.current !== prev) {
+          // Smart mode: only pause when the finished cue had >= N unknown
+          // lexical tokens. No data for THIS cue (counts not computed yet,
+          // or a streaming whisper cue appended after the last compute) →
+          // pause, the same safe default as a missing counts array.
+          const cueCount = cueUnknownsRef.current?.[prev];
+          const skip =
+            apModeRef.current === "unknown" &&
+            cueCount != null &&
+            cueCount < apMinRef.current;
+          if (skip) {
+            lastAutopausedIdx.current = prev; // don't re-check this cue
+          } else {
           lastAutopausedIdx.current = prev;
           v.pause();
           internalSeekRef.current = true;
@@ -835,12 +913,14 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           setActiveP(prev);
           setActiveS(activeCueIndex(secondaryCues, v.currentTime));
           return;
+          }
         }
       }
       // Once playback naturally moves into a NEW cue, allow autopausing again.
       if (idx >= 0 && idx !== prev && idx !== lastAutopausedIdx.current) {
         lastAutopausedIdx.current = -1;
       }
+      if (idx >= 0 && idx !== prev) sessCuesRef.current += 1;
       prevActiveP.current = idx;
       setActiveP(idx);
       setActiveS(activeCueIndex(secondaryCues, v.currentTime));
@@ -946,6 +1026,28 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     const onEnded = () => {
       tmEvent("episode_end", { mediaId: entry.id });
       cancelAutoNextRef.current?.();
+      // Session summary overlay (any key/click dismisses it along with the
+      // countdown; the countdown line is rendered inside the panel).
+      setSessionSummary({
+        min: Math.max(1, Math.round((Date.now() - sessionStartRef.current) / 60000)),
+        cues: sessCuesRef.current,
+        lookups: sessLookupsRef.current,
+        cards: sessCardsRef.current,
+        known: sessKnownRef.current,
+        streak: null,
+      });
+      // streak line (cheap aggregate) — fill in async, best-effort
+      void api
+        .statsOverview()
+        .then((ov) => {
+          let streak = 0;
+          for (let i = ov.last30Days.length - 1; i >= 0; i--) {
+            if (ov.last30Days[i]!.wallPlayingSec > 0) streak++;
+            else break;
+          }
+          setSessionSummary((s) => (s ? { ...s, streak } : s));
+        })
+        .catch(() => {});
       toast("Next episode in 5s…");
       const cleanup = () => {
         window.clearTimeout(timer);
@@ -955,6 +1057,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       };
       const cancel = (e: Event) => {
         cleanup();
+        setSessionSummary(null);
         // n/p navigate anyway (the hotkey handler runs first in capture
         // order) — only the timer needs killing, the toast would mislead.
         const k = (e as KeyboardEvent).key;
@@ -1234,6 +1337,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           const key = popupKeyRef.current ?? hoveredKeyRef.current;
           if (!key) break;
           const adding = !knownWordsRef.current.has(key);
+          if (adding) sessKnownRef.current += 1;
           toggleKnown(key);
           tmEvent("mark_known", { word: key });
           toast(adding ? `known: ${key}` : `unknown: ${key}`);
@@ -1342,6 +1446,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       setPreProg(done);
     }
     preBusyRef.current = false;
+    sessCardsRef.current += done - failed;
     tmEvent("prestudy_add", { count: done - failed });
     if (!mountedRef.current) return;
     setPreBusy(false);
@@ -1535,6 +1640,34 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     };
   }, [popup?.kind, popup?.surface, popup?.context, popup?.secondary]);
 
+  // fetch encounter history when a word popup opens (lazy, cached per lemma)
+  useEffect(() => {
+    if (!popup || popup.kind !== "word") {
+      setEncHits(null);
+      setEncOpen(false);
+      return;
+    }
+    setEncOpen(false);
+    const lemma = popup.dictForm ?? popup.surface;
+    const cached = encCache.current.get(lemma);
+    if (cached) {
+      setEncHits(cached);
+      return;
+    }
+    setEncHits(null);
+    let cancelled = false;
+    void api
+      .indexEncounters(lemma, [entry.id])
+      .then((hits) => {
+        encCache.current.set(lemma, hits);
+        if (!cancelled) setEncHits(hits);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [popup?.kind, popup?.surface, popup?.dictForm, entry.id]);
+
   // fetch lookup when popup target changes (default: NO frame — saves latency)
   useEffect(() => {
     if (!popup || popup.kind !== "word") {
@@ -1543,6 +1676,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     }
     setFrameAdded(false);
     setFrameLoading(false);
+    sessLookupsRef.current += 1; // session-summary counter
     // Cache key includes the cue context so the same word in a NEW sentence
     // gets a fresh, context-correct answer instead of a stale cached one.
     const cacheKey = `${popup.surface} ${popup.context}`;
@@ -1706,6 +1840,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         timestamp: v?.currentTime ?? 0,
         ...cueBoundsAt(popup.timestamp),
       });
+      sessCardsRef.current += 1;
       // sync real progress data (color etc.) in the background
       void refreshAnki();
     } catch (e) {
@@ -1741,6 +1876,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         timestamp: v?.currentTime ?? popup.timestamp,
         ...cueBoundsAt(popup.timestamp),
       });
+      sessCardsRef.current += 1;
       void refreshAnki();
     } catch (e) {
       setKnownFronts((prev) => {
@@ -2451,6 +2587,27 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             Skip →
           </button>
         )}
+        {sessionSummary && (
+          <div className="session-summary">
+            <div className="ss-title">session</div>
+            <div className="ss-line">
+              {sessionSummary.min} min · {sessionSummary.cues} cues
+            </div>
+            <div className="ss-line">
+              {sessionSummary.lookups} lookups · {sessionSummary.cards} cards ·{" "}
+              {sessionSummary.known} marked known
+            </div>
+            {sessionSummary.streak != null && (
+              <div className="ss-line ss-dim">
+                streak: {sessionSummary.streak} day
+                {sessionSummary.streak === 1 ? "" : "s"}
+              </div>
+            )}
+            <div className="ss-line ss-dim">
+              next episode in 5s — any key cancels
+            </div>
+          </div>
+        )}
       {popup && (
         <div
           ref={lookupRef}
@@ -2554,6 +2711,42 @@ export function Player({ entry, startAt, toast, settings }: Props) {
               {reloadLoading ? "…" : <RotateCwIcon size={14} />}
             </button>
           </div>
+          {encHits && encHits.length > 0 && (
+            <div className="enc">
+              <div
+                className="enc-line"
+                title="Where else this word appears in the library"
+                onClick={() => setEncOpen((o) => !o)}
+              >
+                encounters: {encHits.reduce((s, h) => s + h.count, 0)}
+              </div>
+              {encOpen &&
+                encHits
+                  .flatMap((h) =>
+                    h.cues.map((c) => ({
+                      mediaId: h.mediaId,
+                      name: h.name,
+                      start: c.start,
+                      text: c.text,
+                    })),
+                  )
+                  .slice(0, 5)
+                  .map((s, i) => (
+                    <div
+                      key={`${s.mediaId}:${s.start}:${i}`}
+                      className="enc-hit"
+                      onClick={() => {
+                        window.location.hash = `#/play/${s.mediaId}@${s.start}`;
+                      }}
+                    >
+                      <span className="enc-meta">
+                        {s.name.replace(/\.[^.]+$/, "")} · {fmtTime(s.start)}
+                      </span>{" "}
+                      {s.text}
+                    </div>
+                  ))}
+            </div>
+          )}
             </>
           )}
 

@@ -3,7 +3,9 @@ import {
   api,
   type AnkiWordsResponse,
   type BatchStatus,
+  type EpisodeDayRow,
   type LibraryEntry,
+  type Overview,
 } from "./api.ts";
 import { Player } from "./Player.tsx";
 import { computeCoverage, readKnownWords, type Coverage } from "./coverage.ts";
@@ -459,6 +461,61 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
   const [coverage, setCoverage] = useState<Map<string, Coverage | null>>(
     () => new Map(),
   );
+  // comprehensibility sort: "name" (default) | "known" (server pctKnown desc)
+  const [sortMode, setSortMode] = useState<"name" | "known">("name");
+  const [knownPct, setKnownPct] = useState<Map<string, number | null> | null>(
+    null,
+  );
+  const [sortBusy, setSortBusy] = useState(false);
+  // entryId -> count of due Anki words appearing in the episode (SRS hint)
+  const [dueCounts, setDueCounts] = useState<Map<string, number>>(() => new Map());
+
+  const toggleSort = useCallback(async () => {
+    if (sortMode === "known") {
+      setSortMode("name");
+      return;
+    }
+    setSortMode("known");
+    if (knownPct || sortBusy) return;
+    setSortBusy(true);
+    try {
+      // known set = local zr.known + Anki card lemmas (front sans reading)
+      const anki = await api.ankiWords().catch(() => ({ words: [], progress: {} }));
+      const known = new Set<string>(readKnownWords());
+      for (const w of anki.words) known.add(w.front.replace(/\s*\[.*$/, "").trim());
+      const rows = await api.indexComprehensibility([...known]);
+      setKnownPct(new Map(rows.map((r) => [r.mediaId, r.pctKnown])));
+    } catch {
+      /* sort silently stays name-equivalent */
+    } finally {
+      setSortBusy(false);
+    }
+  }, [sortMode, knownPct, sortBusy]);
+
+  // SRS hint badges: due-word intersection per entry. Due info is BEST-EFFORT
+  // approximated from Anki progress (interval > 0 && queue in {1,2}) because
+  // the real due date isn't available through /zehntage/progress.
+  useEffect(() => {
+    if (!entries || entries.length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      const anki = await api.ankiWords().catch(() => null);
+      if (!anki || cancelled) return;
+      const dueFronts = anki.words
+        .map((w) => w.front)
+        .filter((f) => {
+          const p = anki.progress[f];
+          return p != null && p.interval > 0 && (p.queue === 1 || p.queue === 2);
+        });
+      if (dueFronts.length === 0) return;
+      const rows = await api.indexDue(dueFronts).catch(() => null);
+      if (!rows || cancelled) return;
+      setDueCounts(new Map(rows.map((r) => [r.mediaId, r.count])));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [entries]);
 
   // Auto-compute episode coverage in idle time: one episode at a time, only
   // entries with subs, abortable on unmount. Never blocks the UI.
@@ -584,9 +641,25 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
         <button className="btn sm" onClick={() => void onBatchAll()}>
           Generate all (ja + ru)
         </button>
+        <button
+          className="btn sm sort-toggle"
+          disabled={sortBusy}
+          title="Sort by name or by comprehensibility (known-word %)"
+          onClick={() => void toggleSort()}
+        >
+          {sortBusy ? "sort: …" : `sort: ${sortMode === "name" ? "name" : "known%"}`}
+        </button>
       </div>
       <div className="grid">
-        {entries.map((e) => (
+        {(sortMode === "known" && knownPct
+          ? entries
+              .slice()
+              .sort(
+                (a, b) =>
+                  (knownPct.get(b.id) ?? -1) - (knownPct.get(a.id) ?? -1),
+              )
+          : entries
+        ).map((e) => (
           <div key={e.id} className="card" onClick={() => go(`#/play/${e.id}`)}>
             <div className="name">{e.name}</div>
             <div className="meta">
@@ -617,6 +690,19 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
                 const b = entryBadge(status, e.id);
                 return b ? <span className="badge jobstatus">{b}</span> : null;
               })()}
+              {(() => {
+                const n = dueCounts.get(e.id) ?? 0;
+                return n > 0 ? (
+                  <span className="badge due" title="Due Anki words in this episode (approx.)">
+                    {n} due word{n === 1 ? "" : "s"}
+                  </span>
+                ) : null;
+              })()}
+              {sortMode === "known" && knownPct?.get(e.id) != null && (
+                <span className="badge known-pct">
+                  {Math.round(knownPct.get(e.id)! * 100)}% known
+                </span>
+              )}
             </div>
           </div>
         ))}
@@ -671,8 +757,13 @@ function Stats({ go }: { go: (h: string) => void }) {
   const [anki, setAnki] = useState<AnkiWordsResponse | null>(null);
   const [summary, setSummary] = useState<import("./api.ts").StatsSummary | null>(null);
 
+  const [episodes, setEpisodes] = useState<EpisodeDayRow[] | null>(null);
+  const [ov, setOv] = useState<Overview | null>(null);
+
   useEffect(() => {
     void api.statsSummary().then(setSummary).catch(() => {});
+    void api.statsEpisodes().then(setEpisodes).catch(() => {});
+    void api.statsOverview().then(setOv).catch(() => {});
   }, []);
   const [coverage, setCoverage] = useState<Map<string, Coverage | null>>(
     () => new Map(),
@@ -791,6 +882,112 @@ function Stats({ go }: { go: (h: string) => void }) {
             from playback-position advance between heartbeats (seeks excluded),
             not from unique cue coverage.
           </div>
+        </>
+      )}
+
+      {episodes && episodes.length > 0 && (
+        <>
+          <h2 className="h2">
+            Episode pace{" "}
+            <a className="csv-link" href="/api/stats/episodes.csv" download>
+              Export CSV
+            </a>
+          </h2>
+          <div className="ep-series">
+            {(() => {
+              // grouped by media, then chronological; cap at the last 60 rows
+              const rows = episodes
+                .slice()
+                .sort((a, b) =>
+                  a.mediaId !== b.mediaId
+                    ? a.mediaId.localeCompare(b.mediaId)
+                    : a.date < b.date
+                      ? -1
+                      : 1,
+                )
+                .slice(-60);
+              const max = Math.max(
+                1,
+                ...rows.map((r) =>
+                  Math.max(r.wallPlayingSec + r.wallPausedSec, r.contentSec),
+                ),
+              );
+              return rows.map((r) => {
+                const e = entries?.find((x) => x.id === r.mediaId);
+                const name = (e?.name ?? r.mediaId).replace(/\.[^.]+$/, "");
+                const wall = r.wallPlayingSec + r.wallPausedSec;
+                return (
+                  <div key={`${r.mediaId} ${r.date}`} className="ep-row">
+                    <span className="ep-name muted">
+                      {name} · {r.date}
+                    </span>
+                    <span className="ep-bars">
+                      <span
+                        className="ep-bar wall"
+                        title={`wall ${fmtMin(wall)}`}
+                        style={{ width: `${(wall / max) * 100}%` }}
+                      />
+                      <span
+                        className="ep-bar content"
+                        title={`content ${fmtMin(r.contentSec)}`}
+                        style={{ width: `${(r.contentSec / max) * 100}%` }}
+                      />
+                    </span>
+                    <span className="ep-coef muted">
+                      {r.coefficient != null
+                        ? `×${r.coefficient.toFixed(2)}`
+                        : "—"}
+                    </span>
+                  </div>
+                );
+              });
+            })()}
+          </div>
+        </>
+      )}
+
+      {ov && (
+        <>
+          <h2 className="h2">Cards / min (30 days, 7d rolling)</h2>
+          <div className="cpm-chart">
+            {(() => {
+              const vals = ov.last30Days.map((d) =>
+                d.wallPlayingSec > 0 ? d.ankiAdds / (d.wallPlayingSec / 60) : 0,
+              );
+              const roll = vals.map((_, i) => {
+                const a = vals.slice(Math.max(0, i - 6), i + 1);
+                return a.reduce((s, x) => s + x, 0) / a.length;
+              });
+              const max = Math.max(0.01, ...roll);
+              return ov.last30Days.map((d, i) => (
+                <span
+                  key={d.date}
+                  className="cpm-col"
+                  title={`${d.date}: ${roll[i]!.toFixed(2)} cards/min`}
+                  style={{ height: `${Math.max(2, (roll[i]! / max) * 100)}%` }}
+                />
+              ));
+            })()}
+          </div>
+          {ov.ankiCumulative.length > 0 && (
+            <>
+              <h2 className="h2">Cumulative cards</h2>
+              <div className="cum-chart">
+                {(() => {
+                  const max =
+                    ov.ankiCumulative[ov.ankiCumulative.length - 1]!.total || 1;
+                  return ov.ankiCumulative.map((p) => (
+                    <span
+                      key={p.date}
+                      className="cum-col"
+                      title={`${p.date}: ${p.total}`}
+                      style={{ height: `${Math.max(2, (p.total / max) * 100)}%` }}
+                    />
+                  ));
+                })()}
+              </div>
+            </>
+          )}
         </>
       )}
 
@@ -1020,6 +1217,12 @@ function Settings({
   const [shadowRepeats, setShadowRepeats] = useState(
     String(Math.max(0, Math.round(Number(settings.shadowRepeats)) || 0)),
   );
+  const [autopauseMode, setAutopauseMode] = useState(
+    settings.autopauseMode === "unknown" ? "unknown" : "every",
+  );
+  const [autopauseMinUnknown, setAutopauseMinUnknown] = useState(
+    String(Math.max(1, Math.round(Number(settings.autopauseMinUnknown)) || 1)),
+  );
   const promptDefault = (settings.lookupPromptDefault as string) || "";
   const [lookupPrompt, setLookupPrompt] = useState(
     (settings.lookupPrompt as string) || promptDefault,
@@ -1033,6 +1236,10 @@ function Settings({
     setFurigana(settings.furigana !== false);
     setPrestudyMinutes(String(Number(settings.prestudyMinutes) || 10));
     setShadowRepeats(String(Math.max(0, Math.round(Number(settings.shadowRepeats)) || 0)));
+    setAutopauseMode(settings.autopauseMode === "unknown" ? "unknown" : "every");
+    setAutopauseMinUnknown(
+      String(Math.max(1, Math.round(Number(settings.autopauseMinUnknown)) || 1)),
+    );
     const def = (settings.lookupPromptDefault as string) || "";
     setLookupPrompt((settings.lookupPrompt as string) || def);
   }, [settings]);
@@ -1050,6 +1257,11 @@ function Settings({
           Math.min(120, Math.round(Number(prestudyMinutes)) || 10),
         ),
         shadowRepeats: Math.max(0, Math.round(Number(shadowRepeats)) || 0),
+        autopauseMode,
+        autopauseMinUnknown: Math.max(
+          1,
+          Math.round(Number(autopauseMinUnknown)) || 1,
+        ),
         lookupPrompt,
       });
       setSettings(next);
@@ -1121,6 +1333,30 @@ function Settings({
             max={99}
             value={shadowRepeats}
             onChange={(e) => setShadowRepeats(e.target.value)}
+          />
+        </div>
+        <div className="field">
+          <label htmlFor="autopauseMode">Autopause mode</label>
+          <select
+            id="autopauseMode"
+            value={autopauseMode}
+            onChange={(e) => setAutopauseMode(e.target.value)}
+          >
+            <option value="every">every cue</option>
+            <option value="unknown">cues with unknown words</option>
+          </select>
+        </div>
+        <div className="field">
+          <label htmlFor="autopauseMinUnknown">
+            Autopause: min unknown words per cue
+          </label>
+          <input
+            id="autopauseMinUnknown"
+            type="number"
+            min={1}
+            max={20}
+            value={autopauseMinUnknown}
+            onChange={(e) => setAutopauseMinUnknown(e.target.value)}
           />
         </div>
         <div className="field">

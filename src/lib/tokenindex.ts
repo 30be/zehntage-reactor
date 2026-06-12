@@ -118,6 +118,13 @@ interface CacheSlot {
 
 const indexCache = new Map<string, CacheSlot>();
 
+// Per-entry in-flight guard: getIndex awaits file stats BEFORE it can check
+// the cache, so two concurrent callers for the same entry both miss it and
+// tokenize twice (stampede — e.g. the library page firing the due-badge and
+// comprehensibility queries at once). Serializing per entry id lets the
+// second caller hit the cache the first one populated.
+const entryLocks = new Map<string, Promise<unknown>>();
+
 async function fileSig(path: string): Promise<string> {
   try {
     const st = await stat(path);
@@ -135,6 +142,25 @@ async function fileSig(path: string): Promise<string> {
  * called on (re)build.
  */
 export async function getIndex(
+  entry: LibraryEntry,
+  cuesProvider: () => Promise<Cue[]>,
+  tokenize?: Tokenize,
+): Promise<EntryIndex> {
+  const prev = entryLocks.get(entry.id) ?? Promise.resolve();
+  const run = prev
+    .catch(() => {}) // a failed predecessor must not poison the chain
+    .then(() => getIndexUnlocked(entry, cuesProvider, tokenize));
+  const tail = run.catch(() => {});
+  entryLocks.set(entry.id, tail);
+  try {
+    return await run;
+  } finally {
+    // drop the chain tail once settled so the map stays library-sized
+    if (entryLocks.get(entry.id) === tail) entryLocks.delete(entry.id);
+  }
+}
+
+async function getIndexUnlocked(
   entry: LibraryEntry,
   cuesProvider: () => Promise<Cue[]>,
   tokenize?: Tokenize,

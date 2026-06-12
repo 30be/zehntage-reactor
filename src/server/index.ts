@@ -54,8 +54,20 @@ import {
   logEvent,
   logEvents,
   statsSummary,
+  readEvents,
+  episodeSeries,
+  overview,
+  toCsv,
   type TelemetryEvent,
 } from "../lib/telemetry.ts";
+import {
+  getIndex,
+  clearIndexCache,
+  encounters,
+  comprehensibility,
+  dueIntersection,
+  type EntryIndex,
+} from "../lib/tokenindex.ts";
 
 const PUBLIC_DIR = join(import.meta.dir, "..", "..", "public");
 
@@ -347,6 +359,49 @@ async function buildSearchIndex(entry: LibraryEntry): Promise<SearchIndexEntry |
   }
   searchIndex.set(entry.id, idx);
   return idx;
+}
+
+// --- lemma index (tokenindex.ts) lazy per-entry building -------------------
+//
+// getIndex() caches per entry (mtime-keyed); this set tracks which entries
+// have EVER been built in this process so cross-library queries (encounters)
+// can restrict themselves to "already indexed + explicitly requested" instead
+// of tokenizing the whole library on the first popup.
+const builtIndexIds = new Set<string>();
+
+/** Build (or fetch the cached) lemma index for an entry's best ja track. */
+async function entryIndexFor(entry: LibraryEntry): Promise<EntryIndex | null> {
+  const trackId = await bestJapaneseTrackId(entry);
+  if (!trackId) return null;
+  try {
+    const ix = await getIndex(entry, () => cuesForTrack(entry, trackId));
+    builtIndexIds.add(entry.id);
+    return ix;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Collect indexes across the library with a build budget: entries already
+ * indexed are free; at most `buildBudget` NEW entries get tokenized per call.
+ */
+async function collectIndexes(
+  entries: LibraryEntry[],
+  buildBudget: number,
+): Promise<Map<string, EntryIndex>> {
+  const out = new Map<string, EntryIndex>();
+  let budget = buildBudget;
+  for (const entry of entries) {
+    const isNew = !builtIndexIds.has(entry.id);
+    if (isNew) {
+      if (budget <= 0) continue;
+      budget--;
+    }
+    const ix = await entryIndexFor(entry);
+    if (ix) out.set(entry.id, ix);
+  }
+  return out;
 }
 
 /**
@@ -955,6 +1010,8 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
           await migrateGeneratedSidecars(p).catch(() => {});
           await library.refresh();
           searchIndex.clear();
+          clearIndexCache();
+          builtIndexIds.clear();
           // Persist so the next argument-less CLI start reuses this root.
           await writeSettings({ mediaRoot: p });
           return json({ root: currentRoot, count: library.list().length });
@@ -973,6 +1030,123 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
 
       if (req.method === "GET" && path === "/api/stats/summary") {
         return json(await statsSummary());
+      }
+
+      // --- analytics v2: per-(media,day) series, overview, CSV export ---
+      if (req.method === "GET" && path === "/api/stats/episodes") {
+        return json(episodeSeries(await readEvents()));
+      }
+      if (req.method === "GET" && path === "/api/stats/episodes.csv") {
+        return new Response(toCsv(episodeSeries(await readEvents())), {
+          headers: {
+            "Content-Type": "text/csv; charset=utf-8",
+            "Content-Disposition": 'attachment; filename="episodes.csv"',
+          },
+        });
+      }
+      if (req.method === "GET" && path === "/api/stats/overview") {
+        return json(overview(await readEvents()));
+      }
+
+      // --- lemma index queries (lazy per-entry indexes, ja track) ---
+      if (req.method === "GET" && path === "/api/index/encounters") {
+        const lemma = (url.searchParams.get("lemma") ?? "").trim();
+        if (!lemma) return err("lemma required", 400);
+        const wanted = new Set(
+          (url.searchParams.get("mediaIds") ?? "")
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean),
+        );
+        const entries = library.list();
+        // Only entries already indexed + explicitly requested ones get built;
+        // a popup hover must never trigger a full-library tokenize.
+        const scope = entries.filter(
+          (e) => wanted.has(e.id) || builtIndexIds.has(e.id),
+        );
+        const indexes = await collectIndexes(scope, wanted.size || 1);
+        const names = new Map(entries.map((e) => [e.id, e.name]));
+        return json(
+          encounters(lemma, indexes.values()).map((h) => ({
+            ...h,
+            name: names.get(h.mediaId) ?? h.mediaId,
+          })),
+        );
+      }
+
+      if (
+        path === "/api/index/comprehensibility" &&
+        (req.method === "GET" || req.method === "POST")
+      ) {
+        let known: string[] = [];
+        if (req.method === "POST") {
+          const body = (await req.json().catch(() => ({}))) as { known?: unknown };
+          if (Array.isArray(body.known))
+            known = body.known.filter((k): k is string => typeof k === "string");
+        } else {
+          known = (url.searchParams.get("known") ?? "")
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean);
+        }
+        const knownSet = new Set(known);
+        const entries = library.list();
+        const indexes = await collectIndexes(entries, 30); // budget: ≤30 new builds
+        const out: {
+          mediaId: string;
+          name: string;
+          pctKnown: number | null;
+          unknown: { lemma: string; count: number }[];
+        }[] = [];
+        for (const entry of entries) {
+          const ix = indexes.get(entry.id);
+          if (!ix) continue;
+          const c = comprehensibility(ix, knownSet, 10);
+          out.push({
+            mediaId: entry.id,
+            name: entry.name,
+            pctKnown: c.pctKnown,
+            unknown: c.unknownLemmas,
+          });
+        }
+        return json(out);
+      }
+
+      if (req.method === "POST" && path === "/api/index/due") {
+        const body = (await req.json().catch(() => ({}))) as {
+          dueFronts?: unknown;
+        };
+        if (!Array.isArray(body.dueFronts))
+          return err("dueFronts array required", 400);
+        // Anki fronts are "word" or "word [reading]" — the index keys on lemmas.
+        const dueSet = new Set(
+          body.dueFronts
+            .filter((f): f is string => typeof f === "string")
+            .map((f) => f.replace(/\s*\[.*$/, "").trim())
+            .filter(Boolean),
+        );
+        const entries = library.list();
+        const indexes = await collectIndexes(entries, 30);
+        const out: {
+          mediaId: string;
+          name: string;
+          count: number;
+          lemmas: { lemma: string; count: number }[];
+        }[] = [];
+        for (const entry of entries) {
+          const ix = indexes.get(entry.id);
+          if (!ix) continue;
+          const di = dueIntersection(ix, dueSet);
+          out.push({
+            mediaId: entry.id,
+            name: entry.name,
+            count: di.count,
+            lemmas: di.lemmas
+              .slice(0, 10)
+              .map(({ lemma, count }) => ({ lemma, count })),
+          });
+        }
+        return json(out);
       }
 
       // --- settings ---

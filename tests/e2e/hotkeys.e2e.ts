@@ -36,6 +36,11 @@ test("a replays the current cue (currentTime jumps back to cue start)", async ({
 
 test("-/= change playbackRate, [/] show offset toast", async ({ page }) => {
   await openPlayer(page, "clip.mp4");
+  // Wait for the track auto-selection to settle: the per-track offset restore
+  // (keyed by primaryId) would otherwise reset an offset set mid-load.
+  await expect(
+    page.locator(".track-pick select").first(),
+  ).toHaveValue(/sidecar|embedded/);
   await page.keyboard.press("=");
   await expect(video(page)).toHaveJSProperty("playbackRate", 1.25);
   await expect(page.locator(".toast")).toContainText("speed 1.25×");

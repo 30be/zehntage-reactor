@@ -165,6 +165,71 @@ export interface StatsSummary {
   media: MediaSummary[];
 }
 
+// --- analytics v2 ---
+
+export interface EpisodeDayRow {
+  mediaId: string;
+  date: string;
+  wallPlayingSec: number;
+  wallPausedSec: number;
+  contentSec: number;
+  coefficient: number | null;
+  lookups: number;
+  ankiAdds: number;
+  cardsPerMin: number | null;
+}
+
+export interface OverviewDay {
+  date: string;
+  wallPlayingSec: number;
+  wallPausedSec: number;
+  contentSec: number;
+  lookups: number;
+  ankiAdds: number;
+}
+
+export interface Overview {
+  totals: {
+    wallPlayingSec: number;
+    wallPausedSec: number;
+    contentSec: number;
+    lookups: number;
+    ankiAdds: number;
+    mediaCount: number;
+  };
+  last30Days: OverviewDay[];
+  ankiCumulative: { date: string; total: number }[];
+}
+
+// --- lemma index queries ---
+
+export interface EncounterCue {
+  idx: number;
+  start: number;
+  text: string;
+}
+
+export interface EncounterHit {
+  mediaId: string;
+  name: string;
+  count: number;
+  cues: EncounterCue[];
+}
+
+export interface ComprehensibilityRow {
+  mediaId: string;
+  name: string;
+  pctKnown: number | null;
+  unknown: { lemma: string; count: number }[];
+}
+
+export interface DueRow {
+  mediaId: string;
+  name: string;
+  count: number;
+  lemmas: { lemma: string; count: number }[];
+}
+
 export const api = {
   library: () => jget<LibraryEntry[]>("/api/library"),
   mediaInfo: (id: string) => jget<MediaInfo>(`/api/media/${id}/info`),
@@ -234,6 +299,20 @@ export const api = {
   getRoot: () => jget<RootInfo>("/api/root"),
   setRoot: (path: string) => jpost<RootInfo>("/api/root", { path }),
   statsSummary: () => jget<StatsSummary>("/api/stats/summary"),
+  statsEpisodes: () => jget<EpisodeDayRow[]>("/api/stats/episodes"),
+  statsOverview: () => jget<Overview>("/api/stats/overview"),
+  indexEncounters: (lemma: string, mediaIds?: string[]) =>
+    jget<EncounterHit[]>(
+      `/api/index/encounters?lemma=${encodeURIComponent(lemma)}${
+        mediaIds && mediaIds.length
+          ? `&mediaIds=${encodeURIComponent(mediaIds.join(","))}`
+          : ""
+      }`,
+    ),
+  indexComprehensibility: (known: string[]) =>
+    jpost<ComprehensibilityRow[]>("/api/index/comprehensibility", { known }),
+  indexDue: (dueFronts: string[]) =>
+    jpost<DueRow[]>("/api/index/due", { dueFronts }),
   getSettings: () => jget<Record<string, unknown>>("/api/settings"),
   saveSettings: (patch: Record<string, unknown>) =>
     jpost<Record<string, unknown>>("/api/settings", patch),

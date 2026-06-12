@@ -83,6 +83,9 @@ test("library root line shows the path; bad path errors with a toast", async ({ 
   const line = page.locator(".root-line");
   await expect(line).toContainText("fixtures/lib");
   await line.click();
+  // Wait for the async browse response to populate the input — it would
+  // otherwise overwrite a value typed mid-flight (race).
+  await expect(page.locator(".root-input")).toHaveValue(/fixtures\/lib/);
   await page.locator(".root-input").fill("/definitely/not/a/dir");
   await page.locator(".root-line .btn", { hasText: "Set" }).click();
   await expect(page.locator(".toast")).toContainText("Set root failed");
