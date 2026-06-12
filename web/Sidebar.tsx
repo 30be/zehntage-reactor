@@ -1,0 +1,202 @@
+// Language-Reactor-style subtitle list: a collapsible right-hand column with
+// every primary cue (timestamp + tokenized JP + matching RU line). Current cue
+// is highlighted and auto-scrolled into view; manual scrolling pauses the
+// autoscroll for a few seconds. Cheap virtualization: only ±WINDOW cues around
+// the active one are rendered, with spacer divs standing in for the rest.
+
+import { useEffect, useRef, useState } from "react";
+import type { Cue } from "./api.ts";
+import { activeCueIndex } from "./cues.ts";
+import { getTokenizer, type KToken } from "./tokenizer.ts";
+import type { WordIndex } from "./progress.ts";
+import { TokenLine } from "./TokenLine.tsx";
+
+const WINDOW = 40; // cues rendered on each side of the active one
+const EST_ROW = 60; // estimated row height (px) for the spacers
+const USER_SCROLL_PAUSE_MS = 5000;
+
+const fmtTime = (s: number): string => {
+  if (!Number.isFinite(s) || s < 0) s = 0;
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${String(sec).padStart(2, "0")}`;
+};
+
+interface RowProps {
+  cue: Cue;
+  secondary: string;
+  active: boolean;
+  tokenCache: Map<string, KToken[]>;
+  onSeek: () => void;
+  wordIndex: WordIndex;
+  knownWords: Set<string>;
+  furiganaOn: boolean;
+  onWordEnter: (tok: KToken, e: React.MouseEvent, ctx: string) => void;
+  onWordLeave: () => void;
+  onWordClick: (tok: KToken, e: React.MouseEvent, ctx: string) => void;
+  rowRef?: React.Ref<HTMLDivElement>;
+}
+
+function CueRow({
+  cue,
+  secondary,
+  active,
+  tokenCache,
+  onSeek,
+  wordIndex,
+  knownWords,
+  furiganaOn,
+  onWordEnter,
+  onWordLeave,
+  onWordClick,
+  rowRef,
+}: RowProps) {
+  const [tokens, setTokens] = useState<KToken[] | null>(
+    () => tokenCache.get(cue.text) ?? null,
+  );
+  useEffect(() => {
+    const cached = tokenCache.get(cue.text);
+    if (cached) {
+      setTokens(cached);
+      return;
+    }
+    let cancelled = false;
+    void getTokenizer()
+      .then((tok) => {
+        if (cancelled) return;
+        const ts = tok.tokenize(cue.text);
+        tokenCache.set(cue.text, ts);
+        setTokens(ts);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [cue.text, tokenCache]);
+
+  return (
+    <div ref={rowRef} className={`cue-row${active ? " active" : ""}`}>
+      <span
+        className="cue-time"
+        title="Jump to this line"
+        onClick={onSeek}
+      >
+        {fmtTime(cue.start)}
+      </span>
+      <div className="cue-body">
+        <div className="cue-text">
+          <TokenLine
+            tokens={tokens}
+            fallbackText={cue.text}
+            wordIndex={wordIndex}
+            knownWords={knownWords}
+            furiganaOn={furiganaOn}
+            onWordEnter={(tok, e) => onWordEnter(tok, e, cue.text)}
+            onWordLeave={onWordLeave}
+            onWordClick={(tok, e) => onWordClick(tok, e, cue.text)}
+          />
+        </div>
+        {secondary && <div className="cue-sec">{secondary}</div>}
+      </div>
+    </div>
+  );
+}
+
+export interface SidebarProps {
+  cues: Cue[];
+  secondaryCues: Cue[];
+  activeIdx: number;
+  subOffset: number;
+  onSeek: (videoTime: number) => void;
+  wordIndex: WordIndex;
+  knownWords: Set<string>;
+  furiganaOn: boolean;
+  onWordEnter: (tok: KToken, e: React.MouseEvent, ctx: string) => void;
+  onWordLeave: () => void;
+  onWordClick: (tok: KToken, e: React.MouseEvent, ctx: string) => void;
+}
+
+export function Sidebar({
+  cues,
+  secondaryCues,
+  activeIdx,
+  subOffset,
+  onSeek,
+  wordIndex,
+  knownWords,
+  furiganaOn,
+  onWordEnter,
+  onWordLeave,
+  onWordClick,
+}: SidebarProps) {
+  const tokenCache = useRef<Map<string, KToken[]>>(new Map());
+  const activeRowRef = useRef<HTMLDivElement>(null);
+  // last position we centered the window on, kept while between cues
+  const lastCenterRef = useRef(0);
+  // autoscroll guard: ignore programmatic scrolls, pause after user scrolls
+  const programmaticRef = useRef(false);
+  const userScrollUntilRef = useRef(0);
+
+  if (activeIdx >= 0) lastCenterRef.current = activeIdx;
+  const center = activeIdx >= 0 ? activeIdx : lastCenterRef.current;
+  const start = Math.max(0, center - WINDOW);
+  const end = Math.min(cues.length, center + WINDOW + 1);
+
+  // auto-scroll the active row into view on natural cue changes
+  useEffect(() => {
+    if (activeIdx < 0) return;
+    if (Date.now() < userScrollUntilRef.current) return;
+    const el = activeRowRef.current;
+    if (!el) return;
+    programmaticRef.current = true;
+    el.scrollIntoView({ block: "nearest" });
+    const t = window.setTimeout(() => {
+      programmaticRef.current = false;
+    }, 250);
+    return () => window.clearTimeout(t);
+  }, [activeIdx]);
+
+  const onScroll = () => {
+    if (programmaticRef.current) return;
+    userScrollUntilRef.current = Date.now() + USER_SCROLL_PAUSE_MS;
+  };
+
+  if (cues.length === 0) {
+    return (
+      <div className="cue-sidebar empty-list">
+        <span className="muted">no subtitles</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="cue-sidebar" onScroll={onScroll}>
+      {start > 0 && <div style={{ height: start * EST_ROW }} />}
+      {cues.slice(start, end).map((cue, k) => {
+        const i = start + k;
+        // RU line shown at the cue's midpoint; secondary cues live in raw
+        // video time, primary cues in track time (hence + subOffset).
+        const mid = (cue.start + cue.end) / 2 + subOffset;
+        const si = activeCueIndex(secondaryCues, mid);
+        return (
+          <CueRow
+            key={`${i}:${cue.start}`}
+            cue={cue}
+            secondary={si >= 0 ? secondaryCues[si]!.text : ""}
+            active={i === activeIdx}
+            tokenCache={tokenCache.current}
+            onSeek={() => onSeek(Math.max(0, cue.start + subOffset))}
+            wordIndex={wordIndex}
+            knownWords={knownWords}
+            furiganaOn={furiganaOn}
+            onWordEnter={onWordEnter}
+            onWordLeave={onWordLeave}
+            onWordClick={onWordClick}
+            rowRef={i === activeIdx ? activeRowRef : undefined}
+          />
+        );
+      })}
+      {end < cues.length && <div style={{ height: (cues.length - end) * EST_ROW }} />}
+    </div>
+  );
+}

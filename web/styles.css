@@ -364,3 +364,65 @@ textarea.prompt {
   user-select: none;
   letter-spacing: 0;
 }
+
+/* ---- cue-list sidebar (toggle: `l`; appended) ---- */
+.stage-row { display: flex; gap: 14px; align-items: stretch; }
+.stage-row .video-stage { flex: 1; min-width: 0; }
+.cue-sidebar {
+  width: 340px;
+  flex: none;
+  max-height: 72vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 0;
+  background: var(--bg);
+}
+.cue-sidebar.empty-list {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+}
+.cue-row {
+  display: flex;
+  gap: 10px;
+  padding: 6px 12px;
+  border-left: 2px solid transparent;
+}
+.cue-row.active { background: var(--muted-bg); border-left-color: var(--accent); }
+.cue-row .cue-time {
+  flex: none;
+  padding-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.cue-row .cue-time:hover { text-decoration: underline; color: var(--fg); }
+.cue-row .cue-body { min-width: 0; }
+.cue-row .cue-text { font-size: 15px; line-height: 1.9; ruby-position: over; }
+.cue-row .cue-text rt {
+  font-size: 0.45em;
+  font-weight: 400;
+  opacity: 0.7;
+  user-select: none;
+  letter-spacing: 0;
+}
+/* sidebar sits on a light background — darker hover than the overlay's */
+.cue-sidebar .tok:hover { background: rgba(0, 0, 0, 0.08); }
+.cue-row .cue-sec { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+/* ---- local known-word indicator in the lookup popup (appended) ---- */
+.lookup .known-flag {
+  margin-left: 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #71717a;
+  border: 1px solid #3f3f46;
+  border-radius: 999px;
+  padding: 1px 7px;
+  vertical-align: middle;
+  user-select: none;
+}

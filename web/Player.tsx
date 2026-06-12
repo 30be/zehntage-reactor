@@ -17,15 +17,10 @@ import {
   type ExplainResult,
 } from "./api.ts";
 import { activeCueIndex, contextAround } from "./cues.ts";
-import { getTokenizer, isLexical, type KToken } from "./tokenizer.ts";
-import {
-  buildWordIndex,
-  matchFront,
-  progressBucket,
-  progressColor,
-  type WordIndex,
-} from "./progress.ts";
-import { kataToHira } from "./tokenizer.ts";
+import { getTokenizer, type KToken } from "./tokenizer.ts";
+import { buildWordIndex, type WordIndex } from "./progress.ts";
+import { TokenLine, wordKey } from "./TokenLine.tsx";
+import { Sidebar } from "./Sidebar.tsx";
 
 interface Props {
   entry: LibraryEntry;
@@ -136,6 +131,61 @@ export function Player({ entry, toast, settings }: Props) {
     buildWordIndex([], {}),
   );
   const [knownFronts, setKnownFronts] = useState<Set<string>>(new Set());
+
+  // --- local mark-as-known set (no Anki): zr.known, toggled with `k` ---
+  const [knownWords, setKnownWords] = useState<Set<string>>(() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem("zr.known") ?? "[]");
+      return new Set(Array.isArray(raw) ? raw.filter((w) => typeof w === "string") : []);
+    } catch {
+      return new Set();
+    }
+  });
+  const knownWordsRef = useRef(knownWords);
+  useEffect(() => {
+    knownWordsRef.current = knownWords;
+  }, [knownWords]);
+  const toggleKnown = useCallback((key: string) => {
+    setKnownWords((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      try {
+        localStorage.setItem("zr.known", JSON.stringify([...next]));
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }, []);
+  // word the cursor currently rests on (for the `k` hotkey before any popup)
+  const hoveredKeyRef = useRef<string | null>(null);
+
+  // --- cue-list sidebar (toggled with `l`, persisted) ---
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    try {
+      return localStorage.getItem("zr.sidebar") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleSidebar = useCallback(() => {
+    setSidebarOpen((o) => {
+      const next = !o;
+      try {
+        localStorage.setItem("zr.sidebar", next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }, []);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  useEffect(() => {
+    const onFs = () => setIsFullscreen(document.fullscreenElement != null);
+    document.addEventListener("fullscreenchange", onFs);
+    return () => document.removeEventListener("fullscreenchange", onFs);
+  }, []);
 
   const [popup, setPopup] = useState<PopupState | null>(null);
   // Click-to-pin: a pinned panel ignores all hover-out close paths and only
@@ -461,8 +511,14 @@ export function Player({ entry, toast, settings }: Props) {
 
   // popup-open flag for the hotkey handler (Escape closes the lookup panel)
   const popupOpenRef = useRef(false);
+  // known-set key of the word popup currently open (for the `k` hotkey)
+  const popupKeyRef = useRef<string | null>(null);
   useEffect(() => {
     popupOpenRef.current = popup != null;
+    popupKeyRef.current =
+      popup && popup.kind === "word"
+        ? popup.dictForm ?? popup.surface
+        : null;
   }, [popup]);
 
   // --- global hotkeys: work regardless of focus (except real text inputs) ---
@@ -474,6 +530,7 @@ export function Player({ entry, toast, settings }: Props) {
       "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
       ",", "<", ".", ">",
       "a", "A", "-", "=", "[", "]", "\\",
+      "l", "L", "k", "K",
     ]);
     const isTextInput = (el: Element | null): boolean => {
       if (!el) return false;
@@ -508,7 +565,7 @@ export function Player({ entry, toast, settings }: Props) {
       }
       if (!HANDLED.has(e.key)) return;
       // Avoid double-toggle on key auto-repeat for toggling keys.
-      if (e.repeat && (e.key === " " || e.key === "f" || e.key === "F")) {
+      if (e.repeat && [" ", "f", "F", "l", "L", "k", "K"].includes(e.key)) {
         e.preventDefault();
         e.stopPropagation();
         return;
@@ -601,12 +658,26 @@ export function Player({ entry, toast, settings }: Props) {
         case "\\":
           changeOffset(null);
           break;
+        case "l":
+        case "L":
+          toggleSidebar();
+          break;
+        case "k":
+        case "K": {
+          // toggle mark-as-known for the popup word or the hovered word
+          const key = popupKeyRef.current ?? hoveredKeyRef.current;
+          if (!key) break;
+          const adding = !knownWordsRef.current.has(key);
+          toggleKnown(key);
+          toast(adding ? `known: ${key}` : `unknown: ${key}`);
+          break;
+        }
       }
     };
     // capture phase: run before any focused element's own key handling
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [changeOffset, toast, clearCloseTimer, resumeFromHover]);
+  }, [changeOffset, toast, clearCloseTimer, resumeFromHover, toggleSidebar, toggleKnown]);
 
   const primaryText = activeP >= 0 ? primaryCues[activeP]!.text : "";
   const secondaryText = activeS >= 0 ? secondaryCues[activeS]!.text : "";
@@ -644,10 +715,11 @@ export function Player({ entry, toast, settings }: Props) {
   // word for HOVER_OPEN_MS. Sliding across a sentence cancels pending opens,
   // so no lookup storm. The per-surface lookupCache keeps revisits instant.
   const buildWordPopup = useCallback(
-    (tok: KToken, el: HTMLElement): PopupState => {
+    (tok: KToken, el: HTMLElement, ctxOverride?: string): PopupState => {
       const surface = tok.surface_form;
       const rect = el.getBoundingClientRect();
-      const ctx = contextAround(primaryCues, activeP) || primaryText;
+      const ctx =
+        ctxOverride || contextAround(primaryCues, activeP) || primaryText;
       return {
         kind: "word",
         surface,
@@ -667,7 +739,8 @@ export function Player({ entry, toast, settings }: Props) {
   );
 
   const onWordEnter = useCallback(
-    (tok: KToken, e: React.MouseEvent) => {
+    (tok: KToken, e: React.MouseEvent, ctx?: string) => {
+      hoveredKeyRef.current = wordKey(tok); // `k` targets the hovered word
       if (pinnedRef.current) return; // pinned panel owns the screen
       clearCloseTimer();
       clearOpenTimer();
@@ -677,7 +750,7 @@ export function Player({ entry, toast, settings }: Props) {
         // Pause on hover so the learner can read at leisure; remember that WE
         // paused so closing the popup resumes playback.
         pauseForHover();
-        setPopup(buildWordPopup(tok, el));
+        setPopup(buildWordPopup(tok, el, ctx));
       }, HOVER_OPEN_MS);
     },
     [buildWordPopup, clearOpenTimer, clearCloseTimer, pauseForHover],
@@ -686,12 +759,12 @@ export function Player({ entry, toast, settings }: Props) {
   // Click a word: open immediately and PIN — no hover-out auto-close. Clicking
   // another word retargets the pinned panel.
   const onWordClick = useCallback(
-    (tok: KToken, e: React.MouseEvent) => {
+    (tok: KToken, e: React.MouseEvent, ctx?: string) => {
       e.stopPropagation();
       clearOpenTimer();
       clearCloseTimer();
       pauseForHover();
-      setPopup(buildWordPopup(tok, e.currentTarget as HTMLElement));
+      setPopup(buildWordPopup(tok, e.currentTarget as HTMLElement, ctx));
       setPinned(true);
     },
     [buildWordPopup, clearOpenTimer, clearCloseTimer, pauseForHover],
@@ -722,6 +795,7 @@ export function Player({ entry, toast, settings }: Props) {
   // showing, schedule a hide with a short grace so the cursor can reach the
   // panel. Entering the panel cancels the hide; leaving the panel hides it.
   const onWordLeave = useCallback(() => {
+    hoveredKeyRef.current = null;
     clearOpenTimer();
     if (pinnedRef.current) return; // pinned: never auto-close on hover-out
     clearCloseTimer();
@@ -1191,11 +1265,14 @@ export function Player({ entry, toast, settings }: Props) {
     }
   }, [entry.id, primaryId, toast]);
 
-  // Furigana on unknown kanji (settings toggle, default on). A word is
-  // "mature enough" to hide furigana at progress bucket >= 4 (of 0..5).
+  // Furigana on unknown kanji (settings toggle, default on). Maturity-based
+  // hiding lives in TokenLine (shared by the overlay and the sidebar).
   const furiganaOn = settings.furigana !== false;
-  const HAS_KANJI = /[一-龯々]/;
-  const MATURE_BUCKET = 4;
+
+  const sidebarSeek = useCallback((t: number) => {
+    const v = videoRef.current;
+    if (v) v.currentTime = Math.min(v.duration || Infinity, Math.max(0, t));
+  }, []);
 
   const hasJa = tracks.some((t) => isJaLang(t.lang));
   // Only a GENERATED (synced) RU track hides the Translate button; external or
@@ -1205,59 +1282,21 @@ export function Player({ entry, toast, settings }: Props) {
 
   return (
     <div className="player-wrap">
+      <div className="stage-row">
       <div className="video-stage">
         <video ref={videoRef} src={mediaUrl(entry.id)} controls />
         <div className="sub-overlay">
           <div className="sub-primary">
-            {tokens
-              ? tokens.map((tok, i) => {
-                  if (!isLexical(tok))
-                    return <span key={i}>{tok.surface_form}</span>;
-                  const front = matchFront(
-                    wordIndex,
-                    tok.surface_form,
-                    tok.reading,
-                    tok.basic_form,
-                  );
-                  const known = front != null;
-                  const color = known
-                    ? progressColor(wordIndex.progress[front!])
-                    : undefined;
-                  const mature =
-                    known &&
-                    progressBucket(
-                      wordIndex.progress[front!]?.interval ?? 0,
-                    ) >= MATURE_BUCKET;
-                  const showFuri =
-                    furiganaOn &&
-                    !mature &&
-                    !!tok.reading &&
-                    HAS_KANJI.test(tok.surface_form);
-                  return (
-                    <span
-                      key={i}
-                      className={`tok${known ? " known" : ""}`}
-                      style={
-                        color
-                          ? ({ ["--tok-color"]: color } as React.CSSProperties)
-                          : undefined
-                      }
-                      onMouseEnter={(e) => onWordEnter(tok, e)}
-                      onMouseLeave={onWordLeave}
-                      onClick={(e) => onWordClick(tok, e)}
-                    >
-                      {showFuri ? (
-                        <ruby>
-                          {tok.surface_form}
-                          <rt>{kataToHira(tok.reading!)}</rt>
-                        </ruby>
-                      ) : (
-                        tok.surface_form
-                      )}
-                    </span>
-                  );
-                })
-              : primaryText}
+            <TokenLine
+              tokens={tokens}
+              fallbackText={primaryText}
+              wordIndex={wordIndex}
+              knownWords={knownWords}
+              furiganaOn={furiganaOn}
+              onWordEnter={onWordEnter}
+              onWordLeave={onWordLeave}
+              onWordClick={onWordClick}
+            />
             {primaryText && (
               <span
                 className="explain-q"
@@ -1284,6 +1323,23 @@ export function Player({ entry, toast, settings }: Props) {
             </div>
           )}
         </div>
+      </div>
+
+      {sidebarOpen && !isFullscreen && (
+        <Sidebar
+          cues={primaryCues}
+          secondaryCues={secondaryCues}
+          activeIdx={activeP}
+          subOffset={subOffset}
+          onSeek={sidebarSeek}
+          wordIndex={wordIndex}
+          knownWords={knownWords}
+          furiganaOn={furiganaOn}
+          onWordEnter={onWordEnter}
+          onWordLeave={onWordLeave}
+          onWordClick={onWordClick}
+        />
+      )}
       </div>
 
       {popup && (
@@ -1334,6 +1390,14 @@ export function Player({ entry, toast, settings }: Props) {
             <span className="word">{popup.surface}</span>
             {(lookup?.reading || popup.reading) && (
               <span className="reading">{lookup?.reading || popup.reading}</span>
+            )}
+            {knownWords.has(popup.dictForm ?? popup.surface) && (
+              <span
+                className="known-flag"
+                title="Marked as known — press k to toggle"
+              >
+                known
+              </span>
             )}
           </div>
           {lookupLoading && <div className="spin">Looking up…</div>}
