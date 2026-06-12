@@ -888,7 +888,10 @@ export function Player({ entry, toast, settings }: Props) {
     }
     setFrameAdded(false);
     setFrameLoading(false);
-    const cached = lookupCache.current.get(popup.surface);
+    // Cache key includes the cue context so the same word in a NEW sentence
+    // gets a fresh, context-correct answer instead of a stale cached one.
+    const cacheKey = `${popup.surface} ${popup.context}`;
+    const cached = lookupCache.current.get(cacheKey);
     if (cached) {
       setLookup(cached);
       setLookupLoading(false);
@@ -904,16 +907,16 @@ export function Player({ entry, toast, settings }: Props) {
     const ctx = popup.dictForm
       ? `${popup.context}\n(dictionary form: ${popup.dictForm})`
       : popup.context;
-    let p = inflight.current.get(surface);
+    let p = inflight.current.get(cacheKey);
     if (!p) {
       p = api
         .lookup({ word: surface, context: ctx, source: entry.name })
         .then((res) => {
-          lookupCache.current.set(surface, res);
+          lookupCache.current.set(cacheKey, res);
           return res;
         })
-        .finally(() => inflight.current.delete(surface));
-      inflight.current.set(surface, p);
+        .finally(() => inflight.current.delete(cacheKey));
+      inflight.current.set(cacheKey, p);
     }
     void p
       .then((res) => {
@@ -924,7 +927,7 @@ export function Player({ entry, toast, settings }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [popup?.kind, popup?.surface]);
+  }, [popup?.kind, popup?.surface, popup?.context]);
 
   // re-run the current lookup WITH a video frame, replacing the panel content.
   const onAddFrame = useCallback(async () => {
@@ -939,7 +942,7 @@ export function Player({ entry, toast, settings }: Props) {
         timestamp: popup.timestamp,
         withFrame: true,
       });
-      lookupCache.current.set(popup.surface, res);
+      lookupCache.current.set(`${popup.surface} ${popup.context}`, res);
       setLookup(res);
       setFrameAdded(true);
     } catch (e) {
@@ -962,7 +965,7 @@ export function Player({ entry, toast, settings }: Props) {
         source: entry.name,
         noCache: true,
       });
-      lookupCache.current.set(popup.surface, res);
+      lookupCache.current.set(`${popup.surface} ${popup.context}`, res);
       setLookup(res);
     } catch (e) {
       toast(`Regenerate failed: ${e instanceof Error ? e.message : e}`);
@@ -1007,6 +1010,19 @@ export function Player({ entry, toast, settings }: Props) {
 
   const popupSaved = popupFront ? knownFronts.has(popupFront) : false;
 
+  // Bounds of the primary cue at `timestamp` in FILE time (cue times are
+  // track-time, so re-add the user's sync offset) for sentence-audio capture.
+  const cueBoundsAt = useCallback((timestamp: number) => {
+    const cues = primaryCuesRef.current;
+    const idx = activeCueIndex(cues, timestamp - subOffsetRef.current);
+    const cue = idx >= 0 ? cues[idx] : undefined;
+    if (!cue) return {};
+    return {
+      cueStart: cue.start + subOffsetRef.current,
+      cueEnd: cue.end + subOffsetRef.current,
+    };
+  }, []);
+
   const onAdd = useCallback(async () => {
     if (!popup || !lookup || !popupFront) return;
     const v = videoRef.current;
@@ -1027,6 +1043,7 @@ export function Player({ entry, toast, settings }: Props) {
         context: primaryText,
         mediaId: entry.id,
         timestamp: v?.currentTime ?? 0,
+        ...cueBoundsAt(popup.timestamp),
       });
       // sync real progress data (color etc.) in the background
       void refreshAnki();
@@ -1039,7 +1056,7 @@ export function Player({ entry, toast, settings }: Props) {
       });
       toast(`Add failed: ${e instanceof Error ? e.message : e}`);
     }
-  }, [popup, lookup, popupFront, primaryText, entry.id, refreshAnki, toast]);
+  }, [popup, lookup, popupFront, primaryText, entry.id, refreshAnki, toast, cueBoundsAt]);
 
   // Add the whole sentence as an Anki card (front = JP sentence, back =
   // translation, notes = breakdown + idioms). Same optimistic flow as words.
@@ -1061,6 +1078,7 @@ export function Player({ entry, toast, settings }: Props) {
         context: popup.secondary ?? "",
         mediaId: entry.id,
         timestamp: v?.currentTime ?? popup.timestamp,
+        ...cueBoundsAt(popup.timestamp),
       });
       void refreshAnki();
     } catch (e) {
@@ -1071,7 +1089,7 @@ export function Player({ entry, toast, settings }: Props) {
       });
       toast(`Add failed: ${e instanceof Error ? e.message : e}`);
     }
-  }, [popup, explain, entry.id, refreshAnki, toast]);
+  }, [popup, explain, entry.id, refreshAnki, toast, cueBoundsAt]);
 
   // --- follow-up question (both panel kinds) ---
   const onAsk = useCallback(async () => {

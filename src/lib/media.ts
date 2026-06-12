@@ -1,5 +1,6 @@
 // Range-aware media serving + codec compatibility check via ffprobe.
 
+import { stat } from "node:fs/promises";
 import { probeStreams } from "./subs.ts";
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -26,10 +27,19 @@ export interface CodecInfo {
   reason: string | null;
 }
 
+// Keyed by path + size + mtime (like embeddedLangCache) so a replaced file
+// with the same name doesn't serve stale codec info.
 const codecCache = new Map<string, CodecInfo>();
 
 export async function checkCodecs(file: string): Promise<CodecInfo> {
-  const hit = codecCache.get(file);
+  let key = file;
+  try {
+    const st = await stat(file);
+    key = `${file}:${st.size}:${st.mtimeMs}`;
+  } catch {
+    // unstatable — fall through, probe will throw a useful error
+  }
+  const hit = codecCache.get(key);
   if (hit) return hit;
 
   const streams = (await probeStreams(file)) as Array<{
@@ -62,7 +72,7 @@ export async function checkCodecs(file: string): Promise<CodecInfo> {
     chromeCompatible: compatible,
     reason,
   };
-  codecCache.set(file, info);
+  codecCache.set(key, info);
   return info;
 }
 
@@ -151,6 +161,43 @@ export function remuxToFmp4(file: string, startTime: number, info: CodecInfo): R
   return new Response(proc.stdout, {
     headers: { "Content-Type": "video/mp4" },
   });
+}
+
+/** Cut [start, end] seconds (with small lead-in/out padding) as MP3 bytes. */
+export async function cutAudio(
+  file: string,
+  start: number,
+  end: number,
+): Promise<Uint8Array> {
+  const from = Math.max(0, start - 0.15);
+  const dur = Math.max(0.2, end + 0.25 - from);
+  const proc = Bun.spawn(
+    [
+      "ffmpeg",
+      "-v",
+      "error",
+      "-ss",
+      String(from),
+      "-i",
+      file,
+      "-t",
+      String(dur),
+      "-vn",
+      "-acodec",
+      "libmp3lame",
+      "-q:a",
+      "4",
+      "-f",
+      "mp3",
+      "-",
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const buf = new Uint8Array(await new Response(proc.stdout).arrayBuffer());
+  if ((await proc.exited) !== 0 || buf.length === 0) {
+    throw new Error(`audio cut failed at ${start}-${end}`);
+  }
+  return buf;
 }
 
 /** Grab one frame at `t` seconds, scaled to `width`, as JPEG bytes. */

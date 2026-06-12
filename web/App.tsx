@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type BatchStatus, type LibraryEntry } from "./api.ts";
 import { Player } from "./Player.tsx";
 
@@ -35,9 +35,16 @@ export function App() {
     void api.getSettings().then(setSettings).catch(() => {});
   }, []);
 
+  // Keep the pending hide-timer so a second toast isn't cleared early by the
+  // first toast's timeout.
+  const toastTimer = useRef<number | null>(null);
   const toast = useCallback((msg: string) => {
+    if (toastTimer.current != null) window.clearTimeout(toastTimer.current);
     setToastMsg(msg);
-    window.setTimeout(() => setToastMsg(null), 2600);
+    toastTimer.current = window.setTimeout(() => {
+      toastTimer.current = null;
+      setToastMsg(null);
+    }, 2600);
   }, []);
 
   const go = (hash: string) => {

@@ -7,6 +7,7 @@ import {
   checkCodecs,
   remuxToFmp4,
   captureFrame,
+  cutAudio,
 } from "../lib/media.ts";
 import {
   listEmbeddedSubTracks,
@@ -29,7 +30,15 @@ import {
   DEFAULT_LOOKUP_PROMPT,
   type ExplainResult,
 } from "../lib/gemini.ts";
-import { listWords, getProgress, addCard, deleteCard, uploadImage } from "../lib/anki.ts";
+import {
+  listWords,
+  getProgress,
+  addCard,
+  deleteCard,
+  uploadImage,
+  uploadMedia,
+  resolveMediaName,
+} from "../lib/anki.ts";
 import { readSettings, writeSettings } from "../lib/settings.ts";
 
 const PUBLIC_DIR = join(import.meta.dir, "..", "..", "public");
@@ -525,6 +534,8 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
           context?: string;
           mediaId?: string;
           timestamp?: number;
+          cueStart?: number;
+          cueEnd?: number;
         };
         if (!body.word || !body.translation) return err("word and translation required", 400);
 
@@ -545,6 +556,24 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
               image = await uploadImage(frame, "image/jpeg");
             } catch {
               // no frame — card still goes through
+            }
+            // Sentence audio: cut the cue's audio, upload it, resolve its
+            // Anki media name, and reference it via [sound:...] in context.
+            // Any failure along the way is non-fatal — the card still goes
+            // through without audio.
+            if (
+              typeof body.cueStart === "number" &&
+              typeof body.cueEnd === "number" &&
+              body.cueEnd > body.cueStart
+            ) {
+              try {
+                const audio = await cutAudio(entry.absPath, body.cueStart, body.cueEnd);
+                const path = await uploadMedia(audio, "audio/mpeg", "sentence.mp3");
+                const mediaName = await resolveMediaName(path);
+                if (mediaName) extras.push(`[sound:${mediaName}]`);
+              } catch {
+                // no audio — card still goes through
+              }
             }
           }
         }

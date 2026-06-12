@@ -166,6 +166,9 @@ export const api = {
     context: string;
     mediaId: string;
     timestamp: number;
+    /** cue audio bounds in FILE time (offset-corrected), for [sound:] capture */
+    cueStart?: number;
+    cueEnd?: number;
   }) => jpost<{ ok: boolean }>("/api/anki/add", p),
   ankiDelete: (front: string) => jpost<{ ok: boolean }>("/api/anki/delete", { front }),
   whisperStart: (id: string, lang: string) =>

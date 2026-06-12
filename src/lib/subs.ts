@@ -1,5 +1,7 @@
 // Subtitle parsing (SRT / VTT / ASS) and embedded track extraction via ffmpeg.
 
+import { stat } from "node:fs/promises";
+
 export interface Cue {
   /** seconds */
   start: number;
@@ -237,11 +239,25 @@ export async function listEmbeddedSubTracks(file: string): Promise<SubTrack[]> {
     });
 }
 
-/** Extract an embedded subtitle stream as SRT text. */
+// In-memory cache of extracted embedded tracks, keyed by path+index+size+mtime
+// — demuxing the whole MKV on every track switch is slow. Small FIFO cap.
+const extractCache = new Map<string, string>();
+const EXTRACT_CACHE_MAX = 20;
+
+/** Extract an embedded subtitle stream as SRT text (cached). */
 export async function extractEmbeddedTrack(
   file: string,
   streamIndex: number,
 ): Promise<string> {
+  let key: string | null = null;
+  try {
+    const st = await stat(file);
+    key = `${file}:${streamIndex}:${st.size}:${st.mtimeMs}`;
+    const hit = extractCache.get(key);
+    if (hit !== undefined) return hit;
+  } catch {
+    // unstatable — extract uncached (ffmpeg will report the real error)
+  }
   const proc = Bun.spawn(
     [
       "ffmpeg",
@@ -261,6 +277,14 @@ export async function extractEmbeddedTrack(
   if ((await proc.exited) !== 0) {
     const err = await new Response(proc.stderr).text();
     throw new Error(`ffmpeg subtitle extraction failed: ${err.slice(0, 300)}`);
+  }
+  if (key != null) {
+    while (extractCache.size >= EXTRACT_CACHE_MAX) {
+      const oldest = extractCache.keys().next().value;
+      if (oldest === undefined) break;
+      extractCache.delete(oldest);
+    }
+    extractCache.set(key, out);
   }
   return out;
 }

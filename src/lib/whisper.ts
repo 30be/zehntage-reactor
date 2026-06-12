@@ -143,48 +143,50 @@ class WhisperQueue {
       { stdout: "ignore", stderr: "pipe" },
     );
     job.proc = ff;
-    if ((await ff.exited) !== 0) {
+    // The temp wav is removed in `finally` on EVERY exit path (cancel during
+    // extraction, ffmpeg/whisper errors, success) — no leaked wavs in tmpdir.
+    try {
+      if ((await ff.exited) !== 0) {
+        if (job.canceled) return;
+        throw new Error(`ffmpeg audio extraction failed: ${await new Response(ff.stderr as ReadableStream).text()}`);
+      }
       if (job.canceled) return;
-      throw new Error(`ffmpeg audio extraction failed: ${await new Response(ff.stderr as ReadableStream).text()}`);
-    }
-    if (job.canceled) {
-      await unlink(wavPath).catch(() => {});
-      return;
-    }
 
-    // 2. Run whisper-cli, streaming segments from stdout.
-    this.setStatus(job, "running");
-    const proc = Bun.spawn(
-      ["whisper-cli", "-m", MODEL_PATH, "-t", String(THREADS), "-l", job.lang, "-f", wavPath],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    job.proc = proc;
+      // 2. Run whisper-cli, streaming segments from stdout.
+      this.setStatus(job, "running");
+      const proc = Bun.spawn(
+        ["whisper-cli", "-m", MODEL_PATH, "-t", String(THREADS), "-l", job.lang, "-f", wavPath],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      job.proc = proc;
 
-    const decoder = new TextDecoder();
-    let buffer = "";
-    for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
-      buffer += decoder.decode(chunk, { stream: true });
-      let nl;
-      while ((nl = buffer.indexOf("\n")) !== -1) {
-        const line = buffer.slice(0, nl);
-        buffer = buffer.slice(nl + 1);
-        const cue = parseWhisperLine(line);
-        if (cue) {
-          job.cues.push(cue);
-          this.emit(job, { type: "cue", cue });
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
+        buffer += decoder.decode(chunk, { stream: true });
+        let nl;
+        while ((nl = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, nl);
+          buffer = buffer.slice(nl + 1);
+          const cue = parseWhisperLine(line);
+          if (cue) {
+            job.cues.push(cue);
+            this.emit(job, { type: "cue", cue });
+          }
         }
       }
-    }
-    const code = await proc.exited;
-    await unlink(wavPath).catch(() => {});
-    if (job.canceled) return;
-    if (code !== 0) {
-      throw new Error(`whisper-cli exited with ${code}: ${(await new Response(proc.stderr as ReadableStream).text()).slice(0, 300)}`);
-    }
+      const code = await proc.exited;
+      if (job.canceled) return;
+      if (code !== 0) {
+        throw new Error(`whisper-cli exited with ${code}: ${(await new Response(proc.stderr as ReadableStream).text()).slice(0, 300)}`);
+      }
 
-    // 3. Save sidecar SRT.
-    await Bun.write(job.outPath, cuesToSrt(job.cues));
-    this.setStatus(job, "done");
+      // 3. Save sidecar SRT.
+      await Bun.write(job.outPath, cuesToSrt(job.cues));
+      this.setStatus(job, "done");
+    } finally {
+      await unlink(wavPath).catch(() => {});
+    }
   }
 }
 
