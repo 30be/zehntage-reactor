@@ -92,6 +92,9 @@ const isRuLang = (l: string) => l === "ru" || l === "rus" || l.startsWith("ru");
 
 export function Player({ entry, toast, settings }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  // The stage wraps the video + subtitle overlay + lookup popup; fullscreen
+  // targets THIS element so the overlays stay visible in fullscreen.
+  const stageRef = useRef<HTMLDivElement>(null);
 
   const [tracks, setTracks] = useState<SubTrackInfo[]>([]);
   const [primaryId, setPrimaryId] = useState<string>("");
@@ -113,6 +116,9 @@ export function Player({ entry, toast, settings }: Props) {
   // True when the video was paused by a hover (word or secondary subtitle),
   // so closing the popup / leaving the line auto-resumes playback.
   const pausedByHoverRef = useRef(false);
+  // True while the cursor is over the secondary (RU) line: it holds the hover
+  // pause, so a word-popup close timer must NOT resume playback under it.
+  const secondaryHoveredRef = useRef(false);
   useEffect(() => {
     autopauseRef.current = autopause;
   }, [autopause]);
@@ -248,6 +254,9 @@ export function Player({ entry, toast, settings }: Props) {
   }, []);
   const resumeFromHover = useCallback(() => {
     if (!pausedByHoverRef.current) return;
+    // The secondary line still holds the pause (user is reading the RU text);
+    // keep the flag so ITS mouseleave performs the resume.
+    if (secondaryHoveredRef.current) return;
     pausedByHoverRef.current = false;
     void videoRef.current?.play();
   }, []);
@@ -283,6 +292,18 @@ export function Player({ entry, toast, settings }: Props) {
   const [translateBusy, setTranslateBusy] = useState(false);
   const whisperJobRef = useRef<string | null>(null);
   const whisperEsRef = useRef<EventSource | null>(null);
+  const whisperRetryRef = useRef(0);
+  const attachWhisperRef = useRef<(jobId: string) => void>(() => {});
+  const retryAttachRef = useRef<() => void>(() => {});
+
+  // Live cues streamed by a running whisper job. Kept SEPARATE from the
+  // user-selected primary track's cues so a batch job can't clobber them;
+  // they drive the overlay/sidebar only when no primary track is selected or
+  // the selected primary is the whisper-generated ja track-to-be.
+  const [whisperCues, setWhisperCues] = useState<Cue[]>([]);
+  const whisperLive =
+    whisperCues.length > 0 && (!primaryId || primaryId === "sidecar:gen:ja");
+  const displayCues = whisperLive ? whisperCues : primaryCues;
 
   // --- load tracks + anki words ---
   useEffect(() => {
@@ -353,7 +374,13 @@ export function Player({ entry, toast, settings }: Props) {
     let cancelled = false;
     void api
       .cues(entry.id, primaryId)
-      .then((c) => !cancelled && setPrimaryCues(c))
+      .then((c) => {
+        if (cancelled) return;
+        setPrimaryCues(c);
+        // No whisper job running → any leftover live cues are stale now.
+        if (whisperJobRef.current == null)
+          setWhisperCues((w) => (w.length ? [] : w));
+      })
       .catch(() => !cancelled && setPrimaryCues([]));
     return () => {
       cancelled = true;
@@ -453,17 +480,26 @@ export function Player({ entry, toast, settings }: Props) {
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
+    // This effect re-runs when subOffset or the cue arrays change (e.g. [/]
+    // nudges, streaming whisper cues shifting indices) — NOT just on playback.
+    // Resync the previous-active index to the CURRENT position and skip the
+    // autopause branch on the first onTime call so re-setup can't spuriously
+    // pause the video.
+    prevActiveP.current = activeCueIndex(displayCues, v.currentTime - subOffset);
+    let firstRun = true;
     const onTime = () => {
+      const wasFirst = firstRun;
+      firstRun = false;
       // Track-time for the PRIMARY track: subtract the user's sync offset.
       const t = v.currentTime - subOffset;
-      const idx = activeCueIndex(primaryCues, t);
+      const idx = activeCueIndex(displayCues, t);
       // Autopause: pause exactly at the END of the cue the user just heard.
       // By the time `idx` changes the next subtitle would already be shown, so
       // we seek back to just before the finished cue's end — it stays rendered
       // while paused. lastAutopausedIdx prevents re-triggering in a loop.
       const prev = prevActiveP.current;
-      if (autopauseRef.current && !v.seeking && !v.paused) {
-        const prevCue = prev >= 0 ? primaryCues[prev] : undefined;
+      if (autopauseRef.current && !wasFirst && !v.seeking && !v.paused) {
+        const prevCue = prev >= 0 ? displayCues[prev] : undefined;
         const leftCue =
           prevCue != null && (idx !== prev || t >= prevCue.end);
         if (leftCue && lastAutopausedIdx.current !== prev) {
@@ -493,7 +529,7 @@ export function Player({ entry, toast, settings }: Props) {
         return;
       }
       lastAutopausedIdx.current = -1;
-      prevActiveP.current = activeCueIndex(primaryCues, v.currentTime - subOffset);
+      prevActiveP.current = activeCueIndex(displayCues, v.currentTime - subOffset);
     };
     v.addEventListener("timeupdate", onTime);
     v.addEventListener("seeking", onSeeking);
@@ -502,12 +538,12 @@ export function Player({ entry, toast, settings }: Props) {
       v.removeEventListener("timeupdate", onTime);
       v.removeEventListener("seeking", onSeeking);
     };
-  }, [primaryCues, secondaryCues, subOffset]);
+  }, [displayCues, secondaryCues, subOffset]);
 
   // keep refs in sync for the (deps-stable) hotkey handler
   useEffect(() => {
-    primaryCuesRef.current = primaryCues;
-  }, [primaryCues]);
+    primaryCuesRef.current = displayCues;
+  }, [displayCues]);
 
   // popup-open flag for the hotkey handler (Escape closes the lookup panel)
   const popupOpenRef = useRef(false);
@@ -547,8 +583,11 @@ export function Player({ entry, toast, settings }: Props) {
       const v = videoRef.current;
       if (!v) return;
       const active = document.activeElement;
-      // Real text inputs keep their native behavior entirely.
+      // Real text inputs keep their native behavior entirely. SELECTs too:
+      // arrow keys / typing must keep working for keyboard track selection.
+      const isSelect = (el: Element | null) => el?.tagName === "SELECT";
       if (isTextInput(active) || isTextInput(e.target as Element | null)) return;
+      if (isSelect(active) || isSelect(e.target as Element | null)) return;
       // Escape closes the lookup panel; otherwise leave it to native handling
       // (exit fullscreen etc.) — never eat it for nothing.
       if (e.key === "Escape") {
@@ -590,7 +629,7 @@ export function Player({ entry, toast, settings }: Props) {
         case "f":
         case "F":
           if (document.fullscreenElement) void document.exitFullscreen();
-          else void v.requestFullscreen?.();
+          else void stageRef.current?.requestFullscreen?.();
           break;
         case "ArrowLeft":
           v.currentTime = Math.max(0, v.currentTime - 5);
@@ -679,7 +718,7 @@ export function Player({ entry, toast, settings }: Props) {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [changeOffset, toast, clearCloseTimer, resumeFromHover, toggleSidebar, toggleKnown]);
 
-  const primaryText = activeP >= 0 ? primaryCues[activeP]!.text : "";
+  const primaryText = activeP >= 0 && activeP < displayCues.length ? displayCues[activeP]!.text : "";
   const secondaryText = activeS >= 0 ? secondaryCues[activeS]!.text : "";
 
   // --- lazy tokenize the active primary cue ---
@@ -719,7 +758,7 @@ export function Player({ entry, toast, settings }: Props) {
       const surface = tok.surface_form;
       const rect = el.getBoundingClientRect();
       const ctx =
-        ctxOverride || contextAround(primaryCues, activeP) || primaryText;
+        ctxOverride || contextAround(displayCues, activeP) || primaryText;
       return {
         kind: "word",
         surface,
@@ -735,7 +774,7 @@ export function Player({ entry, toast, settings }: Props) {
         timestamp: videoRef.current?.currentTime ?? 0,
       };
     },
-    [primaryCues, activeP, primaryText],
+    [displayCues, activeP, primaryText],
   );
 
   const onWordEnter = useCallback(
@@ -1158,7 +1197,7 @@ export function Player({ entry, toast, settings }: Props) {
         flushTimer = null;
         if (!dirty) return;
         dirty = false;
-        setPrimaryCues(liveCues.slice());
+        setWhisperCues(liveCues.slice());
         setWhisperLastEnd(liveCues.length ? liveCues[liveCues.length - 1]!.end : 0);
       };
       const scheduleFlush = () => {
@@ -1167,6 +1206,9 @@ export function Player({ entry, toast, settings }: Props) {
       };
       const es = new EventSource(api.whisperEventsUrl(jobId));
       whisperEsRef.current = es;
+      es.onopen = () => {
+        whisperRetryRef.current = 0; // healthy connection → reset retry budget
+      };
       es.onmessage = (ev) => {
         const data = JSON.parse(ev.data) as
           | { type: "snapshot"; status: string; cues: Cue[] }
@@ -1214,18 +1256,52 @@ export function Player({ entry, toast, settings }: Props) {
         if (flushTimer != null) window.clearTimeout(flushTimer);
         flush();
         es.close();
-        whisperEsRef.current = null;
-        setWhisperBusy(false);
+        if (whisperEsRef.current === es) whisperEsRef.current = null;
+        // The job keeps running server-side — retry the SSE attach (bounded)
+        // via /api/whisper/active rediscovery instead of going idle.
+        retryAttachRef.current();
       };
     },
     [entry.id, toast],
   );
+  useEffect(() => {
+    attachWhisperRef.current = attachWhisper;
+  }, [attachWhisper]);
+
+  // Bounded SSE re-attach: up to 5 attempts ~2s apart; only then clear busy.
+  const retryAttach = useCallback(() => {
+    if (whisperRetryRef.current >= 5) {
+      setWhisperBusy(false);
+      whisperJobRef.current = null;
+      return;
+    }
+    whisperRetryRef.current += 1;
+    window.setTimeout(() => {
+      if (whisperEsRef.current != null) return; // already reattached
+      void api
+        .whisperActive(entry.id)
+        .then((r) => {
+          if (r.jobId) attachWhisperRef.current(r.jobId);
+          else {
+            // job actually finished/disappeared while we were detached
+            setWhisperBusy(false);
+            whisperJobRef.current = null;
+          }
+        })
+        .catch(() => retryAttachRef.current());
+    }, 2000);
+  }, [entry.id]);
+  useEffect(() => {
+    retryAttachRef.current = retryAttach;
+  }, [retryAttach]);
 
   // --- whisper generate JP ---
   const onGenerateJa = useCallback(async () => {
     setWhisperBusy(true);
     setWhisperStatus("starting…");
     setWhisperLastEnd(0);
+    setWhisperCues([]);
+    whisperRetryRef.current = 0;
     try {
       // Server dedups: an already-active job for this file returns its id.
       const { jobId } = await api.whisperStart(entry.id, "ja");
@@ -1301,7 +1377,7 @@ export function Player({ entry, toast, settings }: Props) {
   return (
     <div className="player-wrap">
       <div className="stage-row">
-      <div className="video-stage">
+      <div className="video-stage" ref={stageRef}>
         <video ref={videoRef} src={mediaUrl(entry.id)} controls />
         <div className="sub-overlay">
           <div className="sub-primary">
@@ -1329,10 +1405,12 @@ export function Player({ entry, toast, settings }: Props) {
             <div
               className={`sub-secondary${secShow ? " show" : ""}`}
               onMouseEnter={() => {
+                secondaryHoveredRef.current = true;
                 setSecShow(true);
                 pauseForHover();
               }}
               onMouseLeave={() => {
+                secondaryHoveredRef.current = false;
                 setSecShow(false);
                 resumeFromHover();
               }}
@@ -1341,25 +1419,6 @@ export function Player({ entry, toast, settings }: Props) {
             </div>
           )}
         </div>
-      </div>
-
-      {sidebarOpen && !isFullscreen && (
-        <Sidebar
-          cues={primaryCues}
-          secondaryCues={secondaryCues}
-          activeIdx={activeP}
-          subOffset={subOffset}
-          onSeek={sidebarSeek}
-          wordIndex={wordIndex}
-          knownWords={knownWords}
-          furiganaOn={furiganaOn}
-          onWordEnter={onWordEnter}
-          onWordLeave={onWordLeave}
-          onWordClick={onWordClick}
-        />
-      )}
-      </div>
-
       {popup && (
         <div
           ref={lookupRef}
@@ -1492,6 +1551,24 @@ export function Player({ entry, toast, settings }: Props) {
           />
         </div>
       )}
+      </div>
+
+      {sidebarOpen && !isFullscreen && (
+        <Sidebar
+          cues={displayCues}
+          secondaryCues={secondaryCues}
+          activeIdx={activeP}
+          subOffset={subOffset}
+          onSeek={sidebarSeek}
+          wordIndex={wordIndex}
+          knownWords={knownWords}
+          furiganaOn={furiganaOn}
+          onWordEnter={onWordEnter}
+          onWordLeave={onWordLeave}
+          onWordClick={onWordClick}
+        />
+      )}
+      </div>
 
       <div className="controls">
         {/* Primary slot: a select when tracks exist (with "+ generate…" folded

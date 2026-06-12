@@ -145,8 +145,17 @@ interface TranslateBatchItem {
 // avoid hammering Gemini.
 const translateBatch: TranslateBatchItem[] = [];
 
-// In-memory cache for /api/explain, keyed by the exact sentence string.
+// In-memory cache for /api/explain, keyed by sentence + secondary + source.
+// FIFO-capped so a long session can't grow it without bound.
 const explainCache = new Map<string, ExplainResult>();
+const EXPLAIN_CACHE_MAX = 200;
+function explainCachePut(key: string, value: ExplainResult): void {
+  if (explainCache.size >= EXPLAIN_CACHE_MAX) {
+    const oldest = explainCache.keys().next().value;
+    if (oldest !== undefined) explainCache.delete(oldest);
+  }
+  explainCache.set(key, value);
+}
 let translatePumpRunning = false;
 
 async function pumpTranslateBatch(library: Library): Promise<void> {
@@ -459,14 +468,15 @@ export async function startServer(root: string, preferredPort = 8417): Promise<S
           source?: string;
         };
         if (!body.sentence) return err("sentence required", 400);
-        const cached = explainCache.get(body.sentence);
+        const cacheKey = `${body.sentence} ${body.secondary ?? ""} ${body.source ?? ""}`;
+        const cached = explainCache.get(cacheKey);
         if (cached) return json(cached);
         const res = await explainSentence(
           body.sentence,
           body.secondary ?? "",
           body.source ?? "",
         );
-        explainCache.set(body.sentence, res);
+        explainCachePut(cacheKey, res);
         return json(res);
       }
 

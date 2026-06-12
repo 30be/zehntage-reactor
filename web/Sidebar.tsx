@@ -131,16 +131,62 @@ export function Sidebar({
 }: SidebarProps) {
   const tokenCache = useRef<Map<string, KToken[]>>(new Map());
   const activeRowRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   // last position we centered the window on, kept while between cues
   const lastCenterRef = useRef(0);
   // autoscroll guard: ignore programmatic scrolls, pause after user scrolls
   const programmaticRef = useRef(false);
   const userScrollUntilRef = useRef(0);
+  // measured row height (refined from a real rendered row)
+  const estRowRef = useRef(EST_ROW);
+  // window of estimated indices currently visible in the scroll viewport
+  const [scrollWin, setScrollWin] = useState<{ first: number; last: number } | null>(
+    null,
+  );
 
   if (activeIdx >= 0) lastCenterRef.current = activeIdx;
   const center = activeIdx >= 0 ? activeIdx : lastCenterRef.current;
-  const start = Math.max(0, center - WINDOW);
-  const end = Math.min(cues.length, center + WINDOW + 1);
+  const aStart = Math.max(0, center - WINDOW);
+  const aEnd = Math.min(cues.length, center + WINDOW + 1);
+
+  // The render window is the UNION of the active-index window and the
+  // scroll-position window, so manual scrollback never shows blank spacers.
+  const ranges: Array<[number, number]> = [[aStart, aEnd]];
+  if (scrollWin) {
+    const sStart = Math.max(0, Math.min(scrollWin.first, cues.length));
+    const sEnd = Math.max(sStart, Math.min(scrollWin.last, cues.length));
+    if (sEnd > sStart) ranges.push([sStart, sEnd]);
+  }
+  ranges.sort((a, b) => a[0] - b[0]);
+  const merged: Array<[number, number]> = [];
+  for (const r of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]);
+    else merged.push([r[0], r[1]]);
+  }
+
+  const updateScrollWindow = () => {
+    const el = containerRef.current;
+    if (!el) return;
+    const est = estRowRef.current;
+    const first = Math.max(0, Math.floor(el.scrollTop / est) - 20);
+    const last = Math.ceil((el.scrollTop + el.clientHeight) / est) + 20;
+    setScrollWin((p) =>
+      p && p.first === first && p.last === last ? p : { first, last },
+    );
+  };
+
+  // measure a real row once rendered to refine the row-height estimate
+  useEffect(() => {
+    const row = containerRef.current?.querySelector<HTMLElement>(".cue-row");
+    if (row && row.offsetHeight > 0) estRowRef.current = row.offsetHeight;
+  });
+
+  // keep the scroll window in sync on mount / cue list changes
+  useEffect(() => {
+    updateScrollWindow();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cues.length]);
 
   // auto-scroll the active row into view on natural cue changes
   useEffect(() => {
@@ -150,15 +196,19 @@ export function Sidebar({
     if (!el) return;
     programmaticRef.current = true;
     el.scrollIntoView({ block: "nearest" });
+    updateScrollWindow();
     const t = window.setTimeout(() => {
       programmaticRef.current = false;
     }, 250);
     return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeIdx]);
 
   const onScroll = () => {
-    if (programmaticRef.current) return;
-    userScrollUntilRef.current = Date.now() + USER_SCROLL_PAUSE_MS;
+    if (!programmaticRef.current) {
+      userScrollUntilRef.current = Date.now() + USER_SCROLL_PAUSE_MS;
+    }
+    updateScrollWindow();
   };
 
   if (cues.length === 0) {
@@ -169,34 +219,49 @@ export function Sidebar({
     );
   }
 
+  const renderRow = (cue: Cue, i: number) => {
+    // RU line shown at the cue's midpoint; secondary cues live in raw
+    // video time, primary cues in track time (hence + subOffset).
+    const mid = (cue.start + cue.end) / 2 + subOffset;
+    const si = activeCueIndex(secondaryCues, mid);
+    return (
+      <CueRow
+        key={`${i}:${cue.start}`}
+        cue={cue}
+        secondary={si >= 0 ? secondaryCues[si]!.text : ""}
+        active={i === activeIdx}
+        tokenCache={tokenCache.current}
+        onSeek={() => onSeek(Math.max(0, cue.start + subOffset))}
+        wordIndex={wordIndex}
+        knownWords={knownWords}
+        furiganaOn={furiganaOn}
+        onWordEnter={onWordEnter}
+        onWordLeave={onWordLeave}
+        onWordClick={onWordClick}
+        rowRef={i === activeIdx ? activeRowRef : undefined}
+      />
+    );
+  };
+
+  const est = estRowRef.current;
+  const parts: React.ReactNode[] = [];
+  let cursor = 0;
+  for (const [s, e] of merged) {
+    if (s > cursor) {
+      parts.push(<div key={`sp:${cursor}`} style={{ height: (s - cursor) * est }} />);
+    }
+    for (let i = s; i < e; i++) parts.push(renderRow(cues[i]!, i));
+    cursor = e;
+  }
+  if (cursor < cues.length) {
+    parts.push(
+      <div key={`sp:${cursor}`} style={{ height: (cues.length - cursor) * est }} />,
+    );
+  }
+
   return (
-    <div className="cue-sidebar" onScroll={onScroll}>
-      {start > 0 && <div style={{ height: start * EST_ROW }} />}
-      {cues.slice(start, end).map((cue, k) => {
-        const i = start + k;
-        // RU line shown at the cue's midpoint; secondary cues live in raw
-        // video time, primary cues in track time (hence + subOffset).
-        const mid = (cue.start + cue.end) / 2 + subOffset;
-        const si = activeCueIndex(secondaryCues, mid);
-        return (
-          <CueRow
-            key={`${i}:${cue.start}`}
-            cue={cue}
-            secondary={si >= 0 ? secondaryCues[si]!.text : ""}
-            active={i === activeIdx}
-            tokenCache={tokenCache.current}
-            onSeek={() => onSeek(Math.max(0, cue.start + subOffset))}
-            wordIndex={wordIndex}
-            knownWords={knownWords}
-            furiganaOn={furiganaOn}
-            onWordEnter={onWordEnter}
-            onWordLeave={onWordLeave}
-            onWordClick={onWordClick}
-            rowRef={i === activeIdx ? activeRowRef : undefined}
-          />
-        );
-      })}
-      {end < cues.length && <div style={{ height: (cues.length - end) * EST_ROW }} />}
+    <div className="cue-sidebar" ref={containerRef} onScroll={onScroll}>
+      {parts}
     </div>
   );
 }
