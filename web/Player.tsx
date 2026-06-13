@@ -26,7 +26,7 @@ import {
   withoutFront,
   type WordIndex,
 } from "./progress.ts";
-import { TokenLine, wordKey } from "./TokenLine.tsx";
+import { wordKey } from "./TokenLine.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 import { loadAccents } from "./accent.ts";
 import { readBlacklist, writeBlacklist } from "./blacklist.ts";
@@ -73,6 +73,11 @@ import {
 } from "./player/PreStudyPanel.tsx";
 import { Vbar } from "./player/Vbar.tsx";
 import { QuizPanel, type QuizResult } from "./player/QuizPanel.tsx";
+import { SubOverlay } from "./player/SubOverlay.tsx";
+import { EchoOverlay } from "./player/EchoOverlay.tsx";
+import { SessionHud } from "./player/SessionHud.tsx";
+import { SessionSummary } from "./player/SessionSummary.tsx";
+import { JobProgressBar } from "./player/JobProgressBar.tsx";
 import { buildQuiz, type QuizCue, type QuizItem } from "./quiz.ts";
 
 interface Props {
@@ -2489,69 +2494,33 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           src={mediaUrl(entry.id)}
           onClick={togglePlay}
         />
-        <div
-          className="sub-overlay"
-          style={{ "--sub-scale": subScale } as React.CSSProperties}
-        >
-          {cuesLoading && !primaryText && (
-            <div className="sub-loading">loading subtitles…</div>
-          )}
-          {/* echo dictation hides the JP line (the diff overlay shows it on reveal) */}
-          {echoCue ? null : (
-          <div className="sub-primary">
-            <TokenLine
-              tokens={tokens}
-              fallbackText={primaryText}
-              wordIndex={wordIndex}
-              knownWords={knownWords}
-              blacklist={blacklist}
-              furiganaOn={furiganaOn}
-              accents={accents}
-              pitchAccentOn={pitchOn}
-              onWordEnter={onWordEnter}
-              onWordLeave={onWordLeave}
-              onWordClick={onWordClick}
-            />
-            {primaryText && (
-              <button
-                type="button"
-                className="explain-q"
-                aria-label="Explain sentence structure"
-                onClick={onExplainClick}
-                onMouseEnter={() => {
-                  // same hover-pause as words, so the line stays readable
-                  clearCloseTimer();
-                  pauseForHover();
-                }}
-                onMouseLeave={() => {
-                  // only resume if the panel didn't open (no click happened)
-                  if (!popupOpenRef.current) resumeFromHover();
-                }}
-              >
-                ?
-              </button>
-            )}
-          </div>
-          )}
-          {secondaryText && (
-            <div
-              className={`sub-secondary${secShow || secHold || blurOff ? " show" : ""}`}
-              onMouseEnter={() => {
-                secondaryHoveredRef.current = true;
-                clearCloseTimer();
-                setSecShow(true);
-                pauseForHover();
-              }}
-              onMouseLeave={() => {
-                secondaryHoveredRef.current = false;
-                setSecShow(false);
-                resumeFromHover();
-              }}
-            >
-              {secondaryText}
-            </div>
-          )}
-        </div>
+        <SubOverlay
+          subScale={subScale}
+          cuesLoading={cuesLoading}
+          primaryText={primaryText}
+          secondaryText={secondaryText}
+          echoCue={echoCue}
+          tokens={tokens}
+          wordIndex={wordIndex}
+          knownWords={knownWords}
+          blacklist={blacklist}
+          furiganaOn={furiganaOn}
+          accents={accents}
+          pitchOn={pitchOn}
+          onWordEnter={onWordEnter}
+          onWordLeave={onWordLeave}
+          onWordClick={onWordClick}
+          onExplainClick={onExplainClick}
+          clearCloseTimer={clearCloseTimer}
+          pauseForHover={pauseForHover}
+          resumeFromHover={resumeFromHover}
+          popupOpenRef={popupOpenRef}
+          secondaryHoveredRef={secondaryHoveredRef}
+          setSecShow={setSecShow}
+          secShow={secShow}
+          secHold={secHold}
+          blurOff={blurOff}
+        />
         <Vbar
           videoRef={videoRef}
           mediaKey={entry.id}
@@ -2594,79 +2563,27 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             const passed = sessPassedRef.current;
             const pct = passed > 0 ? Math.round((sessClearRef.current / passed) * 100) : 100;
             return (
-              <div className="session-hud" data-testid="session-hud">
-                {mins}m · {sessCuesRef.current} cues · {pct}% known ·{" "}
-                {sessLookupsRef.current} mined · {sessCardsRef.current} cards ·{" "}
-                {sessUnknownSetRef.current.size} unk
-              </div>
+              <SessionHud
+                mins={mins}
+                cues={sessCuesRef.current}
+                pct={pct}
+                mined={sessLookupsRef.current}
+                cards={sessCardsRef.current}
+                unk={sessUnknownSetRef.current.size}
+              />
             );
           })()}
         {/* Wave 13.B: echo dictation input / reveal overlay */}
         {echoCue && (
-          <div className="echo-overlay">
-            {echoResult == null ? (
-              <>
-                <input
-                  ref={echoInputRef}
-                  className="echo-input"
-                  value={echoInput}
-                  placeholder="type what you heard — Enter to check, Tab to replay"
-                  onChange={(e) => setEchoInput(e.target.value)}
-                  onKeyDown={onEchoKeyDown}
-                  autoFocus
-                />
-              </>
-            ) : (
-              <div className="echo-reveal">
-                <div className="echo-diff">
-                  {echoResult.cells.map((c, i) => (
-                    <span key={i} className={c.ok ? "echo-ok" : "echo-bad"}>
-                      {c.ch}
-                    </span>
-                  ))}
-                </div>
-                <div className="echo-score">
-                  {echoResult.correct}/{echoResult.total} — Enter to continue
-                </div>
-                <input
-                  ref={echoInputRef}
-                  className="echo-input echo-input-hidden"
-                  value={echoInput}
-                  onChange={(e) => setEchoInput(e.target.value)}
-                  onKeyDown={onEchoKeyDown}
-                  autoFocus
-                />
-              </div>
-            )}
-          </div>
+          <EchoOverlay
+            echoResult={echoResult}
+            echoInput={echoInput}
+            setEchoInput={setEchoInput}
+            echoInputRef={echoInputRef}
+            onEchoKeyDown={onEchoKeyDown}
+          />
         )}
-        {sessionSummary && (
-          <div className="session-summary">
-            <div className="ss-title">session</div>
-            <div className="ss-line">
-              {sessionSummary.min} min · {sessionSummary.cues} cues
-            </div>
-            <div className="ss-line">
-              {sessionSummary.lookups} lookups · {sessionSummary.cards} cards ·{" "}
-              {sessionSummary.known} marked known
-            </div>
-            {sessionSummary.echo.tried > 0 && (
-              <div className="ss-line ss-dim">
-                echo: {sessionSummary.echo.tried} tried ·{" "}
-                {sessionSummary.echo.perfect} perfect
-              </div>
-            )}
-            {sessionSummary.streak != null && (
-              <div className="ss-line ss-dim">
-                streak: {sessionSummary.streak} day
-                {sessionSummary.streak === 1 ? "" : "s"}
-              </div>
-            )}
-            <div className="ss-line ss-dim">
-              next episode in 5s — any key cancels
-            </div>
-          </div>
-        )}
+        {sessionSummary && <SessionSummary summary={sessionSummary} />}
       {popup && (
         <LookupPanel
           popup={popup}
@@ -2777,36 +2694,15 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       {/* Track selection lives in the CC popover (vbar). This row only
           surfaces long-running job progress — absent otherwise. */}
       {(translateBusy || condenseBusy || whisperBusy) && (
-      <div className="controls">
-        {translateBusy && <span className="spinner-line">Translating…</span>}
-        {condenseBusy && <span className="spinner-line">Condensing audio…</span>}
-        {whisperBusy && (
-          <>
-            <div className="whisper-progress" title="Whisper transcription progress">
-              <span className="spinner-line">
-                Generating ja subs… {fmtTime(whisperLastEnd)}
-                {videoDuration > 0 ? ` / ${fmtTime(videoDuration)}` : ""}
-                {whisperStatus && whisperStatus !== "running" ? ` (${whisperStatus})` : ""}
-              </span>
-              <div className="progress-track">
-                <div
-                  className="progress-fill"
-                  style={{
-                    width: `${
-                      videoDuration > 0
-                        ? Math.min(100, (whisperLastEnd / videoDuration) * 100)
-                        : 0
-                    }%`,
-                  }}
-                />
-              </div>
-            </div>
-            <button className="btn sm" onClick={onCancelWhisper} title="Stop transcription">
-              Cancel
-            </button>
-          </>
-        )}
-      </div>
+        <JobProgressBar
+          translateBusy={translateBusy}
+          condenseBusy={condenseBusy}
+          whisperBusy={whisperBusy}
+          whisperLastEnd={whisperLastEnd}
+          whisperStatus={whisperStatus}
+          videoDuration={videoDuration}
+          onCancelWhisper={onCancelWhisper}
+        />
       )}
     </div>
   );
