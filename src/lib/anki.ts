@@ -184,7 +184,7 @@ async function acAddCard(card: AnkiCard): Promise<void> {
       tags: Array.isArray(card.tags) ? card.tags : [],
       options: { allowDuplicate: false, duplicateScope: "deck" },
     },
-  });
+  }, 15_000);
 }
 
 async function acDeleteCard(front: string): Promise<void> {
@@ -293,6 +293,9 @@ export async function resolveMediaName(uploadPath: string): Promise<string | nul
   const front = `zr-tmp-media-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   try {
     await addCard({ front, back: "tmp", image: uploadPath, image_field: "context" });
+    // The throwaway card was just added; force a fresh list so the (possibly
+    // <60s-old) listWords cache can't hide it and silently drop the [sound:...] ref.
+    bustListWordsCache();
     const cards = await listWords();
     const tmp = cards.find((c) => c.front === front);
     const m = typeof tmp?.context === "string" ? tmp.context.match(/<img src="([^"]+)"/) : null;

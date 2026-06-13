@@ -213,6 +213,29 @@ interface TranslateBatchItem {
 // avoid hammering Gemini.
 const translateBatch: TranslateBatchItem[] = [];
 
+// translateBatch only ever grows via push; finished (done/error) items would
+// otherwise accumulate forever (memory leak + ever-slower find/some/filter
+// scans). Cap retained finished items at the most recent N; never touch
+// queued/running entries (the active run reported by /api/batch/status).
+const TRANSLATE_BATCH_FINISHED_MAX = 200;
+function trimTranslateBatch(): void {
+  let finished = 0;
+  for (const i of translateBatch) {
+    if (i.status === "done" || i.status === "error") finished++;
+  }
+  let toDrop = finished - TRANSLATE_BATCH_FINISHED_MAX;
+  if (toDrop <= 0) return;
+  for (let k = 0; k < translateBatch.length && toDrop > 0; ) {
+    const s = translateBatch[k]!.status;
+    if (s === "done" || s === "error") {
+      translateBatch.splice(k, 1);
+      toDrop--;
+    } else {
+      k++;
+    }
+  }
+}
+
 // In-memory cache for /api/explain, keyed by sentence + secondary + source.
 // FIFO-capped so a long session can't grow it without bound.
 const explainCache = new Map<string, ExplainResult>();
@@ -374,6 +397,7 @@ async function pumpTranslateBatch(library: Library): Promise<void> {
     for (;;) {
       const item = translateBatch.find((i) => i.status === "queued");
       if (!item) break;
+      trimTranslateBatch();
       item.status = "running";
       try {
         const entry = library.get(item.entryId);

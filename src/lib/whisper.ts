@@ -266,8 +266,11 @@ class WhisperQueue {
         // the cleaned result so the overlay still fills in progressively.
         const fixed = repairHole(repair, hole);
         cues = [...cues, ...fixed].sort((a, b) => a.start - b.start);
+        // Do NOT push onto job.cues here: it still holds the raw (possibly
+        // looping) main-pass cues, so a client reconnecting mid-repair would get
+        // a dirty snapshot (raw loops + repair dupes). job.cues is replaced with
+        // the reconciled `cues` only at step 5. Emit per-cue for the live overlay.
         for (const cue of fixed) {
-          job.cues.push(cue);
           this.emit(job, { type: "cue", cue });
         }
       }
