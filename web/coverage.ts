@@ -4,10 +4,18 @@
 // cached in localStorage keyed by (mediaId, ja track id, anki count, known
 // count) so it only recomputes when the subs or the deck actually changed.
 
-import { api, type Cue } from "./api.ts";
+import { useEffect, useState } from "react";
+import {
+  api,
+  type AnkiWordsResponse,
+  type Cue,
+  type LibraryEntry,
+} from "./api.ts";
 import { getTokenizer, isLexical } from "./tokenizer.ts";
-import { matchFront, type WordIndex } from "./progress.ts";
+import { buildWordIndex, matchFront, type WordIndex } from "./progress.ts";
 import { wordKey } from "./TokenLine.tsx";
+import { readBlacklist } from "./blacklist.ts";
+import { isJaLang } from "./lang.ts";
 
 export interface Coverage {
   pct: number; // 0-100, rounded
@@ -93,8 +101,6 @@ export async function coverageOfCues(
   };
 }
 
-const isJa = (l: string) => l === "ja" || l === "jpn" || l.startsWith("ja");
-
 /**
  * Coverage for one library entry. Returns null when it has no ja track.
  * Checks the localStorage cache first; `signal` aborts between steps.
@@ -108,7 +114,7 @@ export async function computeCoverage(
 ): Promise<Coverage | null> {
   const tracks = await api.subs(mediaId);
   if (signal?.aborted) return null;
-  const ja = tracks.find((t) => isJa(t.lang));
+  const ja = tracks.find((t) => isJaLang(t.lang));
   if (!ja) return null;
   // Check the cache BEFORE fetching cues — the whole point is to skip the
   // heavy per-episode cue download on repeat library visits.
@@ -132,4 +138,70 @@ export function readKnownWords(): Set<string> {
   } catch {
     return new Set();
   }
+}
+
+/** Idle-time helper: resolves in an idle slice (setTimeout fallback). */
+function idle(signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    // Resolve immediately when aborted — a never-settling promise would leave
+    // the caller's async loop suspended forever. Callers re-check the signal.
+    if (signal.aborted) return resolve();
+    if (typeof requestIdleCallback === "function")
+      requestIdleCallback(() => resolve(), { timeout: 2000 });
+    else setTimeout(resolve, 200);
+  });
+}
+
+/**
+ * Auto-compute per-episode coverage in idle time: one episode at a time, only
+ * entries with subs, abortable on unmount. Never blocks the UI. Used by the
+ * Library and Stats pages.
+ *
+ * `anki`: pass the page's already-loaded deck snapshot, or leave undefined to
+ * have the hook fetch it; pass null while the page's own fetch is in flight
+ * (the loop waits for the snapshot to arrive).
+ */
+export function useCoverage(
+  entries: LibraryEntry[] | null,
+  anki?: AnkiWordsResponse | null,
+): Map<string, Coverage | null> {
+  const [coverage, setCoverage] = useState<Map<string, Coverage | null>>(
+    () => new Map(),
+  );
+  useEffect(() => {
+    if (!entries || entries.length === 0) return;
+    if (anki === null) return; // page snapshot still loading
+    const ctrl = new AbortController();
+    const { signal } = ctrl;
+    void (async () => {
+      const deck =
+        anki ??
+        (await api.ankiWords().catch(() => ({ words: [], progress: {} })));
+      if (signal.aborted) return;
+      const wordIndex = buildWordIndex(deck.words, deck.progress);
+      // blacklisted lemmas count as "known" — excluded from coverage %
+      const known = new Set([...readKnownWords(), ...readBlacklist()]);
+      for (const e of entries) {
+        if (signal.aborted) return;
+        if (e.subLangs.length === 0) continue;
+        await idle(signal);
+        if (signal.aborted) return;
+        try {
+          const cov = await computeCoverage(
+            e.id,
+            wordIndex,
+            known,
+            deck.words.length,
+            signal,
+          );
+          if (signal.aborted) return;
+          setCoverage((prev) => new Map(prev).set(e.id, cov));
+        } catch {
+          /* skip this entry — tokenizer/network hiccup */
+        }
+      }
+    })();
+    return () => ctrl.abort();
+  }, [entries, anki]);
+  return coverage;
 }

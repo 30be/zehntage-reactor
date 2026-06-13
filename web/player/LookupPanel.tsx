@@ -1,0 +1,225 @@
+// Player lookup popup: word lookup / sentence-explain panel with encounters,
+// Q/A thread and the ask… input. Pure presentation — lookup/explain fetching
+// and popup state live in Player.tsx. Extracted from Player.tsx.
+
+import type { EncounterHit, ExplainResult, WordLookup } from "../api.ts";
+import { AccentReading } from "../TokenLine.tsx";
+import { accentOf } from "../accent.ts";
+import { freqRankOf, freqTier } from "../freq.ts";
+import { fmtTime, type PopupState, type QaItem } from "./shared.ts";
+
+export function LookupPanel({
+  popup,
+  popupPos,
+  pinned,
+  popupSaved,
+  lookupRef,
+  onPanelEnter,
+  onPanelLeave,
+  explain,
+  explainLoading,
+  lookup,
+  lookupLoading,
+  lookupFromDeck,
+  pitchOn,
+  accents,
+  freqMap,
+  knownWords,
+  blacklist,
+  encHits,
+  encOpen,
+  onToggleEncounters,
+  qa,
+  askText,
+  setAskText,
+  askInputRef,
+  onAskFocus,
+  onAskBlur,
+  onAsk,
+  onClose,
+}: {
+  popup: PopupState;
+  popupPos: React.CSSProperties;
+  pinned: boolean;
+  popupSaved: boolean;
+  lookupRef: React.RefObject<HTMLDivElement | null>;
+  onPanelEnter: () => void;
+  onPanelLeave: () => void;
+  explain: ExplainResult | null;
+  explainLoading: boolean;
+  lookup: WordLookup | null;
+  lookupLoading: boolean;
+  lookupFromDeck: boolean;
+  pitchOn: boolean;
+  accents: Map<string, number> | null;
+  freqMap: Map<string, number> | null;
+  knownWords: Set<string>;
+  blacklist: Set<string>;
+  encHits: EncounterHit[] | null;
+  encOpen: boolean;
+  onToggleEncounters: () => void;
+  qa: QaItem[];
+  askText: string;
+  setAskText: (s: string) => void;
+  askInputRef: React.RefObject<HTMLInputElement | null>;
+  onAskFocus: () => void;
+  onAskBlur: () => void;
+  onAsk: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      ref={lookupRef}
+      className={`lookup${pinned ? " pinned" : ""}`}
+      style={popupPos}
+      onMouseEnter={onPanelEnter}
+      onMouseLeave={onPanelLeave}
+    >
+      {popup.kind === "sentence" ? (
+        <>
+          <div className={`sentence${popupSaved ? " saved" : ""}`}>
+            {popup.surface}
+          </div>
+          {explainLoading && <div className="spin">Explaining…</div>}
+          {explain && (
+            <>
+              <div className="translation">{explain.translation}</div>
+              <div className="notes breakdown">{explain.breakdown}</div>
+              {explain.idioms && (
+                <div className="notes breakdown">{explain.idioms}</div>
+              )}
+            </>
+          )}
+        </>
+      ) : (
+        <>
+          <div>
+            <span className={`word${popupSaved ? " saved" : ""}`}>
+              {popup.surface}
+            </span>
+            {(lookup?.reading || popup.reading) && (
+              <span className="reading popup-reading">
+                {pitchOn && accents ? (
+                  <AccentReading
+                    reading={(lookup?.reading || popup.reading)!}
+                    accent={accentOf(
+                      accents,
+                      popup.surface,
+                      (lookup?.reading || popup.reading)!,
+                      popup.dictForm,
+                    )}
+                  />
+                ) : (
+                  lookup?.reading || popup.reading
+                )}
+              </span>
+            )}
+            {freqMap && (
+              <span
+                className="freq-tag"
+                title="How common this word is (rank in a 30k frequency list)"
+              >
+                {freqTier(freqRankOf(freqMap, popup.surface, popup.dictForm))}
+              </span>
+            )}
+            {lookupFromDeck && (
+              <span
+                className="deck-tag"
+                title="Filled from your Anki card — a deletes it, g regenerates"
+              >
+                from your deck
+              </span>
+            )}
+            {knownWords.has(popup.dictForm ?? popup.surface) && (
+              <span
+                className="known-flag"
+                title="Marked as known — press k to toggle"
+              >
+                known
+              </span>
+            )}
+            {blacklist.has(popup.dictForm ?? popup.surface) && (
+              <span
+                className="known-flag"
+                title="Blacklisted — never counted as unknown; press x to toggle"
+              >
+                blacklisted
+              </span>
+            )}
+          </div>
+          {lookupLoading && <div className="spin">Looking up…</div>}
+          {lookup && (
+            <>
+              <div className="translation">{lookup.translation}</div>
+              {lookup.notes && <div className="notes">{lookup.notes}</div>}
+            </>
+          )}
+          {encHits && encHits.length > 0 && (
+            <div className="enc">
+              <div
+                className="enc-line"
+                title="Where else this word appears in the library"
+                onClick={onToggleEncounters}
+              >
+                encounters: {encHits.reduce((s, h) => s + h.count, 0)}
+              </div>
+              {encOpen && (
+                <div className="enc-list">
+                  {encHits
+                    .flatMap((h) =>
+                      h.cues.map((c) => ({
+                        mediaId: h.mediaId,
+                        name: h.name,
+                        start: c.start,
+                        text: c.text,
+                      })),
+                    )
+                    .slice(0, 20)
+                    .map((s, i) => (
+                      <div
+                        key={`${s.mediaId}:${s.start}:${i}`}
+                        className="enc-hit"
+                        onClick={() => {
+                          window.location.hash = `#/play/${s.mediaId}@${s.start}`;
+                        }}
+                      >
+                        <span className="enc-meta">
+                          {s.name.replace(/\.[^.]+$/, "")} · {fmtTime(s.start)}
+                        </span>{" "}
+                        {s.text}
+                      </div>
+                    ))}
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
+
+      {qa.length > 0 && (
+        <div className="qa">
+          {qa.map((item, i) => (
+            <div key={i} className="qa-item">
+              <div className="qa-q">{item.q}</div>
+              <div className="qa-a">{item.a ?? "…"}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      <input
+        ref={askInputRef}
+        className="ask-input"
+        type="text"
+        placeholder="ask…"
+        value={askText}
+        onChange={(e) => setAskText(e.target.value)}
+        onFocus={onAskFocus}
+        onBlur={onAskBlur}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") onAsk();
+          else if (e.key === "Escape") onClose();
+        }}
+      />
+    </div>
+  );
+}

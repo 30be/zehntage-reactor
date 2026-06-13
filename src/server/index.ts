@@ -72,6 +72,7 @@ import {
   JimakuError,
 } from "../lib/jimaku.ts";
 import { showFrequency } from "../lib/mining.ts";
+import { kataToHira } from "../lib/jatok.ts";
 import {
   getIndex,
   clearIndexCache,
@@ -360,11 +361,6 @@ async function chainGenerateAll(
 }
 
 // --- transcript search (lazy per-entry index over the best ja track) ---
-
-/** katakana → hiragana (1:1 codepoint shift), for normalized matching. */
-function kataToHira(s: string): string {
-  return s.replace(/[ァ-ヶ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60));
-}
 
 function searchNorm(s: string): string {
   return kataToHira(s.toLowerCase());

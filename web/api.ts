@@ -249,13 +249,20 @@ export const api = {
     word: string;
     context: string;
     source: string;
+    /** matching known-language (RU) cue text, for disambiguation */
+    secondary?: string;
     mediaId?: string;
     timestamp?: number;
     withFrame?: boolean;
     noCache?: boolean;
   }) => jpost<WordLookup>("/api/lookup", p),
-  explain: (p: { sentence: string; secondary: string; source: string }) =>
-    jpost<ExplainResult>("/api/explain", p),
+  explain: (p: {
+    sentence: string;
+    secondary: string;
+    source: string;
+    /** prev/current/next cue lines, current line marked */
+    context?: string;
+  }) => jpost<ExplainResult>("/api/explain", p),
   ask: (p: {
     question: string;
     word?: string;
@@ -272,8 +279,9 @@ export const api = {
     translation: string;
     notes: string;
     context: string;
-    mediaId: string;
-    timestamp: number;
+    /** omit mediaId/timestamp to skip server frame + audio capture */
+    mediaId?: string;
+    timestamp?: number;
     /** cue audio bounds in FILE time (offset-corrected), for [sound:] capture */
     cueStart?: number;
     cueEnd?: number;
@@ -345,8 +353,4 @@ export const api = {
 
 export function mediaUrl(id: string): string {
   return `/media/${id}`;
-}
-
-export function condensedUrl(id: string): string {
-  return `/media/condensed/${id}`;
 }

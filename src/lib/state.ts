@@ -1,13 +1,12 @@
 // Server-side persistence for the browser's zr.* localStorage namespace.
 //
-// WIRING CONTRACT (for the integration agent):
-//   - Add to src/server/index.ts:
-//       GET  /api/state  -> 200 JSON ZrState           (readState())
-//       POST /api/state  -> body ZrState (partial ok)  (mergeIntoFile(body)),
-//                           respond 200 JSON with the merged full ZrState.
-//   - The client (web/sync.ts) pushes only CHANGED keys, so POST bodies are
-//     partial maps; the server must merge (last-write-wins per key via
-//     merge()), never replace the file wholesale.
+// Wired in src/server/index.ts:
+//   GET  /api/state  -> 200 JSON ZrState           (readState())
+//   POST /api/state  -> body ZrState (partial ok)  (mergeIntoFile(body)),
+//                       responds 200 JSON with the merged full ZrState.
+// The client (web/sync.ts) pushes only CHANGED keys, so POST bodies are
+// partial maps; the server merges (last-write-wins per key via merge()),
+// never replacing the file wholesale.
 //   - File lives at $ZR_CONFIG_DIR/state.json (same override pattern as
 //     settings.ts) — tests set ZR_CONFIG_DIR to a tmp dir.
 //

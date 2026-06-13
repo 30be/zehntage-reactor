@@ -66,11 +66,6 @@ export async function ankiLocalAvailable(): Promise<boolean> {
   return ok;
 }
 
-/** test-only: reset the probe cache */
-export function _resetAnkiProbe(): void {
-  acProbe = null;
-}
-
 // Model field mapping: the model is named "Back+Front+Usage" — resolve its
 // actual field names once and map them onto our front/back/notes/context.
 interface AcFieldMap {

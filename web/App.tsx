@@ -13,7 +13,7 @@ import { Palette } from "./Palette.tsx";
 import { HOTKEYS } from "./commands.ts";
 import { startSync } from "./sync.ts";
 import { readBlacklist } from "./blacklist.ts";
-import { computeCoverage, readKnownWords, type Coverage } from "./coverage.ts";
+import { readKnownWords, useCoverage } from "./coverage.ts";
 import { buildWordIndex } from "./progress.ts";
 import { kataToHira } from "./tokenizer.ts";
 import { tmEvent, tmStart } from "./telemetry.ts";
@@ -229,18 +229,6 @@ function entryBadge(status: BatchStatus | null, entryId: string): string | null 
   if (w?.status === "error" || t?.status === "error") return "error";
   if (w?.status === "done" || t?.status === "done") return "✓";
   return null;
-}
-
-/** Idle-time helper: resolves in an idle slice (setTimeout fallback). */
-function idle(signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    // Resolve immediately when aborted — a never-settling promise would leave
-    // the caller's async loop suspended forever. Callers re-check the signal.
-    if (signal.aborted) return resolve();
-    if (typeof requestIdleCallback === "function")
-      requestIdleCallback(() => resolve(), { timeout: 2000 });
-    else setTimeout(resolve, 200);
-  });
 }
 
 interface SearchHit {
@@ -643,9 +631,7 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<BatchStatus | null>(null);
   // entryId -> coverage ("82% · 47 new"); null = computed but no ja track
-  const [coverage, setCoverage] = useState<Map<string, Coverage | null>>(
-    () => new Map(),
-  );
+  const coverage = useCoverage(entries);
   // comprehensibility sort: "name" (default) | "known" (server pctKnown desc)
   const [sortMode, setSortMode] = useState<"name" | "known">("name");
   const [knownPct, setKnownPct] = useState<Map<string, number | null> | null>(
@@ -704,43 +690,6 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
     return () => {
       cancelled = true;
     };
-  }, [entries]);
-
-  // Auto-compute episode coverage in idle time: one episode at a time, only
-  // entries with subs, abortable on unmount. Never blocks the UI.
-  useEffect(() => {
-    if (!entries || entries.length === 0) return;
-    const ctrl = new AbortController();
-    const { signal } = ctrl;
-    void (async () => {
-      const anki = await api
-        .ankiWords()
-        .catch(() => ({ words: [], progress: {} }));
-      if (signal.aborted) return;
-      const wordIndex = buildWordIndex(anki.words, anki.progress);
-      // blacklisted lemmas count as "known" — excluded from coverage %
-      const known = new Set([...readKnownWords(), ...readBlacklist()]);
-      for (const e of entries) {
-        if (signal.aborted) return;
-        if (e.subLangs.length === 0) continue;
-        await idle(signal);
-        if (signal.aborted) return;
-        try {
-          const cov = await computeCoverage(
-            e.id,
-            wordIndex,
-            known,
-            anki.words.length,
-            signal,
-          );
-          if (signal.aborted) return;
-          setCoverage((prev) => new Map(prev).set(e.id, cov));
-        } catch {
-          /* skip this entry — tokenizer/network hiccup */
-        }
-      }
-    })();
-    return () => ctrl.abort();
   }, [entries]);
 
   const loadEntries = useCallback(() => {
@@ -972,9 +921,8 @@ function Stats({ go }: { go: (h: string) => void }) {
     void api.statsEpisodes().then(setEpisodes).catch(() => {});
     void api.statsOverview().then(setOv).catch(() => {});
   }, []);
-  const [coverage, setCoverage] = useState<Map<string, Coverage | null>>(
-    () => new Map(),
-  );
+  // Per-episode coverage, computed in idle time (web/coverage.ts hook).
+  const coverage = useCoverage(entries, anki);
 
   useEffect(() => {
     void api.library().then(setEntries).catch(() => setEntries([]));
@@ -983,38 +931,6 @@ function Stats({ go }: { go: (h: string) => void }) {
       .then(setAnki)
       .catch(() => setAnki({ words: [], progress: {} }));
   }, []);
-
-  // Per-episode coverage, computed in idle time (same approach as Library).
-  useEffect(() => {
-    if (!entries || !anki || entries.length === 0) return;
-    const ctrl = new AbortController();
-    const { signal } = ctrl;
-    void (async () => {
-      const wordIndex = buildWordIndex(anki.words, anki.progress);
-      // blacklisted lemmas count as "known" — excluded from coverage %
-      const known = new Set([...readKnownWords(), ...readBlacklist()]);
-      for (const e of entries) {
-        if (signal.aborted) return;
-        if (e.subLangs.length === 0) continue;
-        await idle(signal);
-        if (signal.aborted) return;
-        try {
-          const cov = await computeCoverage(
-            e.id,
-            wordIndex,
-            known,
-            anki.words.length,
-            signal,
-          );
-          if (signal.aborted) return;
-          setCoverage((prev) => new Map(prev).set(e.id, cov));
-        } catch {
-          /* skip this entry */
-        }
-      }
-    })();
-    return () => ctrl.abort();
-  }, [entries, anki]);
 
   const localKnown = readKnownWords().size;
   const mature = anki

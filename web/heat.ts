@@ -1,10 +1,10 @@
 // Difficulty "heat" for the seekbar density strip.
 //
-// WIRING CONTRACT (for the integration agent):
+// Used by the Vbar seekbar strip (web/player/Vbar.tsx):
 //   - heatBins(cues, unknownCounts, binSeconds, duration) -> HeatBin[]
 //       cues: the active subtitle track's cues
 //       unknownCounts[i]: number of unknown lexical tokens in cues[i]
-//         (the Player already knows per-cue unknowns from its word index;
+//         (the Player computes per-cue unknowns from its word index;
 //          pass 0s if not yet computed — bar degrades to plain density)
 //       binSeconds: e.g. 10; duration: media duration in seconds
 //   - heatStyle(bin) -> { background } CSS for one bin segment (b/w theme:

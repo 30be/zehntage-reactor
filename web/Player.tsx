@@ -26,41 +26,46 @@ import {
   withoutFront,
   type WordIndex,
 } from "./progress.ts";
-import { TokenLine, AccentReading, wordKey } from "./TokenLine.tsx";
+import { TokenLine, wordKey } from "./TokenLine.tsx";
 import { Sidebar } from "./Sidebar.tsx";
-import { heatBins, heatAlpha } from "./heat.ts";
-import { accentOf, loadAccents } from "./accent.ts";
+import { loadAccents } from "./accent.ts";
 import { readBlacklist, writeBlacklist } from "./blacklist.ts";
-import { freqRank, freqRankOf, freqTier, loadFreq } from "./freq.ts";
+import { freqRank, loadFreq } from "./freq.ts";
 import { tmHeartbeat, tmEvent } from "./telemetry.ts";
 import {
-  PlayIcon,
-  PauseIcon,
-  VolumeIcon,
-  VolumeXIcon,
-  MaximizeIcon,
-  CaptionsIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   BookOpenIcon,
 } from "./icons.tsx";
 import { refreshAnkiWords, useAnkiWordsLive } from "./ankicache.ts";
-import { isModalOpen } from "./keys.ts";
 import { registerCommands } from "./commands.ts";
 import { rankPreStudy } from "./prestudy.ts";
-
-// Module-level cue-token cache: tokenization results survive popup churn AND
-// episode changes (the kuromoji instance already does — getTokenizer() memos
-// its promise). Keyed by cue text; FIFO-capped.
-const cueTokenCache = new Map<string, KToken[]>();
-const CUE_TOKEN_CACHE_MAX = 2000;
-function cueTokensPut(text: string, toks: KToken[]): void {
-  if (!cueTokenCache.has(text) && cueTokenCache.size >= CUE_TOKEN_CACHE_MAX) {
-    const oldest = cueTokenCache.keys().next().value;
-    if (oldest !== undefined) cueTokenCache.delete(oldest);
-  }
-  cueTokenCache.set(text, toks);
-}
+import { isJaLang } from "./lang.ts";
+import { readKnownWords } from "./coverage.ts";
+import {
+  cueTokensGet,
+  cueTokensPut,
+  deckCardToLookup,
+  fmtTime,
+  HOVER_CLOSE_MS,
+  HOVER_OPEN_MS,
+  markedContext,
+  qaCacheGet,
+  qaCachePut,
+  readSavedTracks,
+  saveTracks,
+  type PopupState,
+  type QaItem,
+} from "./player/shared.ts";
+import { useWhisperJob } from "./player/useWhisperJob.ts";
+import { usePlayerHotkeys } from "./player/useHotkeys.ts";
+import { LookupPanel } from "./player/LookupPanel.tsx";
+import {
+  PreStudyPanel,
+  type PreStudyItem,
+  type PreStudyState,
+} from "./player/PreStudyPanel.tsx";
+import { Vbar } from "./player/Vbar.tsx";
 
 interface Props {
   entry: LibraryEntry;
@@ -69,133 +74,6 @@ interface Props {
   toast: (msg: string) => void;
   settings: Record<string, unknown>;
 }
-
-interface PopupState {
-  kind: "word" | "sentence";
-  surface: string; // the word, or the whole JP sentence for kind="sentence"
-  reading?: string;
-  x: number; // horizontal center of the anchored word (viewport coords)
-  y: number; // top edge of the anchored word
-  anchorBottom: number; // bottom edge of the anchored word
-  context: string;
-  secondary?: string; // RU cue text shown at the same time (sentence panels)
-  dictForm?: string; // basic_form when it differs from the surface (e.g. 食べる)
-  timestamp: number;
-  // The plain cue text at popup-open time: card context + frame/audio capture
-  // stay coherent with what the user looked at, even if playback moved on
-  // while the (pinned) popup stayed open.
-  cueText: string;
-}
-
-interface QaItem {
-  q: string;
-  a: string | null; // null while loading
-}
-
-// One unknown word in the pre-study (`w`) panel.
-interface PreStudyItem {
-  lemma: string; // dictionary form (wordKey) — what gets added to Anki
-  reading?: string; // hiragana
-  rank: number | null; // frequency rank, null = not in the 30k list
-  context: string; // cue text where the word first appears
-  time: number; // first-occurrence cue midpoint in FILE time (for frame capture)
-  checked: boolean;
-  added: boolean;
-  /** the only unknown in >=1 window cue — instantly minable (web/prestudy.ts) */
-  iPlusOne?: boolean;
-  /** every occurrence cue is unknown-heavy — demoted, unchecked by default */
-  muddy?: boolean;
-}
-
-interface PreStudyState {
-  loading: boolean;
-  items: PreStudyItem[];
-}
-
-const STORAGE_PREFIX = "zr.tracks.";
-
-// api.ts is owned by another agent — widen the call signatures locally to
-// thread the new optional context fields without editing it.
-const lookupApi = api.lookup as (p: {
-  word: string;
-  context: string;
-  source: string;
-  secondary?: string;
-  mediaId?: string;
-  timestamp?: number;
-  withFrame?: boolean;
-  noCache?: boolean;
-}) => Promise<WordLookup>;
-const explainApi = api.explain as (p: {
-  sentence: string;
-  secondary: string;
-  source: string;
-  context?: string;
-}) => Promise<ExplainResult>;
-
-/** prev/current/next cue texts with the current line marked, for Gemini. */
-function markedContext(cues: Cue[], i: number): string {
-  if (i < 0 || !cues[i]) return "";
-  const lines: string[] = [];
-  if (cues[i - 1]) lines.push(`(prev) ${cues[i - 1]!.text}`);
-  lines.push(`(current) ${cues[i]!.text}`);
-  if (cues[i + 1]) lines.push(`(next) ${cues[i + 1]!.text}`);
-  return lines.join("\n");
-}
-
-// Module-level Q/A history cache so the ask… thread survives popup close/
-// reopen, keyed by kind + word/sentence + context. FIFO-capped at ~100.
-const qaCache = new Map<string, QaItem[]>();
-const QA_CACHE_MAX = 100;
-function qaCachePut(key: string, items: QaItem[]): void {
-  if (!qaCache.has(key) && qaCache.size >= QA_CACHE_MAX) {
-    const oldest = qaCache.keys().next().value;
-    if (oldest !== undefined) qaCache.delete(oldest);
-  }
-  qaCache.set(key, items);
-}
-
-function readSavedTracks(
-  mediaId: string,
-): { primary?: string; secondary?: string } {
-  try {
-    const raw = localStorage.getItem(STORAGE_PREFIX + mediaId);
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveTracks(mediaId: string, primary: string, secondary: string): void {
-  try {
-    localStorage.setItem(
-      STORAGE_PREFIX + mediaId,
-      JSON.stringify({ primary, secondary }),
-    );
-  } catch {
-    /* ignore quota / disabled storage */
-  }
-}
-
-function langLabel(t: SubTrackInfo): string {
-  // Prefer the backend-provided friendly label ("Japanese · Whisper").
-  if (t.label && t.label.trim()) return t.label;
-  // Fallback: plain lang code (+ title if present). No sidecar/embedded jargon.
-  return t.title ? `${t.lang} · ${t.title}` : t.lang;
-}
-
-const HOVER_OPEN_MS = 200; // hover-intent: rest this long before opening/looking up
-const HOVER_CLOSE_MS = 120; // grace after leaving the word before hiding
-
-const fmtTime = (s: number): string => {
-  if (!Number.isFinite(s) || s < 0) s = 0;
-  const m = Math.floor(s / 60);
-  const sec = Math.floor(s % 60);
-  return `${m}:${String(sec).padStart(2, "0")}`;
-};
-
-const isJaLang = (l: string) => l === "ja" || l === "jpn" || l.startsWith("ja");
-const isRuLang = (l: string) => l === "ru" || l === "rus" || l.startsWith("ru");
 
 export function Player({ entry, startAt, toast, settings }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -277,7 +155,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   const primaryCuesRef = useRef<Cue[]>([]);
 
   const [tokens, setTokens] = useState<KToken[] | null>(null);
-  const tokenizerReady = useRef(false);
   const tracksLoaded = useRef(false);
   // True while the selected primary track's cues are still being fetched —
   // drives a dim "loading subtitles…" line in the overlay.
@@ -289,11 +166,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   // NOT at mount: the dict parse blocks the main thread and would delay the
   // (milliseconds-fast) cue fetch + first plain-text subtitle render.
   const warmTokenizer = useCallback(() => {
-    void getTokenizer()
-      .then(() => {
-        tokenizerReady.current = true;
-      })
-      .catch(() => {});
+    void getTokenizer().catch(() => {});
   }, []);
 
   const [wordIndex, setWordIndex] = useState<WordIndex>(() =>
@@ -364,14 +237,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   }, []);
 
   // --- local mark-as-known set (no Anki): zr.known, toggled with `k` ---
-  const [knownWords, setKnownWords] = useState<Set<string>>(() => {
-    try {
-      const raw = JSON.parse(localStorage.getItem("zr.known") ?? "[]");
-      return new Set(Array.isArray(raw) ? raw.filter((w) => typeof w === "string") : []);
-    } catch {
-      return new Set();
-    }
-  });
+  const [knownWords, setKnownWords] = useState<Set<string>>(() =>
+    readKnownWords(),
+  );
   const knownWordsRef = useRef(knownWords);
   useEffect(() => {
     knownWordsRef.current = knownWords;
@@ -707,9 +575,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     return () => v.removeEventListener("play", onPlay);
   }, []);
 
-  const [whisperBusy, setWhisperBusy] = useState(false);
-  const [whisperStatus, setWhisperStatus] = useState<string>("");
-  const [whisperLastEnd, setWhisperLastEnd] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
   // The stage sizes itself to the video's native aspect ratio so there are
   // never letterbox bars (subs floating in black) in normal mode.
@@ -727,17 +592,29 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     return () => v.removeEventListener("loadedmetadata", onMeta);
   }, [entry.id]);
   const [translateBusy, setTranslateBusy] = useState(false);
-  const whisperJobRef = useRef<string | null>(null);
-  const whisperEsRef = useRef<EventSource | null>(null);
-  const whisperRetryRef = useRef(0);
-  const attachWhisperRef = useRef<(jobId: string) => void>(() => {});
-  const retryAttachRef = useRef<() => void>(() => {});
 
-  // Live cues streamed by a running whisper job. Kept SEPARATE from the
-  // user-selected primary track's cues so a batch job can't clobber them;
-  // they drive the overlay/sidebar only when no primary track is selected or
-  // the selected primary is the whisper-generated ja track-to-be.
-  const [whisperCues, setWhisperCues] = useState<Cue[]>([]);
+  // Whisper job lifecycle (web/player/useWhisperJob.ts): start/cancel, SSE
+  // attach + bounded re-attach, post-reload rediscovery, live streamed cues.
+  // Live cues are kept SEPARATE from the user-selected primary track's cues
+  // so a batch job can't clobber them; they drive the overlay/sidebar only
+  // when no primary track is selected or the selected primary is the
+  // whisper-generated ja track-to-be.
+  const {
+    whisperBusy,
+    whisperStatus,
+    whisperLastEnd,
+    whisperCues,
+    whisperJobRef,
+    clearWhisperCues,
+    onGenerateJa,
+    onCancelWhisper,
+  } = useWhisperJob({
+    mediaId: entry.id,
+    toast,
+    setTracks,
+    setPrimaryId,
+    mountedRef,
+  });
   const whisperLive =
     whisperCues.length > 0 && (!primaryId || primaryId === "sidecar:gen:ja");
   const displayCues = whisperLive ? whisperCues : primaryCues;
@@ -814,10 +691,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       // Auto-select sensible defaults: prefer a Japanese primary, ru/en secondary.
       const primLang = (settings.targetLang as string) || "ja";
       const secLang = (settings.knownLang as string) || "ru";
-      const isJa = (l: string) => l === "jpn" || l === "ja" || l.startsWith("ja");
       const autoPrim =
-        ts.find((t) => t.kind === "embedded" && isJa(t.lang)) ??
-        ts.find((t) => isJa(t.lang)) ??
+        ts.find((t) => t.kind === "embedded" && isJaLang(t.lang)) ??
+        ts.find((t) => isJaLang(t.lang)) ??
         ts.find((t) => t.lang === primLang) ??
         ts.find((t) => t.lang === "ja");
       const autoSec =
@@ -833,7 +709,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             t.lang.startsWith("ru"),
         ) ??
         ts.find((t) => t.id !== autoPrim?.id && t.lang === secLang) ??
-        ts.find((t) => t.id !== autoPrim?.id && (t.lang === "ru" || t.lang === "ru".slice(0, 2))) ??
+        ts.find((t) => t.id !== autoPrim?.id && t.lang === "ru") ??
         ts.find((t) => t.id !== autoPrim?.id && t.lang.startsWith("ru")) ??
         ts.find((t) => t.id !== autoPrim?.id && (t.lang === "en" || t.lang.startsWith("en")));
 
@@ -876,8 +752,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         warmTokenizer();
         setPrimaryCues(c);
         // No whisper job running → any leftover live cues are stale now.
-        if (whisperJobRef.current == null)
-          setWhisperCues((w) => (w.length ? [] : w));
+        if (whisperJobRef.current == null) clearWhisperCues();
       })
       .catch(() => !cancelled && setPrimaryCues([]))
       .finally(() => !cancelled && setCuesLoading(false));
@@ -1287,326 +1162,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     };
   }, [entry.id, toast]);
 
-  // --- global hotkeys: work regardless of focus (except real text inputs) ---
-  useEffect(() => {
-    const FRAME = 1 / 24; // ~one frame at 23.976/24 fps
-    const RATES = [0.5, 0.75, 1, 1.25, 1.5];
-    // Letter hotkeys bind to e.code (physical key) so they keep working on
-    // non-Latin layouts (Russian, German…). Symbols/arrows/Space/Tab stay on
-    // e.key, which is layout-correct for them.
-    const LETTERS: Record<string, string> = {
-      KeyF: "f", KeyA: "a", KeyR: "r", KeyL: "l", KeyK: "k", KeyS: "s",
-      KeyP: "p", KeyG: "g", KeyW: "w", KeyB: "b", KeyI: "i", KeyX: "x",
-    };
-    const HANDLED = new Set([
-      " ",
-      "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
-      ",", "<", ".", ">",
-      "-", "=", "[", "]", "\\",
-      "Tab",
-      ...Object.values(LETTERS),
-    ]);
-    const REPEAT_TOGGLES = new Set([" ", "f", "l", "k", "s", "p", "g", "a", "w", "b", "i", "x"]);
-    const isTextInput = (el: Element | null): boolean => {
-      if (!el) return false;
-      if (el.tagName === "TEXTAREA") return true;
-      if ((el as HTMLElement).isContentEditable) return true;
-      if (el.tagName === "INPUT") {
-        const type = (el as HTMLInputElement).type;
-        // checkboxes etc. are not text inputs — hotkeys still apply
-        return !["checkbox", "radio", "button", "range", "submit"].includes(type);
-      }
-      return false;
-    };
-    const onKey = (e: KeyboardEvent) => {
-      // A modal overlay (command palette / cheatsheet) owns the keyboard.
-      if (isModalOpen()) return;
-      // Browser-level combos (Ctrl+L, Cmd+R, Alt+…) are never ours.
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
-      const v = videoRef.current;
-      if (!v) return;
-      const active = document.activeElement;
-      // Real text inputs keep their native behavior entirely.
-      if (isTextInput(active) || isTextInput(e.target as Element | null)) return;
-      // Layout-independent letter token: physical key for letters, e.key else.
-      const kb = LETTERS[e.code] ?? e.key;
-      // Focused <select>/<button>: letter hotkeys still work (no conflict),
-      // but Space/Enter/arrows belong to the element — except Shift+←/→
-      // (episode nav), which selects/buttons don't use. Tab is NOT passed:
-      // the player owns cue navigation, and browsers focus buttons on CLICK
-      // (even tabIndex={-1} ones), which used to break Tab until blur.
-      const passEl = (el: Element | null) =>
-        el?.tagName === "SELECT" || el?.tagName === "BUTTON";
-      const episodeNav =
-        e.shiftKey && (kb === "ArrowLeft" || kb === "ArrowRight");
-      if (
-        (passEl(active) || passEl(e.target as Element | null)) &&
-        !episodeNav &&
-        (kb === " " || kb === "Enter" || kb.startsWith("Arrow"))
-      )
-        return;
-      // Escape closes the lookup panel; otherwise leave it to native handling
-      // (exit fullscreen etc.) — never eat it for nothing.
-      if (e.key === "Escape") {
-        if (preStudyOpenRef.current) {
-          e.preventDefault();
-          e.stopPropagation();
-          setPreStudy(null);
-          return;
-        }
-        if (popupOpenRef.current) {
-          e.preventDefault();
-          e.stopPropagation();
-          clearCloseTimer();
-          askFocusedRef.current = false;
-          setPinned(false);
-          setPopup(null);
-          resumeFromHover();
-        }
-        return;
-      }
-      // Shift+= / Shift+- : subtitle scale (e.code = physical key, so it is
-      // layout-independent; plain -/= without shift stay playback speed).
-      if (e.shiftKey && (e.code === "Equal" || e.code === "Minus")) {
-        e.preventDefault();
-        e.stopPropagation();
-        adjustSubScale(e.code === "Equal" ? 0.1 : -0.1);
-        return;
-      }
-      if (!HANDLED.has(kb)) return;
-      // Avoid double-toggle on key auto-repeat for toggling keys.
-      if (e.repeat && REPEAT_TOGGLES.has(kb)) {
-        e.preventDefault();
-        e.stopPropagation();
-        return;
-      }
-      // We fully own these keys: kill the native activation (Space on a
-      // focused button/checkbox/video would otherwise ALSO toggle → double).
-      e.preventDefault();
-      e.stopPropagation();
-      if (
-        active instanceof HTMLElement &&
-        active !== document.body &&
-        !isTextInput(active)
-      ) {
-        active.blur();
-      }
-      switch (kb) {
-        case " ":
-          pausedByHoverRef.current = false; // user took control
-          if (v.paused) void v.play().catch(() => {});
-          else v.pause();
-          break;
-        case "f":
-          if (document.fullscreenElement) void document.exitFullscreen();
-          else void stageRef.current?.requestFullscreen?.();
-          break;
-        case "ArrowLeft":
-          if (e.shiftKey) void gotoEpisode(-1); // prev episode
-          else v.currentTime = Math.max(0, v.currentTime - 5);
-          break;
-        case "ArrowRight":
-          if (e.shiftKey) void gotoEpisode(1); // next episode
-          else v.currentTime = Math.min(v.duration || Infinity, v.currentTime + 5);
-          break;
-        case "ArrowUp":
-          v.volume = Math.min(1, v.volume + 0.1);
-          break;
-        case "ArrowDown":
-          v.volume = Math.max(0, v.volume - 0.1);
-          break;
-        case ",":
-        case "<":
-          v.pause();
-          v.currentTime = Math.max(0, v.currentTime - FRAME);
-          break;
-        case ".":
-        case ">":
-          v.pause();
-          v.currentTime = Math.min(v.duration || Infinity, v.currentTime + FRAME);
-          break;
-        case "a":
-          // Anki toggle for the open popup word: add when new, delete when
-          // the word is already in the deck. Color is the only state cue.
-          ankiToggleRef.current();
-          break;
-        case "g":
-          // Regenerate the popup explanation (fresh Gemini call, no cache).
-          regenLookupRef.current();
-          break;
-        case "r": {
-          // Replay: jump to the start of the current primary cue; if within
-          // the first 0.3s (or between cues), step back to the previous one —
-          // tapping `r` repeatedly walks backward cue by cue.
-          const off = subOffsetRef.current;
-          const cues = primaryCuesRef.current;
-          if (cues.length === 0) break;
-          const tt = v.currentTime - off;
-          let i = activeCueIndex(cues, tt);
-          if (i < 0) {
-            for (let k = cues.length - 1; k >= 0; k--) {
-              if (cues[k]!.start <= tt) {
-                i = k;
-                break;
-              }
-            }
-          } else if (tt - cues[i]!.start < 0.3 && i > 0) {
-            i -= 1;
-          }
-          if (i >= 0) v.currentTime = Math.max(0, cues[i]!.start + off);
-          break;
-        }
-        case "-":
-        case "=": {
-          let i = RATES.indexOf(v.playbackRate);
-          if (i === -1) i = RATES.indexOf(1);
-          i =
-            kb === "="
-              ? (i + 1) % RATES.length
-              : (i + RATES.length - 1) % RATES.length;
-          v.playbackRate = RATES[i]!;
-          toast(`speed ${RATES[i]}×`);
-          break;
-        }
-        case "[":
-          changeOffset(-0.1);
-          break;
-        case "]":
-          changeOffset(+0.1);
-          break;
-        case "\\":
-          changeOffset(null);
-          break;
-        case "l":
-          toggleSidebar();
-          break;
-        case "Tab": {
-          // Next/previous dialogue line. If a popup is open (incl. pinned),
-          // Tab closes it first — mirror Escape — then seeks.
-          if (popupOpenRef.current) {
-            clearCloseTimer();
-            askFocusedRef.current = false;
-            setPinned(false);
-            setPopup(null);
-            resumeFromHover();
-          }
-          loopRef.current = null; // Tab releases the shadowing loop
-          const off = subOffsetRef.current;
-          const cues = primaryCuesRef.current;
-          if (cues.length === 0) break;
-          const tt = v.currentTime - off;
-          const LEAD = 0.15; // small lead-in before the cue starts
-          if (e.shiftKey) {
-            // previous cue start — same walk-back as `a`
-            let i = activeCueIndex(cues, tt);
-            if (i < 0) {
-              for (let k = cues.length - 1; k >= 0; k--) {
-                if (cues[k]!.start <= tt) {
-                  i = k;
-                  break;
-                }
-              }
-            } else if (tt - cues[i]!.start < 0.3 && i > 0) {
-              i -= 1;
-            }
-            if (i >= 0) v.currentTime = Math.max(0, cues[i]!.start + off - LEAD);
-          } else {
-            const next = cues.find((c) => c.start > tt + 0.01);
-            if (next) v.currentTime = Math.max(0, next.start + off - LEAD);
-          }
-          break;
-        }
-        case "s": {
-          // Shadowing loop on the current primary cue. Repeat count comes from
-          // Settings ("Shadowing repeats", 0 = infinite). `s` again releases.
-          if (loopRef.current) {
-            loopRef.current = null;
-            toast("loop off");
-            break;
-          }
-          const off = subOffsetRef.current;
-          const cues = primaryCuesRef.current;
-          const i = activeCueIndex(cues, v.currentTime - off);
-          if (i < 0) {
-            toast("no cue to loop");
-            break;
-          }
-          const n = shadowRepeatsRef.current;
-          loopRef.current = { idx: i, remaining: n > 0 ? n : Infinity };
-          toast(n > 0 ? `loop ×${n}` : "loop on");
-          break;
-        }
-        case "w":
-          togglePreStudy();
-          break;
-        case "p":
-          toggleAutopause();
-          break;
-        case "b": {
-          // hold = temporary unblur; quick double-press toggles for the session
-          const now = Date.now();
-          if (now - lastBDownRef.current < 350) {
-            const next = !blurOffRef.current;
-            blurOffRef.current = next;
-            setBlurOff(next);
-            toast(next ? "blur off" : "blur on");
-          }
-          lastBDownRef.current = now;
-          setSecHold(true);
-          break;
-        }
-        case "i": {
-          if (document.pictureInPictureElement) {
-            void document.exitPictureInPicture().catch(() => {});
-          } else if (typeof v.requestPictureInPicture === "function") {
-            v.requestPictureInPicture().catch((err: unknown) =>
-              toast(`PiP failed: ${err instanceof Error ? err.message : err}`),
-            );
-          } else {
-            toast("PiP unsupported");
-          }
-          break;
-        }
-        case "k": {
-          // toggle mark-as-known for the popup word or the hovered word
-          const key = popupKeyRef.current ?? hoveredKeyRef.current;
-          if (!key) break;
-          const adding = !knownWordsRef.current.has(key);
-          if (adding) sessKnownRef.current += 1;
-          toggleKnown(key);
-          tmEvent("mark_known", { word: key });
-          toast(adding ? `known: ${key}` : `unknown: ${key}`);
-          break;
-        }
-        case "x": {
-          // toggle blacklist for the popup word or the hovered word
-          const key = popupKeyRef.current ?? hoveredKeyRef.current;
-          if (!key) break;
-          const adding = !blacklistRef.current.has(key);
-          toggleBlacklist(key);
-          tmEvent("blacklist", { word: key, on: adding });
-          toast(adding ? `blacklisted: ${key}` : `unblacklisted: ${key}`);
-          break;
-        }
-      }
-    };
-    // keyup re-blurs the secondary line after a `b` hold (harmless elsewhere)
-    const onKeyUp = (e: KeyboardEvent) => {
-      if (e.code === "KeyB") setSecHold(false);
-    };
-    // alt-tab / focus loss while `b` is held: keyup never arrives — re-blur.
-    const onWinBlur = () => setSecHold(false);
-    // capture phase: run before any focused element's own key handling
-    window.addEventListener("keydown", onKey, true);
-    window.addEventListener("keyup", onKeyUp, true);
-    window.addEventListener("blur", onWinBlur);
-    return () => {
-      window.removeEventListener("keydown", onKey, true);
-      window.removeEventListener("keyup", onKeyUp, true);
-      window.removeEventListener("blur", onWinBlur);
-    };
-  }, [changeOffset, adjustSubScale, toast, clearCloseTimer, resumeFromHover, toggleSidebar, toggleKnown, toggleBlacklist, gotoEpisode, togglePreStudy, toggleAutopause]);
-
   const primaryText = activeP >= 0 && activeP < displayCues.length ? displayCues[activeP]!.text : "";
   // Bounds-checked: activeS can be stale for one render after the secondary
   // track switches (off / another track) — secondaryCues shrinks before the
@@ -1625,7 +1180,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       setTokens(null);
       return;
     }
-    const cached = cueTokenCache.get(primaryText);
+    const cached = cueTokensGet(primaryText);
     if (cached) {
       setTokens(cached);
       return;
@@ -1635,7 +1190,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     void getTokenizer()
       .then((tok) => {
         if (cancelled) return;
-        tokenizerReady.current = true;
         const toks = tok.tokenize(primaryText);
         cueTokensPut(primaryText, toks);
         setTokens(toks);
@@ -1680,7 +1234,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       );
       const sText = sIdx >= 0 ? secondaryCuesRef.current[sIdx]!.text : undefined;
       try {
-        const lk = await lookupApi({
+        const lk = await api.lookup({
           word: it.lemma,
           context: it.context,
           source: entry.name,
@@ -1688,7 +1242,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             ? { mediaId: entry.id, timestamp: it.time, withFrame: true }
             : {}),
         });
-        await (api.ankiAdd as (p: Record<string, unknown>) => Promise<unknown>)({
+        await api.ankiAdd({
           word: it.lemma,
           reading: lk.reading || it.reading || "",
           translation: lk.translation,
@@ -1852,6 +1406,43 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     resumeFromHover();
   }, [clearCloseTimer, resumeFromHover]);
 
+  // --- global hotkeys (web/player/useHotkeys.ts): work regardless of focus
+  // (except real text inputs); handlers read the latest state via this ctx ---
+  usePlayerHotkeys({
+    videoRef,
+    stageRef,
+    preStudyOpenRef,
+    popupOpenRef,
+    popupKeyRef,
+    hoveredKeyRef,
+    pausedByHoverRef,
+    askFocusedRef,
+    subOffsetRef,
+    primaryCuesRef,
+    loopRef,
+    shadowRepeatsRef,
+    knownWordsRef,
+    blacklistRef,
+    sessKnownRef,
+    lastBDownRef,
+    blurOffRef,
+    setBlurOff,
+    setSecHold,
+    ankiToggleRef,
+    regenLookupRef,
+    closePanel,
+    closePreStudy: () => setPreStudy(null),
+    adjustSubScale,
+    changeOffset,
+    toggleSidebar,
+    toggleKnown,
+    toggleBlacklist,
+    gotoEpisode,
+    togglePreStudy,
+    toggleAutopause,
+    toast,
+  });
+
   // "(?)" after the last token: explain the whole sentence in the same panel.
   const onExplainClick = useCallback(
     (e: React.MouseEvent) => {
@@ -1881,7 +1472,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   useEffect(() => {
     const key = popup ? `${popup.kind}|${popup.surface}|${popup.context}` : null;
     qaKeyRef.current = key;
-    const cached = key ? qaCache.get(key) : undefined;
+    const cached = key ? qaCacheGet(key) : undefined;
     setQa(cached ? cached.filter((i) => i.a != null) : []);
     setAskText("");
     setAskBusy(false);
@@ -1902,7 +1493,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     let cancelled = false;
     setExplain(null);
     setExplainLoading(true);
-    void explainApi({
+    void api.explain({
       sentence: popup.surface,
       secondary: popup.secondary ?? "",
       source: entry.name,
@@ -1963,13 +1554,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     );
     const deckCard = matched ? deckCardsRef.current.get(matched) : undefined;
     if (deckCard) {
-      const m = deckCard.front.match(/^(.+?)\s*\[(.+?)\]\s*$/);
-      setLookup({
-        reading: m?.[2] ?? "",
-        translation: deckCard.back,
-        notes: deckCard.notes ?? "",
-        context: "",
-      });
+      setLookup(deckCardToLookup(deckCard));
       setLookupFromDeck(true);
       setLookupLoading(false);
       return;
@@ -1996,7 +1581,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       : popup.context;
     let p = inflight.current.get(cacheKey);
     if (!p) {
-      p = lookupApi({
+      p = api.lookup({
         word: surface,
         context: ctx,
         source: entry.name,
@@ -2027,7 +1612,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     if (!popup || popup.kind !== "word") return;
     setLookupLoading(true);
     try {
-      const res = await lookupApi({
+      const res = await api.lookup({
         word: popup.surface,
         context: popup.context,
         secondary: popup.secondary,
@@ -2256,171 +1841,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   }, [popup, popupSaved, lookup, explain, onAdd, onAddSentence, onDelete]);
   ankiToggleRef.current = onAnkiToggle;
 
-  // Attach the SSE stream of a whisper job (new or rediscovered after reload)
-  // and drive the progress UI + live cues from it.
-  const attachWhisper = useCallback(
-    (jobId: string) => {
-      whisperJobRef.current = jobId;
-      const liveCues: Cue[] = [];
-      // Coalesce the per-cue state updates: whisper streams hundreds of cues
-      // over a long episode; a setState per cue floods React and can crash the
-      // tab. Flush at most ~4×/sec, plus an immediate flush on terminal status.
-      let flushTimer: number | null = null;
-      let dirty = false;
-      const flush = () => {
-        flushTimer = null;
-        if (!dirty) return;
-        dirty = false;
-        setWhisperCues(liveCues.slice());
-        setWhisperLastEnd(liveCues.length ? liveCues[liveCues.length - 1]!.end : 0);
-      };
-      const scheduleFlush = () => {
-        dirty = true;
-        if (flushTimer == null) flushTimer = window.setTimeout(flush, 250);
-      };
-      // Never two live streams: a rediscovery attach racing a user-initiated
-      // one would otherwise leak the previous EventSource (and flicker cues
-      // between two competing liveCues arrays).
-      whisperEsRef.current?.close();
-      const es = new EventSource(api.whisperEventsUrl(jobId));
-      whisperEsRef.current = es;
-      es.onopen = () => {
-        whisperRetryRef.current = 0; // healthy connection → reset retry budget
-      };
-      es.onmessage = (ev) => {
-        let data:
-          | { type: "snapshot"; status: string; cues: Cue[] }
-          | { type: "status"; status: string; error?: string }
-          | { type: "cue"; cue: Cue };
-        try {
-          data = JSON.parse(ev.data as string) as typeof data;
-        } catch {
-          return; // one malformed event must not kill the handler
-        }
-        if (data.type === "snapshot") {
-          liveCues.length = 0;
-          liveCues.push(...data.cues);
-          scheduleFlush();
-          setWhisperStatus(data.status);
-        } else if (data.type === "cue") {
-          liveCues.push(data.cue);
-          scheduleFlush();
-        } else if (data.type === "status") {
-          setWhisperStatus(data.status);
-          if (
-            data.status === "done" ||
-            data.status === "error" ||
-            data.status === "canceled"
-          ) {
-            if (flushTimer != null) window.clearTimeout(flushTimer);
-            flush();
-            es.close();
-            whisperEsRef.current = null;
-            setWhisperBusy(false);
-            whisperJobRef.current = null;
-            if (data.status === "done") {
-              // refresh tracks and switch to the freshly-generated JP track
-              void api.subs(entry.id).then((ts) => {
-                setTracks(ts);
-                const ja =
-                  ts.find((t) => t.id === "sidecar:gen:ja") ??
-                  ts.find((t) => t.id === "sidecar:ja") ??
-                  ts.find((t) => isJaLang(t.lang));
-                if (ja) setPrimaryId(ja.id);
-              });
-              toast("Japanese subtitles generated");
-            } else if (data.status === "error") {
-              toast(`Whisper: ${data.error ?? "error"}`);
-            }
-          }
-        }
-      };
-      es.onerror = () => {
-        if (flushTimer != null) window.clearTimeout(flushTimer);
-        flush();
-        es.close();
-        if (whisperEsRef.current === es) whisperEsRef.current = null;
-        // The job keeps running server-side — retry the SSE attach (bounded)
-        // via /api/whisper/active rediscovery instead of going idle.
-        retryAttachRef.current();
-      };
-    },
-    [entry.id, toast],
-  );
-  useEffect(() => {
-    attachWhisperRef.current = attachWhisper;
-  }, [attachWhisper]);
-
-  // Bounded SSE re-attach: up to 5 attempts ~2s apart; only then clear busy.
-  const retryAttach = useCallback(() => {
-    if (whisperRetryRef.current >= 5) {
-      setWhisperBusy(false);
-      whisperJobRef.current = null;
-      return;
-    }
-    whisperRetryRef.current += 1;
-    window.setTimeout(() => {
-      if (!mountedRef.current) return; // Player unmounted — no orphan SSE
-      if (whisperEsRef.current != null) return; // already reattached
-      void api
-        .whisperActive(entry.id)
-        .then((r) => {
-          if (r.jobId) attachWhisperRef.current(r.jobId);
-          else {
-            // job actually finished/disappeared while we were detached
-            setWhisperBusy(false);
-            whisperJobRef.current = null;
-          }
-        })
-        .catch(() => retryAttachRef.current());
-    }, 2000);
-  }, [entry.id]);
-  useEffect(() => {
-    retryAttachRef.current = retryAttach;
-  }, [retryAttach]);
-
-  // --- whisper generate JP ---
-  const onGenerateJa = useCallback(async () => {
-    setWhisperBusy(true);
-    setWhisperStatus("starting…");
-    setWhisperLastEnd(0);
-    setWhisperCues([]);
-    whisperRetryRef.current = 0;
-    try {
-      // Server dedups: an already-active job for this file returns its id.
-      const { jobId } = await api.whisperStart(entry.id, "ja");
-      attachWhisper(jobId);
-    } catch (e) {
-      setWhisperBusy(false);
-      toast(`Whisper start failed: ${e instanceof Error ? e.message : e}`);
-    }
-  }, [entry.id, toast, attachWhisper]);
-
-  // Rediscover a running whisper job after a page reload and reattach its SSE
-  // so the progress UI resumes instead of offering a duplicate Generate.
-  useEffect(() => {
-    let cancelled = false;
-    void api
-      .whisperActive(entry.id)
-      .then((r) => {
-        if (cancelled || !r.jobId) return;
-        setWhisperBusy(true);
-        setWhisperStatus(r.status ?? "running");
-        setWhisperLastEnd(0);
-        attachWhisper(r.jobId);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-      whisperEsRef.current?.close();
-      whisperEsRef.current = null;
-    };
-  }, [entry.id, attachWhisper]);
-
-  const onCancelWhisper = useCallback(async () => {
-    if (whisperJobRef.current) await api.whisperCancel(whisperJobRef.current);
-  }, []);
-
   // --- translate primary -> RU ---
   const onTranslateRu = useCallback(async () => {
     if (!primaryId) return;
@@ -2504,134 +1924,18 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   // hiding lives in TokenLine (shared by the overlay and the sidebar).
   const furiganaOn = settings.furigana !== false;
 
-  // --- dialogue-density strip: 2s bins, alpha = speech seconds per bin ---
-  const densityCanvasRef = useRef<HTMLCanvasElement>(null);
-  const densityMarkerRef = useRef<HTMLDivElement>(null);
-  const hasDensity = displayCues.length > 0 && videoDuration > 0;
-  useEffect(() => {
-    const c = densityCanvasRef.current;
-    if (!c || !hasDensity) return;
-    // Difficulty heat (web/heat.ts): 2s bins; brightness encodes the unknown-
-    // word ratio per cue (heatAlpha), empty bins stay transparent. Degrades to
-    // plain density while the per-cue unknown counts are still computing.
-    const bins = heatBins(displayCues, cueUnknowns ?? [], 2, videoDuration);
-    const draw = () => {
-      const dpr = window.devicePixelRatio || 1;
-      const cssW = c.clientWidth || 640;
-      c.width = Math.max(1, Math.round(cssW * dpr));
-      c.height = Math.max(1, Math.round(4 * dpr));
-      const ctx = c.getContext("2d");
-      if (!ctx) return;
-      ctx.fillStyle = "rgba(0,0,0,0.6)";
-      ctx.fillRect(0, 0, c.width, c.height);
-      const px = c.width / Math.max(1, bins.length);
-      for (let b = 0; b < bins.length; b++) {
-        const a = heatAlpha(bins[b]!);
-        if (a <= 0.01) continue;
-        ctx.fillStyle = `rgba(255,255,255,${a.toFixed(3)})`;
-        ctx.fillRect(b * px, 0, Math.ceil(px), c.height);
-      }
-    };
-    draw();
-    // redraw at the new CSS width on layout changes (fullscreen, resize) —
-    // otherwise the bitmap keeps its old width and stretches blurry.
-    const ro = new ResizeObserver(draw);
-    ro.observe(c);
-    return () => ro.disconnect();
-  }, [displayCues, videoDuration, hasDensity, cueUnknowns]);
-  // current-position marker: cheap direct-DOM left% update, no React re-render
-  useEffect(() => {
-    const v = videoRef.current;
-    const m = densityMarkerRef.current;
-    if (!v || !m) return;
-    const upd = () => {
-      if (!(v.duration > 0)) return;
-      const pct = (v.currentTime / v.duration) * 100;
-      m.style.left = `${pct}%`;
-      if (playedRef.current) playedRef.current.style.width = `${pct}%`;
-    };
-    v.addEventListener("timeupdate", upd);
-    v.addEventListener("seeking", upd);
-    upd();
-    return () => {
-      v.removeEventListener("timeupdate", upd);
-      v.removeEventListener("seeking", upd);
-    };
-  }, [entry.id]);
-  // --- custom controls bar (replaces the native <video controls>) ---
-  const seekRef = useRef<HTMLDivElement>(null);
-  const playedRef = useRef<HTMLDivElement>(null);
+  // Interaction state shared with the Vbar (which owns the seek/CC/volume
+  // internals): the HUD autohide below must stay visible while scrubbing,
+  // hovering the bar row, or with the CC popover open.
   const scrubbingRef = useRef(false);
-  const [seekHover, setSeekHover] = useState<{ x: number; t: number } | null>(
-    null,
-  );
-  // mm:ss readout — timeupdate fires ~4×/s, cheap enough for a state update
-  const [curTime, setCurTime] = useState(0);
-  useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    const upd = () => setCurTime(v.currentTime);
-    v.addEventListener("timeupdate", upd);
-    v.addEventListener("seeked", upd);
-    upd();
-    return () => {
-      v.removeEventListener("timeupdate", upd);
-      v.removeEventListener("seeked", upd);
-    };
-  }, [entry.id]);
-
-  // volume / mute mirrors (ArrowUp/Down hotkeys change v.volume directly)
-  const [volume, setVolume] = useState(1);
-  const [muted, setMuted] = useState(false);
-  useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    const upd = () => {
-      setVolume(v.volume);
-      setMuted(v.muted);
-    };
-    v.addEventListener("volumechange", upd);
-    upd();
-    return () => v.removeEventListener("volumechange", upd);
-  }, [entry.id]);
-
-  // --- CC popover (track selection + contextual actions), anchored above the
-  // vbar. Esc / click-away closes; opening pins the HUD visible. ---
-  const [ccOpen, setCcOpen] = useState(false);
+  const barHoverRef = useRef(false);
   const ccOpenRef = useRef(false);
-  useEffect(() => {
-    ccOpenRef.current = ccOpen;
-  }, [ccOpen]);
-  const ccRef = useRef<HTMLDivElement>(null);
-  const ccBtnRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    if (!ccOpen) return;
-    const onDown = (e: MouseEvent) => {
-      const t = e.target as Node | null;
-      if (t && (ccRef.current?.contains(t) || ccBtnRef.current?.contains(t)))
-        return;
-      setCcOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.preventDefault();
-      e.stopPropagation();
-      setCcOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey, true);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey, true);
-    };
-  }, [ccOpen]);
 
   // Autohide: fade the bar (and the cursor) after 2.5s without mouse movement
   // while playing. Reappears on mousemove / pause. The bar OVERLAYS the video,
   // so the subtitle overlay never shifts when it hides.
   const [hudHidden, setHudHidden] = useState(false);
   const hudTimerRef = useRef<number | null>(null);
-  const barHoverRef = useRef(false);
   const pokeHud = useCallback(() => {
     setHudHidden(false);
     if (hudTimerRef.current != null) window.clearTimeout(hudTimerRef.current);
@@ -2718,51 +2022,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     else void stageRef.current?.requestFullscreen?.();
   }, []);
 
-  const seekToClientX = useCallback((clientX: number) => {
-    const bar = seekRef.current;
-    const v = videoRef.current;
-    if (!bar || !v || !(v.duration > 0)) return;
-    const r = bar.getBoundingClientRect();
-    const frac = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
-    v.currentTime = frac * v.duration;
-  }, []);
-  const hoverTimeAt = useCallback((clientX: number): { x: number; t: number } | null => {
-    const bar = seekRef.current;
-    const v = videoRef.current;
-    if (!bar || !v || !(v.duration > 0)) return null;
-    const r = bar.getBoundingClientRect();
-    const frac = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
-    return { x: frac * r.width, t: frac * v.duration };
-  }, []);
-  const onSeekDown = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      e.preventDefault();
-      e.currentTarget.setPointerCapture(e.pointerId);
-      scrubbingRef.current = true;
-      seekToClientX(e.clientX);
-      setSeekHover(hoverTimeAt(e.clientX));
-    },
-    [seekToClientX, hoverTimeAt],
-  );
-  const onSeekMove = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      setSeekHover(hoverTimeAt(e.clientX));
-      if (scrubbingRef.current) seekToClientX(e.clientX);
-    },
-    [seekToClientX, hoverTimeAt],
-  );
-  const onSeekUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    scrubbingRef.current = false;
-    try {
-      e.currentTarget.releasePointerCapture(e.pointerId);
-    } catch {
-      /* ignore */
-    }
-  }, []);
-  const onSeekLeave = useCallback(() => {
-    if (!scrubbingRef.current) setSeekHover(null);
-  }, []);
-
   const sidebarSeek = useCallback((t: number) => {
     const v = videoRef.current;
     if (v) v.currentTime = Math.min(v.duration || Infinity, Math.max(0, t));
@@ -2834,12 +2093,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       { id: "pl.condense", title: "player: condensed audio", run: () => void c().onCondense() },
     ]);
   }, [entry.id]);
-
-  const hasJa = tracks.some((t) => isJaLang(t.lang));
-  // Only a GENERATED (synced) RU track hides the Translate button; external or
-  // embedded RU tracks are often out of sync with the JA track.
-  const hasGeneratedRu = tracks.some((t) => isRuLang(t.lang) && t.origin === "generated");
-  const primaryTrackLang = tracks.find((t) => t.id === primaryId)?.lang ?? "";
 
   return (
     <div className="player-wrap">
@@ -2952,205 +2205,30 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             </div>
           )}
         </div>
-        <div className="vbar">
-          <div
-            ref={seekRef}
-            className="seekbar"
-            onPointerDown={onSeekDown}
-            onPointerMove={onSeekMove}
-            onPointerUp={onSeekUp}
-            onPointerCancel={onSeekUp}
-            onPointerLeave={onSeekLeave}
-          >
-            {hasDensity && (
-              <canvas
-                ref={densityCanvasRef}
-                className="density-strip"
-                title="Dialogue density — brighter = more unknown words; click to seek"
-              />
-            )}
-            <div ref={playedRef} className="seek-played" />
-            <div ref={densityMarkerRef} className="density-marker" />
-            {seekHover && (
-              <div className="seek-tip" style={{ left: seekHover.x }}>
-                {fmtTime(seekHover.t)}
-              </div>
-            )}
-          </div>
-          <div
-            className="vbar-row"
-            onMouseEnter={() => {
-              barHoverRef.current = true;
-            }}
-            onMouseLeave={() => {
-              barHoverRef.current = false;
-            }}
-          >
-            <button
-              className="vbar-btn vbar-play"
-              tabIndex={-1}
-              onClick={togglePlay}
-              title={isPaused ? "Play (space)" : "Pause (space)"}
-              aria-label={isPaused ? "Play" : "Pause"}
-            >
-              {isPaused ? <PlayIcon /> : <PauseIcon />}
-            </button>
-            <span className="vbar-time">
-              {fmtTime(curTime)} / {fmtTime(videoDuration)}
-            </span>
-            <span className="vbar-spacer" />
-            <button
-              ref={ccBtnRef}
-              className={`vbar-btn vbar-cc${ccOpen ? " on" : ""}`}
-              tabIndex={-1}
-              onClick={() => setCcOpen((o) => !o)}
-              title="Subtitle tracks"
-              aria-label="Subtitle tracks"
-            >
-              <CaptionsIcon />
-            </button>
-            <button
-              className="vbar-btn vbar-mute"
-              tabIndex={-1}
-              onClick={() => {
-                const v = videoRef.current;
-                if (v) v.muted = !v.muted;
-              }}
-              title={muted ? "Unmute" : "Mute"}
-              aria-label={muted ? "Unmute" : "Mute"}
-            >
-              {muted || volume === 0 ? <VolumeXIcon /> : <VolumeIcon />}
-            </button>
-            <input
-              className="vbar-vol"
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={muted ? 0 : volume}
-              tabIndex={-1}
-              aria-label="Volume"
-              title="Volume (↑/↓)"
-              onChange={(e) => {
-                const v = videoRef.current;
-                if (!v) return;
-                v.volume = parseFloat(e.target.value);
-                v.muted = false;
-              }}
-            />
-            <button
-              className="vbar-btn vbar-fs"
-              tabIndex={-1}
-              onClick={toggleFullscreen}
-              title="Fullscreen (f)"
-              aria-label="Fullscreen"
-            >
-              <MaximizeIcon size={20} />
-            </button>
-          </div>
-          {ccOpen && (
-            <div className="cc-pop" ref={ccRef} role="dialog" aria-label="Subtitle tracks">
-              <div className="cc-group" role="radiogroup" aria-label="Subtitles">
-                <div className="cc-title">Subtitles</div>
-                <label className="cc-row">
-                  <input
-                    type="radio"
-                    name="cc-primary"
-                    value=""
-                    checked={primaryId === ""}
-                    onChange={() => setPrimaryId("")}
-                  />
-                  <span className="cc-label">off</span>
-                </label>
-                {tracks.map((t) => (
-                  <label key={t.id} className="cc-row">
-                    <input
-                      type="radio"
-                      name="cc-primary"
-                      value={t.id}
-                      checked={primaryId === t.id}
-                      onChange={() => setPrimaryId(t.id)}
-                    />
-                    <span className="cc-label">{langLabel(t)}</span>
-                  </label>
-                ))}
-              </div>
-              <div className="cc-group" role="radiogroup" aria-label="Translation">
-                <div className="cc-title">Translation</div>
-                <label className="cc-row">
-                  <input
-                    type="radio"
-                    name="cc-secondary"
-                    value=""
-                    checked={secondaryId === ""}
-                    onChange={() => setSecondaryId("")}
-                  />
-                  <span className="cc-label">off</span>
-                </label>
-                {tracks.map((t) => (
-                  <label key={t.id} className="cc-row">
-                    <input
-                      type="radio"
-                      name="cc-secondary"
-                      value={t.id}
-                      checked={secondaryId === t.id}
-                      onChange={() => setSecondaryId(t.id)}
-                    />
-                    <span className="cc-label">{langLabel(t)}</span>
-                  </label>
-                ))}
-              </div>
-              {((!hasJa && !whisperBusy) ||
-                (primaryId &&
-                  isJaLang(primaryTrackLang) &&
-                  !hasGeneratedRu &&
-                  !translateBusy) ||
-                (hasJa && !condenseBusy && !whisperBusy)) && (
-                <div className="cc-actions">
-                  {!hasJa && !whisperBusy && (
-                    <button
-                      className="cc-action"
-                      title="Transcribe the audio to Japanese subtitles with Whisper"
-                      onClick={() => {
-                        setCcOpen(false);
-                        void onGenerateJa();
-                      }}
-                    >
-                      + generate ja…
-                    </button>
-                  )}
-                  {primaryId &&
-                    isJaLang(primaryTrackLang) &&
-                    !hasGeneratedRu &&
-                    !translateBusy && (
-                      <button
-                        className="cc-action"
-                        title="Translate the primary track to Russian (saved as a track)"
-                        onClick={() => {
-                          setCcOpen(false);
-                          void onTranslateRu();
-                        }}
-                      >
-                        + translate → ru…
-                      </button>
-                    )}
-                  {hasJa && !condenseBusy && !whisperBusy && (
-                    <button
-                      className="cc-action"
-                      title="Concatenate all dialogue audio into one mp3"
-                      onClick={() => {
-                        setCcOpen(false);
-                        void onCondense();
-                      }}
-                    >
-                      + condensed audio…
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
+        <Vbar
+          videoRef={videoRef}
+          mediaKey={entry.id}
+          videoDuration={videoDuration}
+          isPaused={isPaused}
+          togglePlay={togglePlay}
+          toggleFullscreen={toggleFullscreen}
+          displayCues={displayCues}
+          cueUnknowns={cueUnknowns}
+          tracks={tracks}
+          primaryId={primaryId}
+          secondaryId={secondaryId}
+          setPrimaryId={setPrimaryId}
+          setSecondaryId={setSecondaryId}
+          whisperBusy={whisperBusy}
+          translateBusy={translateBusy}
+          condenseBusy={condenseBusy}
+          onGenerateJa={() => void onGenerateJa()}
+          onTranslateRu={() => void onTranslateRu()}
+          onCondense={() => void onCondense()}
+          scrubbingRef={scrubbingRef}
+          barHoverRef={barHoverRef}
+          ccOpenRef={ccOpenRef}
+        />
         {skipTarget != null && (
           <button
             className="skip-pill"
@@ -3182,257 +2260,55 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           </div>
         )}
       {popup && (
-        <div
-          ref={lookupRef}
-          className={`lookup${pinned ? " pinned" : ""}`}
-          style={popupPos}
-          onMouseEnter={onPanelEnter}
-          onMouseLeave={onPanelLeave}
-        >
-          {popup.kind === "sentence" ? (
-            <>
-              <div className={`sentence${popupSaved ? " saved" : ""}`}>
-                {popup.surface}
-              </div>
-              {explainLoading && <div className="spin">Explaining…</div>}
-              {explain && (
-                <>
-                  <div className="translation">{explain.translation}</div>
-                  <div className="notes breakdown">{explain.breakdown}</div>
-                  {explain.idioms && (
-                    <div className="notes breakdown">{explain.idioms}</div>
-                  )}
-                </>
-              )}
-            </>
-          ) : (
-            <>
-          <div>
-            <span className={`word${popupSaved ? " saved" : ""}`}>
-              {popup.surface}
-            </span>
-            {(lookup?.reading || popup.reading) && (
-              <span className="reading popup-reading">
-                {pitchOn && accents ? (
-                  <AccentReading
-                    reading={(lookup?.reading || popup.reading)!}
-                    accent={accentOf(
-                      accents,
-                      popup.surface,
-                      (lookup?.reading || popup.reading)!,
-                      popup.dictForm,
-                    )}
-                  />
-                ) : (
-                  lookup?.reading || popup.reading
-                )}
-              </span>
-            )}
-            {freqMap && (
-              <span
-                className="freq-tag"
-                title="How common this word is (rank in a 30k frequency list)"
-              >
-                {freqTier(freqRankOf(freqMap, popup.surface, popup.dictForm))}
-              </span>
-            )}
-            {lookupFromDeck && (
-              <span
-                className="deck-tag"
-                title="Filled from your Anki card — a deletes it, g regenerates"
-              >
-                from your deck
-              </span>
-            )}
-            {knownWords.has(popup.dictForm ?? popup.surface) && (
-              <span
-                className="known-flag"
-                title="Marked as known — press k to toggle"
-              >
-                known
-              </span>
-            )}
-            {blacklist.has(popup.dictForm ?? popup.surface) && (
-              <span
-                className="known-flag"
-                title="Blacklisted — never counted as unknown; press x to toggle"
-              >
-                blacklisted
-              </span>
-            )}
-          </div>
-          {lookupLoading && <div className="spin">Looking up…</div>}
-          {lookup && (
-            <>
-              <div className="translation">{lookup.translation}</div>
-              {lookup.notes && <div className="notes">{lookup.notes}</div>}
-            </>
-          )}
-          {encHits && encHits.length > 0 && (
-            <div className="enc">
-              <div
-                className="enc-line"
-                title="Where else this word appears in the library"
-                onClick={() => setEncOpen((o) => !o)}
-              >
-                encounters: {encHits.reduce((s, h) => s + h.count, 0)}
-              </div>
-              {encOpen && (
-                <div className="enc-list">
-                  {encHits
-                    .flatMap((h) =>
-                      h.cues.map((c) => ({
-                        mediaId: h.mediaId,
-                        name: h.name,
-                        start: c.start,
-                        text: c.text,
-                      })),
-                    )
-                    .slice(0, 20)
-                    .map((s, i) => (
-                      <div
-                        key={`${s.mediaId}:${s.start}:${i}`}
-                        className="enc-hit"
-                        onClick={() => {
-                          window.location.hash = `#/play/${s.mediaId}@${s.start}`;
-                        }}
-                      >
-                        <span className="enc-meta">
-                          {s.name.replace(/\.[^.]+$/, "")} · {fmtTime(s.start)}
-                        </span>{" "}
-                        {s.text}
-                      </div>
-                    ))}
-                </div>
-              )}
-            </div>
-          )}
-            </>
-          )}
-
-          {qa.length > 0 && (
-            <div className="qa">
-              {qa.map((item, i) => (
-                <div key={i} className="qa-item">
-                  <div className="qa-q">{item.q}</div>
-                  <div className="qa-a">{item.a ?? "…"}</div>
-                </div>
-              ))}
-            </div>
-          )}
-          <input
-            ref={askInputRef}
-            className="ask-input"
-            type="text"
-            placeholder="ask…"
-            value={askText}
-            onChange={(e) => setAskText(e.target.value)}
-            onFocus={() => {
-              askFocusedRef.current = true;
-              clearCloseTimer();
-            }}
-            onBlur={() => {
-              askFocusedRef.current = false;
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void onAsk();
-              else if (e.key === "Escape") closePanel();
-            }}
-          />
-        </div>
+        <LookupPanel
+          popup={popup}
+          popupPos={popupPos}
+          pinned={pinned}
+          popupSaved={popupSaved}
+          lookupRef={lookupRef}
+          onPanelEnter={onPanelEnter}
+          onPanelLeave={onPanelLeave}
+          explain={explain}
+          explainLoading={explainLoading}
+          lookup={lookup}
+          lookupLoading={lookupLoading}
+          lookupFromDeck={lookupFromDeck}
+          pitchOn={pitchOn}
+          accents={accents}
+          freqMap={freqMap}
+          knownWords={knownWords}
+          blacklist={blacklist}
+          encHits={encHits}
+          encOpen={encOpen}
+          onToggleEncounters={() => setEncOpen((o) => !o)}
+          qa={qa}
+          askText={askText}
+          setAskText={setAskText}
+          askInputRef={askInputRef}
+          onAskFocus={() => {
+            askFocusedRef.current = true;
+            clearCloseTimer();
+          }}
+          onAskBlur={() => {
+            askFocusedRef.current = false;
+          }}
+          onAsk={() => void onAsk()}
+          onClose={closePanel}
+        />
       )}
 
       {preStudy && (
-        <div className="lookup prestudy">
-          <div className="prestudy-head">
-            <span className="word">pre-study</span>
-            <span
-              className="prestudy-sub"
-              title="Unknown words in the upcoming playback window, most common first"
-            >
-              next {prestudyMin} min
-              {!preStudy.loading && ` · ${preStudy.items.length} new`}
-            </span>
-            <label
-              className="prestudy-frames"
-              title="Also capture a video frame for each card (slower)"
-            >
-              <input
-                type="checkbox"
-                checked={preFrames}
-                disabled={preBusy}
-                onChange={togglePreFrames}
-              />
-              with frames
-            </label>
-          </div>
-          <div className="prestudy-list">
-            {preStudy.loading && <div className="spin">scanning…</div>}
-            {!preStudy.loading && preStudy.items.length === 0 && (
-              <div className="spin">nothing new</div>
-            )}
-            {preStudy.items.map((it) => (
-              <label
-                key={it.lemma}
-                className={`prestudy-row${it.added ? " added" : ""}`}
-              >
-                <input
-                  type="checkbox"
-                  checked={it.checked}
-                  disabled={it.added || preBusy}
-                  onChange={() => togglePreItem(it.lemma)}
-                />
-                <span className="ps-word">{it.lemma}</span>
-                {it.reading && it.reading !== it.lemma && (
-                  <span className="ps-reading">{it.reading}</span>
-                )}
-                <span
-                  className="freq-tag"
-                  title="How common this word is (rank in a 30k frequency list)"
-                >
-                  {freqTier(it.rank)}
-                </span>
-                {it.iPlusOne && (
-                  <span
-                    className="badge iplus"
-                    title="The only unknown word in at least one upcoming line — makes a clean card"
-                  >
-                    i+1
-                  </span>
-                )}
-                {it.muddy && (
-                  <span
-                    className="badge muddy"
-                    title="Only appears in lines crowded with unknown words — unchecked by default"
-                  >
-                    muddy
-                  </span>
-                )}
-                {it.added && <span className="ps-added">✓</span>}
-              </label>
-            ))}
-          </div>
-          {(() => {
-            const todo = preStudy.items.filter((i) => i.checked && !i.added);
-            return (
-              <div className="row">
-                <button
-                  className="btn"
-                  disabled={preBusy || todo.length === 0}
-                  title="Create one Anki card per checked word (sequentially)"
-                  onClick={() => void onBulkAdd()}
-                >
-                  {preBusy
-                    ? `Adding… ${preProg}`
-                    : `Add ${todo.length} to Anki`}
-                </button>
-                <button className="btn" onClick={() => setPreStudy(null)}>
-                  Close
-                </button>
-              </div>
-            );
-          })()}
-        </div>
+        <PreStudyPanel
+          preStudy={preStudy}
+          prestudyMin={prestudyMin}
+          preFrames={preFrames}
+          preBusy={preBusy}
+          preProg={preProg}
+          onToggleFrames={togglePreFrames}
+          onToggleItem={togglePreItem}
+          onBulkAdd={() => void onBulkAdd()}
+          onClose={() => setPreStudy(null)}
+        />
       )}
 
       {/* `l` in fullscreen: same cue list as a translucent overlay INSIDE the

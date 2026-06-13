@@ -21,8 +21,9 @@ import { accentOf, loadAccents } from "./accent.ts";
 import { readBlacklist, writeBlacklist } from "./blacklist.ts";
 import { isTextInput } from "./keys.ts";
 import { tmEvent } from "./telemetry.ts";
-
-const isJaLang = (l: string) => l === "ja" || l === "jpn" || l.startsWith("ja");
+import { isJaLang } from "./lang.ts";
+import { readKnownWords } from "./coverage.ts";
+import { deckCardToLookup, type QaItem } from "./player/shared.ts";
 
 interface ReadPopup {
   x: number;
@@ -33,11 +34,6 @@ interface ReadPopup {
   context: string;
   /** RU translation of the paragraph (mining context), if present */
   secondary?: string;
-}
-
-interface QaItem {
-  q: string;
-  a: string | null; // null while loading
 }
 
 export function ReadRoute({
@@ -53,14 +49,9 @@ export function ReadRoute({
   const [secondaryCues, setSecondaryCues] = useState<Cue[] | null>(null);
   const [tokenize, setTokenize] = useState<((t: string) => KToken[]) | null>(null);
   const [wordIndex, setWordIndex] = useState<WordIndex>(() => buildWordIndex([], {}));
-  const [knownWords, setKnownWords] = useState<Set<string>>(() => {
-    try {
-      const raw = JSON.parse(localStorage.getItem("zr.known") ?? "[]");
-      return new Set(Array.isArray(raw) ? raw.filter((w) => typeof w === "string") : []);
-    } catch {
-      return new Set();
-    }
-  });
+  const [knownWords, setKnownWords] = useState<Set<string>>(() =>
+    readKnownWords(),
+  );
   const [blacklist, setBlacklist] = useState<Set<string>>(() => readBlacklist());
   const [accents, setAccents] = useState<Map<string, number> | null>(null);
   const [popup, setPopup] = useState<ReadPopup | null>(null);
@@ -250,13 +241,7 @@ export function ReadRoute({
     const matched = matchFront(wordIndex, popup.surface, popup.reading, popup.dictForm);
     const deckCard = matched ? deckCardsRef.current.get(matched) : undefined;
     if (deckCard) {
-      const m = deckCard.front.match(/^(.+?)\s*\[(.+?)\]\s*$/);
-      setLookup({
-        reading: m?.[2] ?? "",
-        translation: deckCard.back,
-        notes: deckCard.notes ?? "",
-        context: "",
-      });
+      setLookup(deckCardToLookup(deckCard));
       setLookupLoading(false);
       return;
     }
@@ -293,12 +278,7 @@ export function ReadRoute({
     let cancelled = false;
     setLookup(null);
     setLookupLoading(true);
-    void (api.lookup as (p: {
-      word: string;
-      context: string;
-      source: string;
-      noCache?: boolean;
-    }) => Promise<WordLookup>)({
+    void api.lookup({
       word: popup.surface,
       context: popup.context,
       source: entry?.name ?? "",
@@ -388,7 +368,7 @@ export function ReadRoute({
     markFrontOptimistic(front); // instant color flip
     const docName = entry.name.replace(/\.[^.]+$/, "");
     try {
-      await (api.ankiAdd as (p: Record<string, unknown>) => Promise<unknown>)({
+      await api.ankiAdd({
         word: popup.surface,
         reading: lookup.reading || popup.reading || "",
         translation: lookup.translation,

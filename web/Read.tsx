@@ -1,7 +1,7 @@
 // READING MODE: the transcript as flowing text — merged paragraphs, timestamp
 // margin links, the same hover/click word contract as the player.
 //
-// WIRING CONTRACT (for the integration agent):
+// Props contract (ReadRoute.tsx is the live wiring):
 //   <Read
 //     cues={jaCues}                      // primary (target-lang) cues
 //     secondaryCues={ruCues ?? null}     // translation cues or null

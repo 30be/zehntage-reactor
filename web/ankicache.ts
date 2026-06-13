@@ -158,9 +158,8 @@ export function cacheDeleteWord(front: string): void {
   notify(cached.data);
 }
 
-// ZR-HOOK (Player integration): live-updating deck for components that should
-// re-render when a background revalidation or optimistic write lands.
-// TODO(orchestrator): wire into Player.tsx once the design agent is done.
+// Live-updating deck hook: components re-render when a background
+// revalidation or an optimistic write lands (Player.tsx is the main user).
 export function useAnkiWordsLive(): AnkiWordsResponse | null {
   const [data, setData] = useState<AnkiWordsResponse | null>(() => readAnkiCache()?.data ?? null);
   useEffect(() => subscribeAnkiWords(setData), []);

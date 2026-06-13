@@ -1,9 +1,9 @@
 // Pure Japanese-token helpers shared by server-side indexing.
 //
-// NOTE: these are COPIED from web/tokenizer.ts (mergeTokens / isLexical /
-// kataToHira) because that file is web-only (loads dict over HTTP) and owned
-// by another change in flight. TODO: unify — make web/tokenizer.ts re-export
-// from here once both waves land.
+// NOTE: mergeTokens / isLexical / kataToHira intentionally mirror
+// web/tokenizer.ts: that file is web-only (loads the kuromoji dict over HTTP)
+// so the server keeps its own copy of these small pure helpers rather than
+// importing across the web/ boundary.
 
 export interface KToken {
   surface_form: string;

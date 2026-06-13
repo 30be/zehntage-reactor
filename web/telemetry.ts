@@ -51,11 +51,6 @@ function flush(useBeacon = false): void {
   });
 }
 
-/** Force an immediate flush (tests / explicit checkpoints). */
-export function tmFlush(): void {
-  flush(false);
-}
-
 let started = false;
 /** Start the periodic flusher + pagehide hook. Idempotent; call once from App. */
 export function tmStart(): void {
