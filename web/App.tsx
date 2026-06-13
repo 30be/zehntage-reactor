@@ -1561,10 +1561,8 @@ function cardEpisodeRef(context: string): { name: string; sec: number } | null {
 const PAGE_SIZE = 50;
 
 function Cards({ go, toast }: { go: (h: string) => void; toast: (m: string) => void }) {
-  type LoadState = "idle" | "loading" | "ok" | "error";
   const [cards, setCards] = useState<FullCard[] | null>(null);
   const [cardsErr, setCardsErr] = useState<string | null>(null);
-  const [loadState, setLoadState] = useState<LoadState>("idle");
   const [entries, setEntries] = useState<LibraryEntry[]>([]);
   // double-click-to-confirm delete: front of the card in "sure?" state
   const [confirmFront, setConfirmFront] = useState<string | null>(null);
@@ -1580,16 +1578,13 @@ function Cards({ go, toast }: { go: (h: string) => void; toast: (m: string) => v
 
   const loadCards = useCallback(() => {
     setCardsErr(null);
-    setLoadState("loading");
     // keep previous cards visible during retry — avoids null→data double-memo pass
     void fetch("/api/anki/cards")
       .then((r) => (r.ok ? (r.json() as Promise<FullCard[]>) : Promise.reject(r.status)))
       .then((data) => {
         setCards(data);
-        setLoadState("ok");
       })
       .catch((e) => {
-        setLoadState("error");
         setCardsErr(`anki/cards → ${e instanceof Error ? e.message : e}`);
         // leave cards as-is (or empty on first load — setCards([]) only when null)
         setCards((prev) => prev ?? []);
