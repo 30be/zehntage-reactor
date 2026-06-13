@@ -21,7 +21,6 @@ export function LookupPanel({
   explainLoading,
   lookup,
   lookupLoading,
-  lookupFromDeck,
   pitchOn,
   accents,
   freqMap,
@@ -50,7 +49,6 @@ export function LookupPanel({
   explainLoading: boolean;
   lookup: WordLookup | null;
   lookupLoading: boolean;
-  lookupFromDeck: boolean;
   pitchOn: boolean;
   accents: Map<string, number> | null;
   freqMap: Map<string, number> | null;
@@ -135,14 +133,6 @@ export function LookupPanel({
                 title="How common this word is (rank in a 30k frequency list)"
               >
                 {freqTier(freqRankOf(freqMap, popup.surface, popup.dictForm))}
-              </span>
-            )}
-            {lookupFromDeck && (
-              <span
-                className="deck-tag"
-                title="Filled from your Anki card — a deletes it, g regenerates"
-              >
-                from your deck
               </span>
             )}
             {knownWords.has(popup.dictForm ?? popup.surface) && (

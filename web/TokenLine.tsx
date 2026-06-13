@@ -97,11 +97,14 @@ export function TokenLine({
         if (!isLexical(tok)) return <span key={i}>{tok.surface_form}</span>;
         const key = wordKey(tok);
         const blacklisted = blacklist?.has(key) ?? false;
-        const localKnown = knownWords.has(key) || blacklisted;
-        const front = localKnown
+        // Deck membership wins over the local known-set: a word that is an
+        // active deck card must show its learning color even if it was once
+        // marked known. Blacklist still forces plain.
+        const front = blacklisted
           ? null
           : matchFront(wordIndex, tok.surface_form, tok.reading, tok.basic_form);
         const inDeck = front != null;
+        const localKnown = !inDeck && (knownWords.has(key) || blacklisted);
         const color = inDeck ? learningColor(wordIndex.progress[front!]) : null;
         // due for review right now → subtle dotted underline (SRS hint)
         const due = inDeck && wordIndex.progress[front!]?.isDue === true;
