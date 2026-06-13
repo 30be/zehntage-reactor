@@ -1,7 +1,7 @@
 // zehntage-reactor HTTP server (Bun.serve).
 
 import { extname, join, dirname, basename, resolve } from "node:path";
-import { stat, readdir, rm } from "node:fs/promises";
+import { stat, readdir, rm, rename } from "node:fs/promises";
 import {
   Library,
   subLangsFor,
@@ -446,7 +446,7 @@ function enqueueTranslate(library: Library, entryId: string, sourceTrack: string
 }
 
 /** Reject a downloaded human sub that is desynced/truncated/sparse. */
-function subPassesQuality(
+export function subPassesQuality(
   cues: Cue[],
   mediaDurSec: number,
 ): { ok: true } | { ok: false; reason: string } {
@@ -461,13 +461,17 @@ function subPassesQuality(
     // Last cue should not end far past the media (wrong-episode / wrong-fps).
     if (last > mediaDurSec * 1.1)
       return { ok: false, reason: `overruns media (${last.toFixed(0)}>${mediaDurSec.toFixed(0)})` };
-    // First cue absurdly late => likely offset/desync.
-    if (first > mediaDurSec * 0.25) return { ok: false, reason: `late start ${first.toFixed(0)}s` };
+    // First cue absurdly late => likely offset/desync. Absolute floor so a long
+    // cold open / OP (2-3 min) isn't rejected on slow episodes.
+    const lateFloor = Math.max(120, mediaDurSec * 0.15);
+    if (first > lateFloor)
+      return { ok: false, reason: `late start ${first.toFixed(0)}s (>${lateFloor.toFixed(0)})` };
   }
-  // Cue density: dialogue anime ~ >= 4 cues/min over the covered span.
+  // Cue density: dialogue anime ~ >= 2.5 cues/min over the covered span
+  // (slow/quiet episodes legitimately have fewer cues).
   const spanMin = Math.max(1 / 60, (last - first) / 60);
   const density = cues.length / spanMin;
-  if (density < 4) return { ok: false, reason: `density ${density.toFixed(1)}/min` };
+  if (density < 2.5) return { ok: false, reason: `density ${density.toFixed(1)}/min` };
   return { ok: true };
 }
 
@@ -520,27 +524,48 @@ async function tryJimakuJa(library: Library, entry: LibraryEntry): Promise<boole
   // video, NOT under subs/ — so origin=external (distinguishable from whisper).
   const base = basename(entry.absPath, extname(entry.absPath));
   const dest = join(dirname(entry.absPath), `${base}.${lang}${ext}`);
+  // Download to a temp path and only rename to the real sidecar AFTER the
+  // quality gate passes. A crash/failure must never leave an unvetted sidecar
+  // at `dest` (hasJapaneseTrack would then trust it forever).
+  const tmp = `${dest}.tmp-${process.pid}`;
 
-  await downloadFile(candidate.url, dest);
+  await downloadFile(candidate.url, tmp);
 
-  // Quality / sync gate.
+  // Quality / sync gate (run on the temp file).
   let cues: Cue[];
   try {
-    cues = parseSubtitleText(await Bun.file(dest).text(), ext);
+    cues = parseSubtitleText(await Bun.file(tmp).text(), ext);
   } catch {
-    await rm(dest).catch(() => {});
+    await rm(tmp).catch(() => {});
     void logEvent("anomaly.jimaku_reject", { mediaId: entry.id, reason: "unparseable" });
     return false;
   }
   const dur = await mediaDurationSec(entry.absPath);
+  if (dur <= 0) {
+    // ffprobe couldn't determine duration => coverage/overrun/late-start checks
+    // are skipped (only cue-count + density apply). Surface it so a toothless
+    // gate is visible, but don't hard-fail regen on an ffprobe hiccup.
+    void logEvent("anomaly.jimaku_no_duration", {
+      mediaId: entry.id,
+      file: candidate.name,
+    });
+  }
   const q = subPassesQuality(cues, dur);
   if (!q.ok) {
-    await rm(dest).catch(() => {});
+    await rm(tmp).catch(() => {});
     void logEvent("anomaly.jimaku_reject", {
       mediaId: entry.id,
       reason: q.reason,
       file: candidate.name,
     });
+    return false;
+  }
+  // Passed — atomically publish the vetted sub to its final sidecar path.
+  try {
+    await rename(tmp, dest);
+  } catch (e) {
+    await rm(tmp).catch(() => {});
+    void logEvent("anomaly.jimaku_reject", { mediaId: entry.id, reason: `rename failed: ${String(e)}` });
     return false;
   }
 
@@ -1183,6 +1208,25 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       }
 
       // --- translate track ---
+      // On-demand RU re-translation (feature LL): re-run translation on the
+      // entry's CURRENT best ja track (jimaku human OR whisper) and OVERWRITE
+      // the ru sidecar. Same path the auto-chain uses (bestJapaneseTrackId +
+      // enqueueTranslate). Idempotent: a dup call while one is queued/running is
+      // a no-op (returns already-queued).
+      const retranslate = path.match(/^\/api\/translate\/([a-f0-9]+)$/);
+      if (req.method === "POST" && retranslate) {
+        const entry = library.get(retranslate[1]!);
+        if (!entry) return err("not found", 404);
+        if (translateQueuedFor(entry.id)) {
+          return json({ ok: true, queued: false, reason: "already queued" });
+        }
+        const sourceTrack = await bestJapaneseTrackId(entry);
+        if (!sourceTrack) return err("no japanese track", 409);
+        enqueueTranslate(library, entry.id, sourceTrack);
+        void logEvent("translate_requested", { mediaId: entry.id, sourceTrack });
+        return json({ ok: true, queued: true, sourceTrack, targetLang: "ru" });
+      }
+
       const translate = path.match(/^\/api\/translate\/([a-f0-9]+)\/([^/]+)$/);
       if (req.method === "POST" && translate) {
         const entry = library.get(translate[1]!);
