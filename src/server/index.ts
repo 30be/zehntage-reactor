@@ -742,7 +742,7 @@ async function collectIndexes(
 /** Default jimaku search query from a video filename: strip the extension,
  * bracketed release tags, resolution/codec noise and a trailing episode no. */
 export function jimakuQueryFromName(name: string): string {
-  return name
+  const base = name
     .replace(/\.[^.]+$/, "")
     .replace(/\[[^\]]*\]|\([^)]*\)/g, " ")
     .replace(
@@ -753,6 +753,18 @@ export function jimakuQueryFromName(name: string): string {
     .replace(/\s*-\s*(s\d{1,2}e)?\d{1,3}(v\d)?\s*$/i, "")
     .replace(/\s+/g, " ")
     .trim();
+  // Also strip a trailing SPACE-separated episode number (e.g. "Hyouka 02").
+  // Episode numbers here are short (1-2 digits) or zero-padded ("02", "012");
+  // a bare 3-digit non-padded number ("100") is treated as part of the title.
+  // Guard: only strip if the remaining title still has a non-digit word, so we
+  // don't reduce titles like "86" or "Mob Psycho 100" to empty/garbage.
+  const stripped = base
+    .replace(/\s+(\d{1,2}|0\d{2})(v\d)?\s*$/i, "")
+    .trim();
+  if (stripped && stripped !== base && /[^\d\s]/.test(stripped)) {
+    return stripped;
+  }
+  return base;
 }
 
 function jimakuErr(e: unknown): Response {
