@@ -142,34 +142,93 @@ export function parseVtt(text: string): Cue[] {
   return parseSrt(body);
 }
 
+/** Does a string contain any hiragana or katakana? */
+function hasKana(text: string): boolean {
+  for (const ch of text) {
+    const c = ch.codePointAt(0)!;
+    if (c >= 0x3040 && c <= 0x30ff) return true;
+  }
+  return false;
+}
+
+/** Does a string contain any CJK ideograph (hanzi/kanji)? */
+function hasCjk(text: string): boolean {
+  for (const ch of text) {
+    const c = ch.codePointAt(0)!;
+    if ((c >= 0x4e00 && c <= 0x9fff) || (c >= 0x3400 && c <= 0x4dbf)) return true;
+  }
+  return false;
+}
+
+/**
+ * Classify an ASS style name as Japanese-leaning, Chinese-leaning, or neither.
+ * Token-based so we don't misfire on substrings (e.g. "Main" containing nothing
+ * relevant). Returns "jp" | "cn" | "" (unknown).
+ */
+function classifyStyle(name: string): "jp" | "cn" | "" {
+  const n = name.toLowerCase();
+  // Japanese markers: ja / jp / jpn / 日 / 和
+  const jp = /\b(ja|jp|jpn|jap|jpan|nihongo)\b/.test(n) || /日本|日語|和/.test(name) || /日/.test(name);
+  // Chinese markers: cn / chs / cht / zh / sc / tc / 中 / 简 / 繁
+  const cn =
+    /\b(cn|chs|cht|zh|zhs|zht|sc|tc|chi|chn|chinese)\b/.test(n) ||
+    /中文|中字|简体|繁體|繁体|简|繁|中/.test(name);
+  if (jp && !cn) return "jp";
+  if (cn && !jp) return "cn";
+  return "";
+}
+
+interface RawDialogue {
+  start: number;
+  end: number;
+  style: string;
+  text: string;
+}
+
 export function parseAss(text: string): Cue[] {
-  const cues: Cue[] = [];
   const lines = text.replace(/^﻿/, "").split(/\r?\n/);
-  let format: string[] | null = null;
+  // ASS has multiple sections each with their own Format: line (Styles vs
+  // Events). Track the current section so we read the EVENTS format for
+  // Dialogue parsing, not the Styles one.
+  let section = "";
+  let eventsFormat: string[] | null = null;
+  const dialogues: RawDialogue[] = [];
+
   for (const line of lines) {
+    const sec = line.match(/^\[([^\]]+)\]\s*$/);
+    if (sec) {
+      section = sec[1]!.toLowerCase();
+      continue;
+    }
     if (line.startsWith("Format:")) {
-      format = line
-        .slice("Format:".length)
-        .split(",")
-        .map((f) => f.trim());
-    } else if (line.startsWith("Dialogue:") && format) {
+      if (/event/.test(section)) {
+        eventsFormat = line
+          .slice("Format:".length)
+          .split(",")
+          .map((f) => f.trim());
+      }
+      continue;
+    }
+    if (line.startsWith("Dialogue:") && eventsFormat) {
+      const format = eventsFormat;
       const parts = line.slice("Dialogue:".length).split(",");
       const textIdx = format.indexOf("Text");
       if (textIdx === -1 || parts.length <= textIdx) continue;
       const get = (field: string) => {
-        const i = format!.indexOf(field);
+        const i = format.indexOf(field);
         return i >= 0 ? parts[i]?.trim() ?? "" : "";
       };
       const start = parseTimestamp(get("Start"));
       const end = parseTimestamp(get("End"));
       if (Number.isNaN(start) || Number.isNaN(end)) continue;
+      const style = get("Style");
       // Text is everything from textIdx on (it may itself contain commas).
       const raw = parts.slice(textIdx).join(",");
       // Drop vector-drawing dialogue (\p1..\p0 blocks): signs/typesetting, not
       // speech. After stripping override tags the remaining body is just drawing
       // commands (m/l/b/s/p coords), which would otherwise dilute the kana guard.
       if (/\\p[1-9]/.test(raw)) continue;
-      let body = raw
+      const body = raw
         .replace(/\{[^}]*\}/g, "") // override tags
         .replace(/\\N|\\n/g, "\n")
         .replace(/\\h/g, " ")
@@ -179,11 +238,69 @@ export function parseAss(text: string): Cue[] {
       if (body && /^[\s\d.mlbspconMLBSPCON-]+$/.test(body) && /[a-z]/i.test(body)) {
         continue;
       }
-      if (body) cues.push({ start, end, text: body });
+      if (body) dialogues.push({ start, end, style, text: body });
     }
   }
+
+  const kept = selectJapaneseDialogues(dialogues);
+  const cues = kept.map((d) => ({ start: d.start, end: d.end, text: d.text }));
   cues.sort((a, b) => a.start - b.start);
   return cues;
+}
+
+/**
+ * From a parsed set of ASS dialogue lines, select the Japanese ones — dropping
+ * the Chinese half of a dual-language (e.g. Kamigami JP+CN) `.ass`. Two layers:
+ *
+ *  (a) STYLE-BASED (preferred): classify each line's Style name as JP- or
+ *      CN-like. If the file has BOTH JP-styled and CN-styled lines it is
+ *      dual-language → keep ONLY the JP-styled lines. (Lines with unknown
+ *      styles are kept too, so signs / unnamed JP cues aren't lost.)
+ *
+ *  (b) PER-LINE KANA fallback (styles ambiguous/unnamed): a kana-bearing line
+ *      is Japanese; a CJK line with zero kana is (probably) Chinese. Only when
+ *      the file is a genuine mix (both kana lines AND hanzi-only-CJK lines) do
+ *      we drop a hanzi-only-CJK line, and ONLY if it time-overlaps a kana line
+ *      (its JP counterpart) — so kanji-only Japanese signs/short cues without a
+ *      paired CN line survive.
+ *
+ * Pure-Japanese (all kana / single JP style) and pure-Chinese files pass through
+ * unchanged from this stage; a pure-Chinese result then trips the downstream
+ * `looksJapanese` guard and falls back to whisper.
+ */
+function selectJapaneseDialogues(dialogues: RawDialogue[]): RawDialogue[] {
+  if (dialogues.length === 0) return dialogues;
+
+  // --- (a) style-based ---
+  let hasJpStyle = false;
+  let hasCnStyle = false;
+  for (const d of dialogues) {
+    const cls = classifyStyle(d.style);
+    if (cls === "jp") hasJpStyle = true;
+    else if (cls === "cn") hasCnStyle = true;
+  }
+  if (hasJpStyle && hasCnStyle) {
+    // Dual-language by style. Keep JP-styled + unknown-styled; drop CN-styled.
+    return dialogues.filter((d) => classifyStyle(d.style) !== "cn");
+  }
+
+  // --- (b) per-line kana fallback ---
+  const kanaLines = dialogues.filter((d) => hasKana(d.text));
+  const hanziOnly = dialogues.filter((d) => !hasKana(d.text) && hasCjk(d.text));
+  // Only treat as dual-language if there is a meaningful mix.
+  if (kanaLines.length > 0 && hanziOnly.length > 0) {
+    return dialogues.filter((d) => {
+      if (hasKana(d.text) || !hasCjk(d.text)) return true; // JP or non-CJK → keep
+      // hanzi-only line: drop only if it overlaps a kana-bearing (JP) line.
+      const overlapsJp = kanaLines.some(
+        (j) => d.start < j.end && j.start < d.end,
+      );
+      return !overlapsJp;
+    });
+  }
+
+  // Pure-Japanese or pure-Chinese (or no CJK at all) → unchanged.
+  return dialogues;
 }
 
 // --- language detection (jimaku non-Japanese guard) -------------------------

@@ -518,6 +518,98 @@ describe("kanaRatio / looksJapanese", () => {
   });
 });
 
+describe("parseAss dual-language (Kamigami JP+CN) selection", () => {
+  const stylesHeader =
+    "[Script Info]\n" +
+    "[V4+ Styles]\n" +
+    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n" +
+    "Style: JP,Source Han Sans,48,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,10,1\n" +
+    "Style: CN,Source Han Sans,48,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,10,1\n" +
+    "[Events]\n" +
+    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n";
+
+  test("style-based: keeps JP lines, drops overlapping CN lines, count = JP count", () => {
+    const ass =
+      stylesHeader +
+      "Dialogue: 0,0:00:01.00,0:00:03.00,JP,,0,0,0,,おはようございます\n" +
+      "Dialogue: 0,0:00:01.00,0:00:03.00,CN,,0,0,0,,早上好\n" +
+      "Dialogue: 0,0:00:04.00,0:00:06.00,JP,,0,0,0,,気になります！\n" +
+      "Dialogue: 0,0:00:04.00,0:00:06.00,CN,,0,0,0,,我很在意\n" +
+      "Dialogue: 0,0:00:07.00,0:00:09.00,JP,,0,0,0,,わたし気になります\n" +
+      "Dialogue: 0,0:00:07.00,0:00:09.00,CN,,0,0,0,,我很好奇\n";
+    const cues = parseAss(ass);
+    expect(cues).toHaveLength(3);
+    expect(cues.map((c) => c.text)).toEqual([
+      "おはようございます",
+      "気になります！",
+      "わたし気になります",
+    ]);
+    // none of the Chinese hanzi-only lines survive
+    expect(cues.some((c) => c.text === "早上好")).toBe(false);
+    expect(looksJapanese(cues)).toBe(true);
+  });
+
+  test("style-based dual keeps a JP kanji-only sign (JP style) too", () => {
+    const ass =
+      stylesHeader +
+      "Dialogue: 0,0:00:01.00,0:00:03.00,JP,,0,0,0,,古典部\n" + // kanji-only JP sign
+      "Dialogue: 0,0:00:04.00,0:00:06.00,JP,,0,0,0,,おはよう\n" +
+      "Dialogue: 0,0:00:04.00,0:00:06.00,CN,,0,0,0,,早上好\n";
+    const cues = parseAss(ass);
+    expect(cues.map((c) => c.text)).toEqual(["古典部", "おはよう"]);
+  });
+
+  test("kana fallback: unnamed styles, overlapping JP/CN pairs → CN dropped", () => {
+    const header =
+      "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n";
+    const ass =
+      header +
+      "Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,おはようございます\n" +
+      "Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,早上好\n" +
+      "Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,気になります\n" +
+      "Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,我很在意\n";
+    const cues = parseAss(ass);
+    expect(cues.map((c) => c.text)).toEqual(["おはようございます", "気になります"]);
+    expect(looksJapanese(cues)).toBe(true);
+  });
+
+  test("kana fallback keeps a kanji-only JP line with NO overlapping CN counterpart", () => {
+    const header =
+      "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n";
+    const ass =
+      header +
+      "Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,おはよう\n" +
+      "Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,早上好\n" + // overlaps JP → drop
+      "Dialogue: 0,0:00:10.00,0:00:12.00,Default,,0,0,0,,古典部\n"; // lone kanji-only sign → keep
+    const cues = parseAss(ass);
+    expect(cues.map((c) => c.text)).toEqual(["おはよう", "古典部"]);
+  });
+
+  test("pure-Japanese ass keeps all lines", () => {
+    const ass =
+      stylesHeader +
+      "Dialogue: 0,0:00:01.00,0:00:03.00,JP,,0,0,0,,おはようございます\n" +
+      "Dialogue: 0,0:00:04.00,0:00:06.00,JP,,0,0,0,,気になります\n" +
+      "Dialogue: 0,0:00:07.00,0:00:09.00,JP,,0,0,0,,古典部へようこそ\n";
+    const cues = parseAss(ass);
+    expect(cues).toHaveLength(3);
+    expect(looksJapanese(cues)).toBe(true);
+  });
+
+  test("pure-Chinese ass yields no kana → looksJapanese false", () => {
+    const ass =
+      "[V4+ Styles]\n" +
+      "Format: Name, Fontname\n" +
+      "Style: CN,Source Han Sans\n" +
+      "[Events]\n" +
+      "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n" +
+      "Dialogue: 0,0:00:01.00,0:00:03.00,CN,,0,0,0,,早上好\n" +
+      "Dialogue: 0,0:00:04.00,0:00:06.00,CN,,0,0,0,,我很在意\n";
+    const cues = parseAss(ass);
+    expect(looksJapanese(cues)).toBe(false);
+  });
+});
+
 describe("parseAss drops vector-drawing/sign lines", () => {
   const header =
     "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n";
