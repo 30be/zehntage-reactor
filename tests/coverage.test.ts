@@ -52,10 +52,13 @@ mock.module("../web/TokenLine.tsx", () => ({
 
 // Mock everything else coverage.ts imports that could cause side-effects.
 mock.module("../web/api.ts", () => ({}));
-mock.module("../web/progress.ts", () => ({
-  buildWordIndex: () => ({}),
-  matchFront: () => null,
-}));
+// NOTE: we deliberately do NOT mock.module("../web/progress.ts"). mock.module()
+// patches the process-global registry for the whole `bun test` run and is never
+// undone, so stubbing progress.ts here would replace buildWordIndex/matchFront
+// for every later test that imports the real module (lemmaAdd, matchfront, …)
+// and break the suite. Instead we use the REAL progress.ts and feed coverageOfCues
+// a genuine empty WordIndex, on which the real matchFront returns null anyway.
+import { buildWordIndex } from "../web/progress.ts";
 mock.module("../web/blacklist.ts", () => ({ readBlacklist: () => new Set() }));
 mock.module("../web/lang.ts", () => ({ isJaLang: () => false }));
 // React hooks — not needed for the pure exports we test.
@@ -78,8 +81,8 @@ function makeCue(text: string): Cue {
   return { start: 0, end: 1, text };
 }
 
-// Empty word index (matchFront always returns null in our mock).
-const EMPTY_INDEX = {} as Parameters<typeof coverageOfCues>[1];
+// A genuine empty word index — the real matchFront returns null for any token.
+const EMPTY_INDEX = buildWordIndex([], {});
 
 // ---------------------------------------------------------------------------
 // coverageOfCues — all-known vocabulary
