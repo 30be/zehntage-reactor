@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Play, Trash2 } from "lucide-react";
 import { guessEpisode } from "../src/lib/episode.ts";
 import {
@@ -147,6 +148,16 @@ export function App() {
     }, 2600);
   }, []);
 
+  // Toasts must render inside the fullscreened element, otherwise they're
+  // invisible (the top-layer fullscreen element covers body-level nodes).
+  const [fsEl, setFsEl] = useState<Element | null>(null);
+  useEffect(() => {
+    const sync = () => setFsEl(document.fullscreenElement);
+    sync();
+    document.addEventListener("fullscreenchange", sync);
+    return () => document.removeEventListener("fullscreenchange", sync);
+  }, []);
+
   const go = (hash: string) => {
     window.location.hash = hash;
   };
@@ -264,7 +275,10 @@ export function App() {
         )}
       </main>
 
-      {toastMsg && <div className="toast">{toastMsg}</div>}
+      {toastMsg &&
+        (fsEl
+          ? createPortal(<div className="toast">{toastMsg}</div>, fsEl)
+          : <div className="toast">{toastMsg}</div>)}
       <Palette go={go} toast={toast} settings={settings} setSettings={setSettings} />
     </div>
   );
@@ -706,19 +720,6 @@ function JimakuFind({
 }
 
 function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) => void }) {
-  const [retranslating, setRetranslating] = useState<Set<string>>(() => new Set());
-  const doRetranslate = useCallback(async (id: string, ev: React.MouseEvent) => {
-    ev.stopPropagation();
-    setRetranslating((s) => new Set(s).add(id));
-    try {
-      await api.retranslate(id);
-      toast("Re-translation started");
-    } catch (err) {
-      toast(`Re-translate failed: ${err instanceof Error ? err.message : err}`);
-    } finally {
-      setRetranslating((s) => { const n = new Set(s); n.delete(id); return n; });
-    }
-  }, [toast]);
   const [entries, setEntries] = useState<LibraryEntry[] | null>(null);
   // --- transcript search (debounced 300ms; Esc clears) ---
   const [query, setQuery] = useState("");
@@ -1054,16 +1055,6 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
                   >
                     {Math.round(knownPct.get(e.id)! * 100)}% known
                   </span>
-                )}
-                {e.subLangs.includes("ja") && (
-                  <button
-                    className="retranslate-btn muted"
-                    title="Re-translate Russian subtitles from the Japanese track"
-                    disabled={retranslating.has(e.id)}
-                    onClick={(ev) => void doRetranslate(e.id, ev)}
-                  >
-                    {retranslating.has(e.id) ? "…" : "↻ru"}
-                  </button>
                 )}
               </div>
             </div>

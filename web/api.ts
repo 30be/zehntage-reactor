@@ -361,8 +361,6 @@ export const api = {
       `/api/translate/${id}/${encodeURIComponent(trackId)}`,
       { targetLang },
     ),
-  retranslate: (id: string) =>
-    jpost<{ ok: boolean }>(`/api/translate/${id}`, {}),
   batchAll: () => jpost<BatchAllResult>("/api/batch/all", {}),
   batchAllOne: (id: string) =>
     jpost<{ entryId: string; phase: "whisper" | "translate" | "skipped" }>(

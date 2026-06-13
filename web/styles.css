@@ -180,13 +180,16 @@ a { color: inherit; }
 }
 .sub-secondary {
   font-size: clamp(13px, 1.6vw, 18px);
-  color: #e5e5e5;
-  text-shadow: 0 1px 4px rgba(0,0,0,0.9);
-  filter: blur(5px);
-  transition: filter 0.15s;
+  color: #f0f0f0;
+  text-shadow: 0 1px 6px rgba(0,0,0,1), 0 0 3px rgba(0,0,0,0.95);
+  /* blurred-but-present: clearly a frosted line you can choose to reveal,
+     not a near-invisible smudge. Hover removes blur and gives full opacity. */
+  filter: blur(3.5px);
+  opacity: 0.78;
+  transition: filter 0.15s, opacity 0.15s;
   cursor: default;
 }
-.sub-secondary.show { filter: blur(0); }
+.sub-secondary.show { filter: blur(0); opacity: 1; }
 
 .tok {
   cursor: pointer;
@@ -300,6 +303,21 @@ textarea.prompt {
   border-radius: 4px;
 }
 
+/* toast container is portaled into the fullscreen element by App.tsx; fixed
+   positioning anchors it to that element (which fills the viewport in FS),
+   and the very high z-index keeps it above the video / top-layer overlay. */
+.toast-container {
+  position: fixed;
+  bottom: 20px;
+  left: 0;
+  right: 0;
+  z-index: 2147483646;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
 .toast {
   position: fixed;
   bottom: 20px;
@@ -310,8 +328,15 @@ textarea.prompt {
   padding: 10px 16px;
   border-radius: 8px;
   font-size: 13px;
-  z-index: 60;
+  z-index: 2147483646;
+  pointer-events: auto;
   box-shadow: 0 6px 24px rgba(0,0,0,0.25);
+}
+.toast-container .toast {
+  position: static;
+  left: auto;
+  bottom: auto;
+  transform: none;
 }
 
 .empty { padding: 48px 0; text-align: center; color: var(--muted); }
@@ -553,7 +578,30 @@ textarea.prompt {
 /* .lookup .known-flag uses .badge + .lookup .badge override (S-12) */
 
 /* ---- frequency tag (popup + pre-study): tiny, dim, no new colors ---- */
-/* .freq-tag uses .badge + .lookup .badge override (S-12) */
+/* word-popup header tag cluster: keep freq chip and "from your deck"
+   clearly separated, freq rendered as a small ink-edge chip (no fill). */
+.word-tags {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: 8px;
+}
+.word-tags .freq-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  line-height: 1.3;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.word-tags .deck-tag {
+  font-size: 11px;
+  color: var(--muted);
+}
 
 /* ---- library card coverage hint ("82% · 47 new") ---- */
 .cov-hint { color: var(--muted); }
@@ -2221,9 +2269,11 @@ textarea:focus-visible {
   justify-content: space-between;
   align-items: center;
   gap: 16px;
-  min-height: 40px;
-  padding: 8px 0;
+  height: 46px;
+  min-height: 46px;
+  padding: 0;
   cursor: pointer;
+  box-sizing: border-box;
 }
 .container .lib-row-main {
   display: flex;
@@ -2296,18 +2346,19 @@ textarea:focus-visible {
   opacity: 0.5;
 }
 
-/* --- S: subtitle-lang badges as a far-right vertical stacked column --- */
+/* --- S: subtitle-lang badges, compact inline row so row height stays fixed --- */
 .container .lib-langs {
   flex: none;
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
+  flex-direction: row;
+  align-items: center;
   gap: 4px;
   margin-left: 12px;
 }
 .container .lib-langs .badge {
   font-size: 10px;
-  padding: 1px 6px;
+  line-height: 1.3;
+  padding: 0 5px;
 }
 /* secondary meta (relPath · size · coverage), if still emitted, stays quiet */
 .container .lib-row .meta {

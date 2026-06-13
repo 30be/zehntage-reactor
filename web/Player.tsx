@@ -191,7 +191,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   const deckCardsRef = useRef<Map<string, { front: string; back: string; notes: string }>>(
     new Map(),
   );
-  const [lookupFromDeck, setLookupFromDeck] = useState(false);
 
   // Live deck (web/ankicache.ts): background ETag revalidations and optimistic
   // add/delete write-throughs re-render the known-word underlines without an
@@ -1635,11 +1634,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     const deckCard = matched ? deckCardsRef.current.get(matched) : undefined;
     if (deckCard) {
       setLookup(deckCardToLookup(deckCard));
-      setLookupFromDeck(true);
       setLookupLoading(false);
       return;
     }
-    setLookupFromDeck(false);
     // Cache key includes the cue context so the same word in a NEW sentence
     // gets a fresh, context-correct answer instead of a stale cached one.
     const cacheKey = `${popup.surface} ${popup.context} :: ${popup.secondary ?? ""}`;
@@ -1703,7 +1700,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       });
       lookupCache.current.set(`${popup.surface} ${popup.context} :: ${popup.secondary ?? ""}`, res);
       setLookup(res);
-      setLookupFromDeck(false);
     } catch (e) {
       toast(`Regenerate failed: ${e instanceof Error ? e.message : e}`);
     } finally {
@@ -2260,7 +2256,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           explainLoading={explainLoading}
           lookup={lookup}
           lookupLoading={lookupLoading}
-          lookupFromDeck={lookupFromDeck}
           pitchOn={pitchOn}
           accents={accents}
           freqMap={freqMap}
