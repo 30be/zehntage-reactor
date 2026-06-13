@@ -195,13 +195,26 @@ a { color: inherit; }
   /* ambient = the surrounding text color (dark overlay -> light text, light
      sidebar -> dark text); learning-word colors mix toward it in OKLCH */
   --tok-ambient: currentColor;
+  /* Per-context palettes (color is the only signal now — underlines are gone,
+     so AA matters). Defaults below target LIGHT backgrounds (sidebar, Read):
+     darker shades that clear WCAG AA on white. Dark contexts (the on-video
+     overlay) override these with lighter shades further down.
+       --learn-blue: fresh-learning blue that learningColor() mixes toward
+                     ambient. 0.46 L ~7:1 on white (vs 0.65 L ~3.2:1 = fails).
+       --tok-unk:    unknown-word red. #9e2f3a ~7:1 on white (vs spec #b35454
+                     ~3.6:1 = fails AA); #b35454 is the hue intent, not a literal. */
+  --learn-blue: oklch(0.46 0.15 250);
+  --tok-unk: #9e2f3a;
 }
 .tok:hover { background: rgba(255,255,255,0.18); }
-/* unknown (not in deck, not marked known/blacklisted): two reds —
-   dark crimson on light backgrounds, pinkish light on the dark overlay */
-.tok.unk { color: #9e2f3a; }
-.sub-overlay .tok.unk,
-.fs-sidebar .tok.unk { color: #f2a0a8; }
+/* unknown (not in deck, not marked known/blacklisted) */
+.tok.unk { color: var(--tok-unk); }
+/* dark video overlay: lighter shades stay legible on the dark, shadowed bg */
+.sub-overlay .tok,
+.fs-sidebar .tok {
+  --learn-blue: oklch(0.72 0.14 250);
+  --tok-unk: #f2a0a8;
+}
 
 /* ---- popup (zehntage-chrome style dark) ---- */
 .lookup {
@@ -218,15 +231,12 @@ a { color: inherit; }
   font-size: 14px;
 }
 .lookup .word { font-size: 20px; font-weight: 700; }
-/* `a`-toggle state cue: word/sentence turns learning-blue + gets underline
-   when the card is in the deck. Color alone would fail WCAG 1.4.1 and the
-   original oklch(0.65 0.15 250)≈#3a93e6 fails AA contrast (3.23:1 on white).
-   oklch(0.46 0.15 250)≈#1a66c2 gives ~7:1 on white. */
+/* `a`-toggle state cue: word/sentence turns learning-blue when the card is in
+   the deck (no underline — design law). The popup has a DARK bg (#18181b), so
+   use a lighter blue here (the light-bg 0.46 L would fail on dark). */
 .lookup .word.saved,
 .lookup .sentence.saved {
-  color: oklch(0.46 0.15 250);
-  text-decoration: underline;
-  text-underline-offset: 3px;
+  color: oklch(0.72 0.13 250);
 }
 .lookup .reading { color: #a1a1aa; font-size: 14px; margin-left: 8px; }
 .lookup .translation { margin-top: 8px; font-size: 15px; }
@@ -1751,12 +1761,6 @@ textarea.prompt {
 /* Shift+= / Shift+- multiply the overlay clamp() sizes (windowed + fullscreen) */
 .sub-primary { font-size: calc(clamp(20px, 2.6vw, 30px) * var(--sub-scale, 1)); }
 .sub-secondary { font-size: calc(clamp(13px, 1.6vw, 18px) * var(--sub-scale, 1)); }
-
-/* in-deck word due for review right now — subtle dotted SRS hint */
-.tok.due {
-  text-decoration: underline dotted 1px;
-  text-underline-offset: 3px;
-}
 
 /* pre-study ranking badges */
 .badge.iplus { background: var(--fg); color: var(--bg); }

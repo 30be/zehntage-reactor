@@ -10,12 +10,14 @@ import {
 describe("learningColor", () => {
   test("no progress entry (remote path without intervals) = fresh full blue", () => {
     expect(learningColor(undefined)).toBe(
-      `color-mix(in oklch, ${LEARNING_BLUE} 100%, var(--tok-ambient, currentColor))`,
+      `color-mix(in oklch, var(--learn-blue, ${LEARNING_BLUE}) 100%, var(--tok-ambient, currentColor))`,
     );
   });
 
   test("interval 0 = fresh full blue", () => {
-    expect(learningColor({ interval: 0 } as never)).toContain(`${LEARNING_BLUE} 100%`);
+    expect(learningColor({ interval: 0 } as never)).toContain(
+      `var(--learn-blue, ${LEARNING_BLUE}) 100%`,
+    );
   });
 
   test("mid interval mixes toward ambient", () => {

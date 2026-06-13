@@ -2,9 +2,9 @@
 // Run: bun test scripts/progress.test.ts
 import { expect, test } from "bun:test";
 import {
-  PROGRESS_COLORS,
+  learningColor,
+  LEARNING_MATURE_DAYS,
   progressBucket,
-  progressColor,
 } from "../web/progress.ts";
 import type { ProgressEntry } from "../web/api.ts";
 
@@ -40,16 +40,22 @@ test("negative / NaN intervals clamp to step 0", () => {
   expect(progressBucket(NaN)).toBe(0);
 });
 
-test("progressColor returns the matching step color", () => {
-  expect(progressColor(undefined)).toBe(PROGRESS_COLORS[0]); // no SRS data -> red
-  expect(progressColor(entry(0))).toBe(PROGRESS_COLORS[0]); // 0 interval -> red
-  expect(progressColor(entry(2))).toBe(PROGRESS_COLORS[1]); // orange
-  expect(progressColor(entry(15))).toBe(PROGRESS_COLORS[3]); // green
-  expect(progressColor(entry(120))).toBe(PROGRESS_COLORS[5]); // blue
-});
+test("learningColor fades blue -> ambient, null at maturity", () => {
+  // no SRS data -> fresh blue (full --learn-blue mix)
+  const fresh = learningColor(undefined);
+  expect(fresh).toContain("var(--learn-blue");
+  expect(fresh).toContain("100%");
 
-test("RED is step 0 and BLUE is step 5", () => {
-  expect(PROGRESS_COLORS[0]).toBe("#ef4444");
-  expect(PROGRESS_COLORS[5]).toBe("#3b82f6");
-  expect(PROGRESS_COLORS).toHaveLength(6);
+  // mid-learning -> a non-null color-mix that still references --learn-blue
+  const mid = learningColor(entry(10));
+  expect(mid).not.toBeNull();
+  expect(mid).toContain("color-mix");
+  expect(mid).toContain("var(--learn-blue");
+
+  // a smaller interval keeps MORE blue than a larger one
+  expect(learningColor(entry(1))).toContain("95%");
+
+  // at/after maturity -> null (render plain ambient text)
+  expect(learningColor(entry(LEARNING_MATURE_DAYS))).toBeNull();
+  expect(learningColor(entry(120))).toBeNull();
 });

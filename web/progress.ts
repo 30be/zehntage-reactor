@@ -100,30 +100,10 @@ export function matchFront(
   return null;
 }
 
-/**
- * Discrete RED -> BLUE maturity gradient in 6 steps, keyed off the SRS
- * `interval` (days). A word in the deck with no/0 interval = step 0 (red).
- *
- * Buckets (interval in days):
- *   step 0: < 1    (#ef4444 red       — brand-new / learning)
- *   step 1: < 4    (#f97316 orange)
- *   step 2: < 11   (#eab308 yellow)
- *   step 3: < 30   (#22c55e green)
- *   step 4: < 90   (#06b6d4 cyan)
- *   step 5: >= 90  (#3b82f6 blue      — mature)
- */
-export const PROGRESS_COLORS = [
-  "#ef4444", // 0 red
-  "#f97316", // 1 orange
-  "#eab308", // 2 yellow
-  "#22c55e", // 3 green
-  "#06b6d4", // 4 cyan
-  "#3b82f6", // 5 blue
-] as const;
-
 const PROGRESS_THRESHOLDS = [1, 4, 11, 30, 90]; // upper bounds (exclusive) for steps 0..4
 
-/** Map an interval (days) into a 0..5 maturity bucket. */
+/** Map an interval (days) into a 0..5 maturity bucket (TokenLine uses
+ *  MATURE_BUCKET=4 to gate furigana display). */
 export function progressBucket(intervalDays: number): number {
   const days = Math.max(0, intervalDays || 0);
   for (let i = 0; i < PROGRESS_THRESHOLDS.length; i++) {
@@ -132,24 +112,17 @@ export function progressBucket(intervalDays: number): number {
   return 5;
 }
 
-/**
- * Color for a known word. No progress entry (or 0 interval) => step 0 red.
- * A word NOT in the deck should not call this (render no underline instead).
- */
-export function progressColor(p?: ProgressEntry): string {
-  const days = p ? Math.max(0, p.interval || 0) : 0;
-  return PROGRESS_COLORS[progressBucket(days)]!;
-}
-
 // --- learning-word text color ------------------------------------------------
 //
 // Words in the deck render in BLUE that fades toward the ambient text color
 // as the SRS interval grows (OKLCH interpolation, hue-aware). At >= 21 days
 // (Anki "mature") the word is indistinguishable from plain text.
-// `--tok-ambient` is a CSS custom property (currentColor at the token), so
-// the same color works on the dark video overlay and the light sidebar.
+// Both the blue and the ambient are CSS custom properties resolved at the
+// token: `--learn-blue` is per-context (darker on light bg, lighter on the
+// dark overlay — see styles.css) so contrast clears AA in either place, and
+// `--tok-ambient` (currentColor at the token) is what the blue fades into.
 
-/** Fresh-learning blue (interval 0). */
+/** Fallback fresh-learning blue if `--learn-blue` is unset. */
 export const LEARNING_BLUE = "oklch(0.65 0.15 250)";
 /** Interval (days) at which a learning word reaches the ambient color. */
 export const LEARNING_MATURE_DAYS = 21;
@@ -164,5 +137,5 @@ export function learningColor(p?: ProgressEntry): string | null {
   const t = Math.min(1, days / LEARNING_MATURE_DAYS);
   if (t >= 1) return null;
   const pct = Math.round((1 - t) * 100);
-  return `color-mix(in oklch, ${LEARNING_BLUE} ${pct}%, var(--tok-ambient, currentColor))`;
+  return `color-mix(in oklch, var(--learn-blue, ${LEARNING_BLUE}) ${pct}%, var(--tok-ambient, currentColor))`;
 }
