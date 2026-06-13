@@ -60,6 +60,10 @@ Bindings match physical keys (`e.code`), so they work on any layout.
 | b / bb | peek translation / toggle blur |
 | i | picture-in-picture |
 | k / x | mark word known / blacklist |
+| o | session HUD overlay |
+| e | echo dictation mode |
+| j | jump to next i+1 cue |
+| z | accept resume affordance |
 | Ctrl+K / ? / Esc | palette / cheatsheet / close |
 
 ## Architecture

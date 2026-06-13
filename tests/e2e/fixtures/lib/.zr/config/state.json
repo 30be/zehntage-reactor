@@ -1,18 +1,26 @@
 {
-  "zr.e2e.1781336381083": {
-    "v": "hello",
-    "ts": 1781336381083
-  },
   "zr.lastMedia": {
     "v": "2328ae29a728",
     "ts": 0
   },
-  "zr.blacklist": {
-    "v": "[\"友達\"]",
-    "ts": 0
-  },
   "zr.tracks.2328ae29a728": {
     "v": "{\"primary\":\"sidecar:ja.srt\",\"secondary\":\"sidecar:gen:ru\"}",
-    "ts": 1781336383883
+    "ts": 1781338530020
+  },
+  "zr.pos.2328ae29a728": {
+    "v": "4.3",
+    "ts": 1781338518322
+  },
+  "zr.tracks.c4c16ec0b0a1": {
+    "v": "{\"primary\":\"sidecar:ja.srt\",\"secondary\":\"\"}",
+    "ts": 1781338544095
+  },
+  "zr.pos.c4c16ec0b0a1": {
+    "v": "7.280697",
+    "ts": 1781338544496
+  },
+  "zr.e2e.1781338552860": {
+    "v": "hello",
+    "ts": 1781338552860
   }
 }

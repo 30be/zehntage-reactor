@@ -40,6 +40,8 @@ import {
 import { refreshAnkiWords, useAnkiWordsLive } from "./ankicache.ts";
 import { registerCommands } from "./commands.ts";
 import { rankPreStudy } from "./prestudy.ts";
+import { nextIPlusOne } from "./iplusone.ts";
+import { scoreDictation, tooShortForEcho } from "./dictation.ts";
 import { isJaLang } from "./lang.ts";
 import { readKnownWords } from "./coverage.ts";
 import {
@@ -626,17 +628,21 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   // heat strip reuses these counts. State drives the heat redraw; the ref
   // feeds the autopause branch without re-running its effect.
   const cueUnknownsRef = useRef<number[] | null>(null);
+  // per-cue unknown lemma lists (parallel to cueUnknowns) — HUD unique counter
+  const cueUnknownLemmasRef = useRef<string[][] | null>(null);
   const [cueUnknowns, setCueUnknowns] = useState<number[] | null>(null);
   useEffect(() => {
     cueUnknownsRef.current = null;
+    cueUnknownLemmasRef.current = null;
     setCueUnknowns(null);
     if (displayCues.length === 0) return;
     let cancelled = false;
     void getTokenizer()
       .then((tok) => {
         if (cancelled) return;
+        const lemmas: string[][] = [];
         const counts = displayCues.map((c) => {
-          let n = 0;
+          const us: string[] = [];
           for (const t of tok.tokenize(c.text)) {
             if (!isLexical(t)) continue;
             if (t.pos === "助詞" || t.pos === "助動詞") continue; // particles/aux
@@ -644,12 +650,14 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             if (knownWords.has(key) || blacklist.has(key)) continue;
             if (matchFront(wordIndex, t.surface_form, t.reading, t.basic_form) != null)
               continue;
-            n++;
+            us.push(key);
           }
-          return n;
+          lemmas.push(us);
+          return us.length;
         });
         if (!cancelled) {
           cueUnknownsRef.current = counts;
+          cueUnknownLemmasRef.current = lemmas;
           setCueUnknowns(counts);
         }
       })
@@ -671,8 +679,139 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     lookups: number;
     cards: number;
     known: number;
+    echo: { tried: number; perfect: number };
     streak: number | null;
   } | null>(null);
+  // unique unknown lemmas seen across passed cues this session (for the HUD)
+  const sessUnknownSetRef = useRef<Set<string>>(new Set());
+  // cues passed + cues passed with zero unknowns → comprehension % in the HUD
+  const sessPassedRef = useRef(0);
+  const sessClearRef = useRef(0);
+  // echo dictation session tallies
+  const sessEchoRef = useRef({ tried: 0, perfect: 0 });
+
+  // --- Wave 13.A: session HUD (`o`) — a tiny absolute overlay in the stage.
+  // Gated on hudOpenRef so a closed HUD costs zero per-cue setState churn. ---
+  const [hudOpen, setHudOpen] = useState(false);
+  const hudOpenRef = useRef(false);
+  const [hudTick, setHudTick] = useState(0); // bump to re-render HUD on cue cross
+  const toggleHud = useCallback(() => {
+    setHudOpen((o) => {
+      const next = !o;
+      hudOpenRef.current = next;
+      if (next) setHudTick((t) => t + 1);
+      return next;
+    });
+  }, []);
+
+  // --- Wave 13.A: smart-resume affordance ("resume at MM:SS? press z") ---
+  const [resumeHint, setResumeHint] = useState<number | null>(null);
+  const resumeHintRef = useRef<number | null>(null);
+  useEffect(() => {
+    resumeHintRef.current = resumeHint;
+  }, [resumeHint]);
+
+  // `z` accepts the resume affordance; it auto-hides after ~8s otherwise.
+  useEffect(() => {
+    if (resumeHint == null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code !== "KeyZ" || e.ctrlKey || e.metaKey || e.altKey) return;
+      const v = videoRef.current;
+      const target = resumeHintRef.current;
+      if (v && target != null) v.currentTime = target;
+      setResumeHint(null);
+    };
+    window.addEventListener("keydown", onKey, true);
+    const t = window.setTimeout(() => setResumeHint(null), 8000);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.clearTimeout(t);
+    };
+  }, [resumeHint]);
+
+  // --- Wave 13.B: echo dictation mode (`e`) ---
+  const echoRef = useRef(false);
+  // when paused at a cue end in echo mode, this holds the cue being dictated
+  const [echoCue, setEchoCue] = useState<{ idx: number; text: string } | null>(null);
+  const echoCueRef = useRef<typeof echoCue>(null);
+  useEffect(() => {
+    echoCueRef.current = echoCue;
+  }, [echoCue]);
+  const [echoInput, setEchoInput] = useState("");
+  const [echoResult, setEchoResult] = useState<ReturnType<typeof scoreDictation> | null>(null);
+  const echoInputRef = useRef<HTMLInputElement | null>(null);
+  const toggleEcho = useCallback(() => {
+    const next = !echoRef.current;
+    echoRef.current = next;
+    if (!next) {
+      setEchoCue(null);
+      setEchoInput("");
+      setEchoResult(null);
+    }
+    toast(next ? "echo on" : "echo off");
+  }, [toast]);
+
+  // Echo input keys: Enter = check (then resume on a 2nd Enter), Esc = reveal,
+  // Tab = replay the cue audio. All intercepted so global hotkeys stay dead.
+  const onEchoKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      const cue = echoCueRef.current;
+      const v = videoRef.current;
+      if (!cue || !v) return;
+      if (e.key === "Enter") {
+        if (e.nativeEvent.isComposing) return; // IME selection, not submit
+        e.preventDefault();
+        if (echoResult == null) {
+          const res = scoreDictation(cue.text, echoInput);
+          setEchoResult(res);
+          sessEchoRef.current.tried += 1;
+          if (res.total > 0 && res.correct === res.total)
+            sessEchoRef.current.perfect += 1;
+        } else {
+          // already revealed → resume playback into the next cue
+          setEchoCue(null);
+          setEchoInput("");
+          setEchoResult(null);
+          void v.play().catch(() => {});
+        }
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        // give up → reveal the answer (score against empty input)
+        if (echoResult == null) {
+          setEchoResult(scoreDictation(cue.text, echoInput));
+          sessEchoRef.current.tried += 1;
+        }
+      } else if (e.key === "Tab") {
+        e.preventDefault();
+        // replay the cue audio from its start, then keep the input focused
+        const c = displayCues[cue.idx];
+        if (c) {
+          internalSeekRef.current = true;
+          v.currentTime = Math.max(0, c.start + subOffsetRef.current);
+          void v.play().catch(() => {});
+        }
+      }
+    },
+    [echoInput, echoResult, displayCues],
+  );
+
+  // --- Wave 13.C: seek to the next i+1 cue (exactly one unknown token) ---
+  const seekIPlusOne = useCallback(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const cues = displayCues;
+    const cur = activeCueIndex(cues, v.currentTime - subOffsetRef.current);
+    const target = nextIPlusOne(cueUnknownsRef.current, cur);
+    if (target == null) {
+      toast("no i+1 cue");
+      return;
+    }
+    const cue = cues[target];
+    if (!cue) return;
+    v.currentTime = Math.max(0, cue.start + subOffsetRef.current);
+    toast(`i+1 cue ${target + 1}`);
+  }, [displayCues, toast]);
 
   // --- load tracks + anki words ---
   // The Anki word list is NOT awaited before track selection: cue fetching
@@ -903,9 +1042,11 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           Number.isFinite(saved) &&
           saved > 15 &&
           v.duration > 0 &&
-          saved < v.duration - 30
+          saved < v.duration - 10
         ) {
-          v.currentTime = saved;
+          // Smart resume: don't jump silently — offer a transient affordance
+          // ("resume at MM:SS? press z"). `z` jumps; it auto-hides otherwise.
+          setResumeHint(saved);
         }
       } catch {
         /* ignore */
@@ -964,7 +1105,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       // we seek back to just before the finished cue's end — it stays rendered
       // while paused. lastAutopausedIdx prevents re-triggering in a loop.
       const prev = prevActiveP.current;
-      if (autopauseRef.current && !wasFirst && !v.seeking && !v.paused) {
+      // Echo mode forces a pause at EVERY cue end (regardless of autopause),
+      // except cues too short to dictate; otherwise normal (smart) autopause.
+      const echo = echoRef.current;
+      if ((autopauseRef.current || echo) && !wasFirst && !v.seeking && !v.paused) {
         const prevCue = prev >= 0 ? displayCues[prev] : undefined;
         const leftCue =
           prevCue != null && (idx !== prev || t >= prevCue.end);
@@ -974,10 +1118,13 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           // or a streaming whisper cue appended after the last compute) →
           // pause, the same safe default as a missing counts array.
           const cueCount = cueUnknownsRef.current?.[prev];
+          const echoSkip = echo && tooShortForEcho(prevCue!.text);
           const skip =
-            apModeRef.current === "unknown" &&
-            cueCount != null &&
-            cueCount < apMinRef.current;
+            echo
+              ? echoSkip
+              : apModeRef.current === "unknown" &&
+                cueCount != null &&
+                cueCount < apMinRef.current;
           if (skip) {
             lastAutopausedIdx.current = prev; // don't re-check this cue
           } else {
@@ -989,6 +1136,13 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           prevActiveP.current = prev;
           setActiveP(prev);
           setActiveS(activeCueIndex(secondaryCues, v.currentTime));
+          if (echo) {
+            // open the dictation input over the (hidden) line, focus it
+            setEchoCue({ idx: prev, text: prevCue!.text });
+            setEchoInput("");
+            setEchoResult(null);
+            setTimeout(() => echoInputRef.current?.focus(), 0);
+          }
           return;
           }
         }
@@ -997,7 +1151,18 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       if (idx >= 0 && idx !== prev && idx !== lastAutopausedIdx.current) {
         lastAutopausedIdx.current = -1;
       }
-      if (idx >= 0 && idx !== prev) sessCuesRef.current += 1;
+      if (idx >= 0 && idx !== prev) {
+        sessCuesRef.current += 1;
+        // HUD comprehension + unique-unknown tracking on each cue we pass
+        const counts = cueUnknownsRef.current;
+        if (counts && prev >= 0 && prev < counts.length) {
+          sessPassedRef.current += 1;
+          if (counts[prev] === 0) sessClearRef.current += 1;
+        }
+        const lemmas = cueUnknownLemmasRef.current?.[prev];
+        if (lemmas) for (const w of lemmas) sessUnknownSetRef.current.add(w);
+        if (hudOpenRef.current) setHudTick((tk) => tk + 1);
+      }
       prevActiveP.current = idx;
       setActiveP(idx);
       setActiveS(activeCueIndex(secondaryCues, v.currentTime));
@@ -1119,6 +1284,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         lookups: sessLookupsRef.current,
         cards: sessCardsRef.current,
         known: sessKnownRef.current,
+        echo: { ...sessEchoRef.current },
         streak: null,
       });
       // streak line (cheap aggregate) — fill in async, best-effort
@@ -1444,6 +1610,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     gotoEpisode,
     togglePreStudy,
     toggleAutopause,
+    toggleHud,
+    toggleEcho,
+    seekIPlusOne,
     toast,
   });
 
@@ -2046,6 +2215,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     onGenerateJa,
     onTranslateRu,
     onCondense,
+    toggleHud,
+    toggleEcho,
+    seekIPlusOne,
     primaryText,
     toast,
   });
@@ -2059,6 +2231,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     onGenerateJa,
     onTranslateRu,
     onCondense,
+    toggleHud,
+    toggleEcho,
+    seekIPlusOne,
     primaryText,
     toast,
   };
@@ -2068,6 +2243,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       { id: "pl.autopause", title: "player: toggle autopause", hint: "p", run: () => c().toggleAutopause() },
       { id: "pl.sidebar", title: "player: toggle cue sidebar", hint: "l", run: () => c().toggleSidebar() },
       { id: "pl.prestudy", title: "player: pre-study panel", hint: "w", run: () => c().togglePreStudy() },
+      { id: "pl.hud", title: "player: toggle session HUD", hint: "o", run: () => c().toggleHud() },
+      { id: "pl.echo", title: "player: toggle echo dictation", hint: "e", run: () => c().toggleEcho() },
+      { id: "pl.iplus1", title: "player: jump to next i+1 cue", hint: "j", run: () => c().seekIPlusOne() },
       { id: "pl.fs", title: "player: fullscreen", hint: "f", run: () => c().toggleFullscreen() },
       { id: "pl.offset0", title: "player: reset subtitle offset", hint: "\\", run: () => c().changeOffset(null) },
       { id: "pl.next", title: "player: next episode", hint: "⇧→", run: () => void c().gotoEpisode(1) },
@@ -2159,6 +2337,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           {cuesLoading && !primaryText && (
             <div className="sub-loading">loading subtitles…</div>
           )}
+          {/* echo dictation hides the JP line (the diff overlay shows it on reveal) */}
+          {echoCue ? null : (
           <div className="sub-primary">
             <TokenLine
               tokens={tokens}
@@ -2192,6 +2372,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
               </span>
             )}
           </div>
+          )}
           {secondaryText && (
             <div
               className={`sub-secondary${secShow || secHold || blurOff ? " show" : ""}`}
@@ -2244,6 +2425,74 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             Skip →
           </button>
         )}
+        {/* Wave 13.A: smart-resume affordance — quiet, transient, z to accept */}
+        {resumeHint != null && (
+          <button
+            className="resume-hint"
+            onClick={() => {
+              const v = videoRef.current;
+              if (v) v.currentTime = resumeHint;
+              setResumeHint(null);
+            }}
+            title="Resume where you left off"
+          >
+            resume at {fmtTime(resumeHint)}? press z
+          </button>
+        )}
+        {/* Wave 13.A: session HUD (toggle with `o`) */}
+        {hudOpen &&
+          (() => {
+            void hudTick; // re-render trigger
+            const mins = Math.round((Date.now() - sessionStartRef.current) / 60000);
+            const passed = sessPassedRef.current;
+            const pct = passed > 0 ? Math.round((sessClearRef.current / passed) * 100) : 100;
+            return (
+              <div className="session-hud" data-testid="session-hud">
+                {mins}m · {sessCuesRef.current} cues · {pct}% known ·{" "}
+                {sessLookupsRef.current} mined · {sessCardsRef.current} cards ·{" "}
+                {sessUnknownSetRef.current.size} unk
+              </div>
+            );
+          })()}
+        {/* Wave 13.B: echo dictation input / reveal overlay */}
+        {echoCue && (
+          <div className="echo-overlay">
+            {echoResult == null ? (
+              <>
+                <input
+                  ref={echoInputRef}
+                  className="echo-input"
+                  value={echoInput}
+                  placeholder="type what you heard — Enter to check, Tab to replay"
+                  onChange={(e) => setEchoInput(e.target.value)}
+                  onKeyDown={onEchoKeyDown}
+                  autoFocus
+                />
+              </>
+            ) : (
+              <div className="echo-reveal">
+                <div className="echo-diff">
+                  {echoResult.cells.map((c, i) => (
+                    <span key={i} className={c.ok ? "echo-ok" : "echo-bad"}>
+                      {c.ch}
+                    </span>
+                  ))}
+                </div>
+                <div className="echo-score">
+                  {echoResult.correct}/{echoResult.total} — Enter to continue
+                </div>
+                <input
+                  ref={echoInputRef}
+                  className="echo-input echo-input-hidden"
+                  value={echoInput}
+                  onChange={(e) => setEchoInput(e.target.value)}
+                  onKeyDown={onEchoKeyDown}
+                  autoFocus
+                />
+              </div>
+            )}
+          </div>
+        )}
         {sessionSummary && (
           <div className="session-summary">
             <div className="ss-title">session</div>
@@ -2254,6 +2503,12 @@ export function Player({ entry, startAt, toast, settings }: Props) {
               {sessionSummary.lookups} lookups · {sessionSummary.cards} cards ·{" "}
               {sessionSummary.known} marked known
             </div>
+            {sessionSummary.echo.tried > 0 && (
+              <div className="ss-line ss-dim">
+                echo: {sessionSummary.echo.tried} tried ·{" "}
+                {sessionSummary.echo.perfect} perfect
+              </div>
+            )}
             {sessionSummary.streak != null && (
               <div className="ss-line ss-dim">
                 streak: {sessionSummary.streak} day

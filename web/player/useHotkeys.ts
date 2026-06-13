@@ -47,6 +47,9 @@ export interface PlayerHotkeyCtx {
   gotoEpisode: (dir: 1 | -1) => Promise<void>;
   togglePreStudy: () => void;
   toggleAutopause: () => void;
+  toggleHud: () => void;
+  toggleEcho: () => void;
+  seekIPlusOne: () => void;
   toast: (msg: string) => void;
 }
 
@@ -58,6 +61,7 @@ const RATES = [0.5, 0.75, 1, 1.25, 1.5];
 const LETTERS: Record<string, string> = {
   KeyF: "f", KeyA: "a", KeyR: "r", KeyL: "l", KeyK: "k", KeyS: "s",
   KeyP: "p", KeyG: "g", KeyW: "w", KeyB: "b", KeyI: "i", KeyX: "x",
+  KeyO: "o", KeyE: "e", KeyJ: "j",
 };
 const HANDLED = new Set([
   " ",
@@ -67,7 +71,7 @@ const HANDLED = new Set([
   "Tab",
   ...Object.values(LETTERS),
 ]);
-const REPEAT_TOGGLES = new Set([" ", "f", "l", "k", "s", "p", "g", "a", "w", "b", "i", "x"]);
+const REPEAT_TOGGLES = new Set([" ", "f", "l", "k", "s", "p", "g", "a", "w", "b", "i", "x", "o", "e", "j"]);
 
 export function usePlayerHotkeys(ctx: PlayerHotkeyCtx): void {
   const ctxRef = useRef(ctx);
@@ -335,6 +339,15 @@ export function usePlayerHotkeys(ctx: PlayerHotkeyCtx): void {
           c.toast(adding ? `blacklisted: ${key}` : `unblacklisted: ${key}`);
           break;
         }
+        case "o":
+          c.toggleHud();
+          break;
+        case "e":
+          c.toggleEcho();
+          break;
+        case "j":
+          c.seekIPlusOne();
+          break;
       }
     };
     // keyup re-blurs the secondary line after a `b` hold (harmless elsewhere)
