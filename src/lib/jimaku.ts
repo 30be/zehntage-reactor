@@ -14,6 +14,7 @@ import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { parseEnvText } from "./env.ts";
+import { guessEpisode } from "./episode.ts";
 
 const BASE_URL = "https://jimaku.cc";
 
@@ -174,4 +175,98 @@ export async function downloadFile(
   const bytes = new Uint8Array(await res.arrayBuffer());
   await Bun.write(destPath, bytes);
   return bytes.byteLength;
+}
+
+// --- Confident-match helpers (pure; no network) -----------------------------
+// Used to decide whether an auto-fetched human JA sub from jimaku TRULY matches
+// a local video. Only confident matches are accepted; whisper stays the
+// fallback. The caller already holds `entries` from searchEntries.
+
+/**
+ * Normalize a title for fuzzy comparison: lowercase, drop non-alphanumerics,
+ * collapse whitespace. Latin + kana/kanji survive.
+ */
+export function normTitle(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^\p{Letter}\p{Number}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Token containment overlap of two normalized titles, 0..1. */
+function tokenOverlap(a: string, b: string): number {
+  const ta = new Set(normTitle(a).split(" ").filter(Boolean));
+  const tb = new Set(normTitle(b).split(" ").filter(Boolean));
+  if (ta.size === 0 || tb.size === 0) return 0;
+  let inter = 0;
+  for (const t of ta) if (tb.has(t)) inter++;
+  return inter / Math.min(ta.size, tb.size); // containment, not symmetric Jaccard
+}
+
+export interface ConfidentMatch {
+  entry: JimakuEntry;
+  /** best name overlap, 0..1 */
+  score: number;
+  /** 2nd-best score (dominance check) */
+  runnerUp: number;
+  /** human-readable why-accepted, for logging */
+  reason: string;
+}
+
+/**
+ * Pick a CONFIDENT jimaku entry for a local video, or null.
+ * Heuristic (all must hold):
+ *  - name overlap: query vs the best of {name, english_name, japanese_name}
+ *    >= NAME_OVERLAP_MIN (0.8);
+ *  - dominant candidate: best - runnerUp >= DOMINANCE_MIN (0.34), OR only one
+ *    candidate scored >= NAME_OVERLAP_MIN;
+ *  - not adult.
+ *
+ * Thresholds rationale: 0.8 containment tolerates a missing season word; 0.34
+ * dominance ~= "best beats runner-up by a third of its tokens", which separates
+ * a real hit from a same-franchise sibling. Tune via the logged `reason`.
+ *
+ * Episode pinning (the "pinned-both-sides" rule) is enforced LATER, in the
+ * caller, by listing files with `episode=` AND confirming the chosen file name
+ * also carries that episode number (see `fileMatchesEpisode`).
+ *
+ * @param query a normalized local filename (e.g. from `jimakuQueryFromName`).
+ */
+export function pickConfidentEntry(
+  query: string,
+  entries: JimakuEntry[],
+): ConfidentMatch | null {
+  const NAME_OVERLAP_MIN = 0.8;
+  const DOMINANCE_MIN = 0.34;
+  const scored = entries
+    .filter((e) => !e.flags.adult)
+    .map((e) => {
+      const score = Math.max(
+        tokenOverlap(query, e.name),
+        e.english_name ? tokenOverlap(query, e.english_name) : 0,
+        e.japanese_name ? tokenOverlap(query, e.japanese_name) : 0,
+      );
+      return { entry: e, score };
+    })
+    .sort((a, b) => b.score - a.score);
+  if (scored.length === 0) return null;
+  const best = scored[0]!;
+  const runnerUp = scored[1]?.score ?? 0;
+  if (best.score < NAME_OVERLAP_MIN) return null;
+  const dominant =
+    best.score - runnerUp >= DOMINANCE_MIN ||
+    scored.filter((s) => s.score >= NAME_OVERLAP_MIN).length === 1;
+  if (!dominant) return null;
+  return {
+    entry: best.entry,
+    score: best.score,
+    runnerUp,
+    reason: `name=${best.score.toFixed(2)} runnerUp=${runnerUp.toFixed(2)}`,
+  };
+}
+
+/** True if the jimaku file name plausibly carries this episode number. */
+export function fileMatchesEpisode(fileName: string, episode: number): boolean {
+  return guessEpisode(fileName) === episode;
 }

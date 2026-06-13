@@ -1,7 +1,7 @@
 // zehntage-reactor HTTP server (Bun.serve).
 
 import { extname, join, dirname, basename, resolve } from "node:path";
-import { stat, readdir } from "node:fs/promises";
+import { stat, readdir, rm } from "node:fs/promises";
 import {
   Library,
   subLangsFor,
@@ -17,6 +17,7 @@ import {
   cutAudio,
   mergeAudioSpans,
   condenseAudio,
+  mediaDurationSec,
 } from "../lib/media.ts";
 import {
   listEmbeddedSubTracks,
@@ -39,8 +40,11 @@ import {
   askQuestion,
   DEFAULT_LOOKUP_PROMPT,
   DEFAULT_EXPLAIN_PROMPT,
+  correctNames,
   type ExplainResult,
 } from "../lib/gemini.ts";
+import { loadGlossary } from "../lib/glossary.ts";
+import { guessEpisode } from "../lib/episode.ts";
 import {
   listWords,
   getProgress,
@@ -78,6 +82,8 @@ import {
   searchEntries,
   listFiles,
   downloadFile,
+  pickConfidentEntry,
+  fileMatchesEpisode,
   JimakuError,
 } from "../lib/jimaku.ts";
 import { showFrequency } from "../lib/mining.ts";
@@ -431,6 +437,103 @@ function enqueueTranslate(library: Library, entryId: string, sourceTrack: string
   void pumpTranslateBatch(library);
 }
 
+/** Reject a downloaded human sub that is desynced/truncated/sparse. */
+function subPassesQuality(
+  cues: Cue[],
+  mediaDurSec: number,
+): { ok: true } | { ok: false; reason: string } {
+  if (cues.length < 20) return { ok: false, reason: `too few cues (${cues.length})` };
+  const last = cues[cues.length - 1]!.end;
+  const first = cues[0]!.start;
+  // Coverage: subtitle span vs media duration. Tolerate trailing ED with a
+  // generous floor; reject obviously-truncated files.
+  if (mediaDurSec > 0) {
+    const coverage = (last - first) / mediaDurSec;
+    if (coverage < 0.6) return { ok: false, reason: `coverage ${coverage.toFixed(2)}` };
+    // Last cue should not end far past the media (wrong-episode / wrong-fps).
+    if (last > mediaDurSec * 1.1)
+      return { ok: false, reason: `overruns media (${last.toFixed(0)}>${mediaDurSec.toFixed(0)})` };
+    // First cue absurdly late => likely offset/desync.
+    if (first > mediaDurSec * 0.25) return { ok: false, reason: `late start ${first.toFixed(0)}s` };
+  }
+  // Cue density: dialogue anime ~ >= 4 cues/min over the covered span.
+  const spanMin = Math.max(1 / 60, (last - first) / 60);
+  const density = cues.length / spanMin;
+  if (density < 4) return { ok: false, reason: `density ${density.toFixed(1)}/min` };
+  return { ok: true };
+}
+
+/** Attempt a confident, quality human JA sub from jimaku. Returns true if one
+ *  was downloaded + accepted (external sidecar written + library refreshed). */
+async function tryJimakuJa(library: Library, entry: LibraryEntry): Promise<boolean> {
+  // Soft-skip if no API key (searchEntries throws JimakuError 401) — caller's
+  // try/catch turns that into a whisper fallback.
+  const query = jimakuQueryFromName(entry.name);
+  if (!query) return false;
+  const entries = await searchEntries(query);
+  const match = pickConfidentEntry(query, entries);
+  if (!match) {
+    void logEvent("jimaku_no_match", { mediaId: entry.id, query, candidates: entries.length });
+    return false;
+  }
+
+  // Episode-pinned-both-sides: require a local episode number AND a remote file
+  // name carrying it. If we can't pin the episode locally, bail (whisper safer).
+  const episode = guessEpisode(entry.name);
+  if (episode == null) {
+    void logEvent("jimaku_no_episode", { mediaId: entry.id, entryId: match.entry.id });
+    return false;
+  }
+  const files = await listFiles(match.entry.id, episode);
+  const subFiles = files.filter((f) => /\.(srt|ass|ssa|vtt)$/i.test(f.name));
+  const candidate = subFiles.find((f) => fileMatchesEpisode(f.name, episode));
+  if (!candidate) {
+    void logEvent("jimaku_no_file", { mediaId: entry.id, entryId: match.entry.id, episode });
+    return false;
+  }
+
+  const ext = extname(candidate.name).toLowerCase() || ".srt";
+  const lang = jimakuLang(candidate.name); // "ja" unless suffixed
+  if (!isJapaneseLang(lang)) return false; // only fetch JA here
+  // Same external-sidecar convention as /api/jimaku/download: next to the
+  // video, NOT under subs/ — so origin=external (distinguishable from whisper).
+  const base = basename(entry.absPath, extname(entry.absPath));
+  const dest = join(dirname(entry.absPath), `${base}.${lang}${ext}`);
+
+  await downloadFile(candidate.url, dest);
+
+  // Quality / sync gate.
+  let cues: Cue[];
+  try {
+    cues = parseSubtitleText(await Bun.file(dest).text(), ext);
+  } catch {
+    await rm(dest).catch(() => {});
+    void logEvent("anomaly.jimaku_reject", { mediaId: entry.id, reason: "unparseable" });
+    return false;
+  }
+  const dur = await mediaDurationSec(entry.absPath);
+  const q = subPassesQuality(cues, dur);
+  if (!q.ok) {
+    await rm(dest).catch(() => {});
+    void logEvent("anomaly.jimaku_reject", {
+      mediaId: entry.id,
+      reason: q.reason,
+      file: candidate.name,
+    });
+    return false;
+  }
+
+  await library.refresh();
+  void logEvent("jimaku_auto", {
+    mediaId: entry.id,
+    entryId: match.entry.id,
+    file: candidate.name,
+    score: match.score,
+    reason: match.reason,
+  });
+  return true;
+}
+
 /**
  * Full ja+ru chain for one entry:
  *  - no ja track → whisper; when the job finishes, auto-enqueue ru translation
@@ -444,6 +547,27 @@ async function chainGenerateAll(
 ): Promise<"whisper" | "translate" | "skipped"> {
   if (!(await hasJapaneseTrack(entry))) {
     if (whisperQueue.hasActiveFor(entry.absPath)) return "skipped";
+
+    // --- jimaku-first: try a confident, quality human JA sub before whisper ---
+    // ANY failure (no key/401, 429, parse, network, reject) → whisper fallback.
+    try {
+      const got = await tryJimakuJa(library, entry);
+      if (got) {
+        // Human sub accepted (external sidecar written). Translate straight to
+        // ru from it — NO correctNames pass (that's whisper-only).
+        const fresh = library.get(entry.id) ?? entry;
+        const sourceTrack = await bestJapaneseTrackId(fresh);
+        if (sourceTrack && !hasGeneratedRu(fresh) && !translateQueuedFor(fresh.id)) {
+          enqueueTranslate(library, fresh.id, sourceTrack);
+        }
+        return "translate";
+      }
+    } catch (e) {
+      void logEvent("anomaly.jimaku_fail", { mediaId: entry.id, error: String(e) });
+      // fall through to whisper
+    }
+
+    // --- whisper fallback ---
     const job = whisperQueue.enqueue(entry.absPath, "ja", sidecarPath(entry, "ja"));
     const listener = (e: WhisperEvent) => {
       if (e.type !== "status") return;
@@ -452,8 +576,30 @@ async function chainGenerateAll(
         void (async () => {
           await library.refresh();
           const fresh = library.get(entry.id);
-          if (fresh && !hasGeneratedRu(fresh) && !translateQueuedFor(fresh.id)) {
-            enqueueTranslate(library, fresh.id, "sidecar:gen:ja");
+          if (!fresh) return;
+
+          // --- name-correction pass on the WHISPER-generated ja sidecar ---
+          // Only for generated whisper output; jimaku/external never reaches
+          // this listener. Fail-safe: any error leaves the original sidecar.
+          try {
+            const jaPath = sidecarPath(fresh, "ja"); // subs/<base>.ja.srt
+            const cues = parseSrt(await Bun.file(jaPath).text());
+            const glossary = loadGlossary(dirname(fresh.absPath));
+            const corrected = await correctNames(cues, glossary);
+            const changed = corrected.some((c, i) => c.text !== cues[i]?.text);
+            if (changed) {
+              await Bun.write(jaPath, cuesToSrt(corrected));
+              await library.refresh();
+              void logEvent("correct_names", { mediaId: fresh.id, cues: cues.length });
+            }
+          } catch (err) {
+            void logEvent("anomaly.correct_fail", { mediaId: fresh.id, error: String(err) });
+            // non-fatal: translate the uncorrected ja sub
+          }
+
+          const f2 = library.get(entry.id);
+          if (f2 && !hasGeneratedRu(f2) && !translateQueuedFor(f2.id)) {
+            enqueueTranslate(library, f2.id, "sidecar:gen:ja");
           }
         })();
       } else if (e.status === "error" || e.status === "canceled") {

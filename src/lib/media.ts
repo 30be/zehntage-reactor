@@ -12,6 +12,24 @@ const CONTENT_TYPES: Record<string, string> = {
   ".mp3": "audio/mpeg",
 };
 
+/**
+ * Duration of any media file (mkv, mp4, etc.) in seconds via ffprobe.
+ * Returns 0 if ffprobe cannot determine the duration.
+ * Used by the jimaku quality/sync gate: coverage = lastCueEnd / mediaDuration.
+ * Rejects on ffprobe spawn failure; callers should catch and fall back to whisper.
+ */
+export async function mediaDurationSec(path: string): Promise<number> {
+  const proc = Bun.spawn(
+    ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+    { stdout: "pipe", stderr: "ignore" },
+  );
+  // Drain stdout fully to avoid pipe deadlock before awaiting exit.
+  const out = await new Response(proc.stdout as ReadableStream).text();
+  await proc.exited;
+  const sec = Number.parseFloat(out.trim());
+  return Number.isFinite(sec) ? sec : 0;
+}
+
 export function contentTypeFor(path: string): string {
   const ext = path.slice(path.lastIndexOf(".")).toLowerCase();
   return CONTENT_TYPES[ext] ?? "application/octet-stream";
