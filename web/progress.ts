@@ -92,9 +92,23 @@ export function matchFront(
     if (cands && cands.length > 0) return cands[0]!.front;
   }
   if (basicForm && basicForm !== "*" && basicForm !== surface) {
+    if (hira) {
+      // reading-aware bracket lookup on the dictionary form first
+      const f = idx.byKey.get(`${basicForm} [${hira}]`);
+      if (f) return f;
+    }
     const exactBase = idx.byKey.get(basicForm);
     if (exactBase) return exactBase;
     const cands = idx.bare.get(basicForm);
+    // This branch is only reached for a CONJUGATED token (surface !== basicForm,
+    // guarded above). The token's surface reading (食べた → タベタ) can't be
+    // checked against the dictionary-form card reading (たべる), so we accept the
+    // lemma match without a reading veto — that's how 食べた lights up a 食べる
+    // card. The uninflected homograph veto (辛い[からい] ≠ 辛い read つらい) is
+    // already enforced upstream: with a reading present, an uninflected token
+    // only matches via the exact bracket lookup at the top, else falls through
+    // to null. The reading-aware dict-form bracket lookup above (`basicForm
+    // [hira]`) still gives precise homograph matches when the reading IS known.
     if (cands && cands.length > 0) return cands[0]!.front;
   }
   return null;

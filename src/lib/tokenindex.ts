@@ -13,6 +13,11 @@ import type { Cue } from "./subs.ts";
 import type { LibraryEntry } from "./library.ts";
 import { mergeTokens, isLexical, lemmaOf, type KToken } from "./jatok.ts";
 
+// Internal index version. Bump when the index key shape changes so the
+// in-memory mtime-keyed cache cannot serve stale entries across a hot reload
+// that keeps the process alive. Folded into the per-entry cache key.
+const INDEX_VERSION = "v2-homograph";
+
 export type Tokenize = (text: string) => KToken[];
 
 /** Path to the IPADIC bundled with @sglkc/kuromoji, or null if not found. */
@@ -166,7 +171,8 @@ async function getIndexUnlocked(
   tokenize?: Tokenize,
 ): Promise<EntryIndex> {
   const sources = [entry.absPath, ...entry.sidecarSubs.map((s) => s.path)];
-  const key = (await Promise.all(sources.map(fileSig))).join("|");
+  const key =
+    INDEX_VERSION + "|" + (await Promise.all(sources.map(fileSig))).join("|");
   const hit = indexCache.get(entry.id);
   if (hit && hit.key === key) return hit.index;
   const index = (async () =>

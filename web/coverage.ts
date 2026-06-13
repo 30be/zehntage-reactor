@@ -26,10 +26,13 @@ export interface Coverage {
   i1density: number;
 }
 
+// v4: bumped for homograph-aware vocabKey keying (lemma|reading|pos) — the
+// known/coverage unknown-set keys changed shape, so old lemma-only coverage
+// caches must recompute.
 // v3: bumped when interactive Anki adds switched to writing the dictionary
 // (lemma) form as the card front, so cached coverage recomputes against the
 // corrected lemma-add behaviour (all conjugations now match a single card).
-export const CACHE_PREFIX = "zr.cov.v3.";
+export const CACHE_PREFIX = "zr.cov.v4.";
 
 // Cache key deliberately does NOT include the cue count: knowing it would
 // require downloading the full cue list, which is exactly the expensive call

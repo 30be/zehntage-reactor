@@ -8,7 +8,7 @@
 //   in deck (learning)   -> blue fading to ambient as the interval grows
 //   in deck (mature)     -> plain ambient text
 
-import { isLexical, kataToHira, type KToken } from "./tokenizer.ts";
+import { isLexical, kataToHira, vocabKey, type KToken } from "./tokenizer.ts";
 import {
   matchFront,
   progressBucket,
@@ -20,11 +20,11 @@ import { accentOf, accentPattern, morae } from "./accent.ts";
 const HAS_KANJI = /[一-龯々]/;
 const MATURE_BUCKET = 4;
 
-/** Stable identity for the local known-set: dictionary form when available. */
+/** Stable identity for the local known-set / blacklist / coverage: the
+ * homograph-aware vocabKey, so 生(なま) and 生(せい) are tracked separately
+ * while a verb's conjugations still collapse to one key. */
 export function wordKey(tok: KToken): string {
-  return tok.basic_form && tok.basic_form !== "*"
-    ? tok.basic_form
-    : tok.surface_form;
+  return vocabKey(tok);
 }
 
 /**

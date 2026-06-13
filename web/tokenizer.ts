@@ -144,3 +144,37 @@ export function isLexical(tok: KToken): boolean {
   if (tok.pos === "記号") return false;
   return true;
 }
+
+/** Lemma key: basic_form when kuromoji has one, else surface. */
+export function lemmaOf(tok: KToken): string {
+  const b = tok.basic_form;
+  return b && b !== "*" ? b : tok.surface_form;
+}
+
+// POS classes that INFLECT: their kuromoji `reading` is the SURFACE reading
+// (食べた → タベタ, not the dictionary タベル), so folding it into the key would
+// split every conjugation. For these we key on lemma|pos only — conjugations
+// collapse, and same-lemma+same-pos verb homographs (rare) are accepted as a
+// tolerable collision.
+const INFLECTING_POS = new Set(["動詞", "形容詞", "助動詞"]);
+
+/**
+ * Homograph-aware vocabulary key. MUST stay byte-identical in logic with the
+ * copy in src/lib/jatok.ts — server index keys and browser keys would diverge
+ * otherwise. Key shape:
+ *   - inflecting POS (動詞/形容詞/助動詞): `${lemma}|${pos}` (reading dropped so
+ *     conjugations collapse to one key);
+ *   - else reading present: `${lemma}|${hira(reading)}|${pos}` (reading is the
+ *     primary homograph discriminator, POS the tiebreaker for は etc.);
+ *   - else (OOV / no reading, non-inflecting): bare `${lemma}` — there's no
+ *     reading to disambiguate on, so degrade to today's lemma-only behavior
+ *     rather than over-splitting on POS.
+ */
+export function vocabKey(tok: KToken): string {
+  const lemma = lemmaOf(tok);
+  const pos = tok.pos ?? "";
+  if (!pos) return lemma;
+  if (INFLECTING_POS.has(pos)) return `${lemma}|${pos}`;
+  const reading = tok.reading ? kataToHira(tok.reading) : "";
+  return reading ? `${lemma}|${reading}|${pos}` : lemma;
+}
