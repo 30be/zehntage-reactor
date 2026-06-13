@@ -30,26 +30,22 @@ mock.module("../web/tokenizer.ts", () => ({
   isLexical: (tok: FakeToken) => tok.pos !== "記号",
 }));
 
-// We control matchFront behaviour via this variable.
-// When truthy, the set of "front" strings that the mock considers matched.
-let knownFronts: Set<string> = new Set();
-
 // wordKey: mirrors real impl (basic_form if set and not *, else surface)
 mock.module("../web/TokenLine.tsx", () => ({
   wordKey: (tok: FakeToken) =>
     tok.basic_form && tok.basic_form !== "*" ? tok.basic_form : tok.surface_form,
 }));
 
-mock.module("../web/progress.ts", () => ({
-  buildWordIndex: () => ({}),
-  // matchFront checks the surface and basic_form against knownFronts
-  matchFront: (_idx: unknown, surface: string, _reading?: string, basicForm?: string): string | null => {
-    if (knownFronts.has(surface)) return surface;
-    if (basicForm && basicForm !== "*" && basicForm !== surface && knownFronts.has(basicForm))
-      return basicForm;
-    return null;
-  },
-}));
+// NOTE: we deliberately do NOT mock.module("../web/progress.ts"). mock.module()
+// patches the process-global registry for the whole `bun test` run and is never
+// undone, so stubbing buildWordIndex/matchFront here would leak into every later
+// test that imports the real module (lemmaAdd, matchfront, progress, …). Instead
+// we use the REAL progress.ts and build a genuine WordIndex from card fronts via
+// `indexOf(...)` below. The "known cards" in these tests are readingless fronts
+// (e.g. "食べる"), for which real matchFront behaves identically to the old stub:
+// a conjugated token (食べた, basic_form 食べる) with no reading matches the
+// readingless dict-form card via the exact-byKey lemma lookup.
+import { buildWordIndex } from "../web/progress.ts";
 
 mock.module("../web/api.ts", () => ({}));
 mock.module("../web/blacklist.ts", () => ({ readBlacklist: () => new Set() }));
@@ -68,7 +64,11 @@ type Cue = { start: number; end: number; text: string };
 function cue(text: string): Cue {
   return { start: 0, end: 1, text };
 }
-const EMPTY_INDEX = {} as Parameters<typeof coverageOfCues>[1];
+// Build a real WordIndex from a set of card-front strings (readingless).
+function indexOf(fronts: Iterable<string>): Parameters<typeof coverageOfCues>[1] {
+  return buildWordIndex([...fronts].map((front) => ({ front }) as never), {});
+}
+const EMPTY_INDEX = buildWordIndex([], {});
 
 // ---------------------------------------------------------------------------
 // Unknown-set lemma keying: two conjugations → ONE unknown entry
@@ -80,7 +80,6 @@ describe("coverageOfCues — unknown set keyed by lemma (wordKey)", () => {
       { surface_form: "食べた",   basic_form: "食べる", pos: "動詞" },
       { surface_form: "食べない", basic_form: "食べる", pos: "動詞" },
     ];
-    knownFronts = new Set();
     const cov = await coverageOfCues([cue("x")], EMPTY_INDEX, new Set());
     // wordKey of both is "食べる" → only 1 distinct unknown
     expect(cov.newCount).toBe(1);
@@ -92,14 +91,12 @@ describe("coverageOfCues — unknown set keyed by lemma (wordKey)", () => {
       { surface_form: "食べた", basic_form: "食べる", pos: "動詞" },
       { surface_form: "飲んだ", basic_form: "飲む",   pos: "動詞" },
     ];
-    knownFronts = new Set();
     const cov = await coverageOfCues([cue("x")], EMPTY_INDEX, new Set());
     expect(cov.newCount).toBe(2);
   });
 
   test("same lemma across multiple cues → still newCount = 1", async () => {
     fakeTokens = [{ surface_form: "猫", basic_form: "猫", pos: "名詞" }];
-    knownFronts = new Set();
     const cov = await coverageOfCues(
       [cue("c1"), cue("c2"), cue("c3")],
       EMPTY_INDEX,
@@ -118,8 +115,7 @@ describe("coverageOfCues — matchFront covers conjugated tokens", () => {
     fakeTokens = [
       { surface_form: "食べた", basic_form: "食べる", pos: "動詞" },
     ];
-    knownFronts = new Set(["食べる"]); // simulate card in deck
-    const cov = await coverageOfCues([cue("x")], EMPTY_INDEX, new Set());
+    const cov = await coverageOfCues([cue("x")], indexOf(["食べる"]), new Set());
     expect(cov.pct).toBe(100);
     expect(cov.newCount).toBe(0);
   });
@@ -129,23 +125,20 @@ describe("coverageOfCues — matchFront covers conjugated tokens", () => {
       { surface_form: "食べない", basic_form: "食べる", pos: "動詞" },
       { surface_form: "食べます", basic_form: "食べる", pos: "動詞" },
     ];
-    knownFronts = new Set(["食べる"]);
-    const cov = await coverageOfCues([cue("x")], EMPTY_INDEX, new Set());
+    const cov = await coverageOfCues([cue("x")], indexOf(["食べる"]), new Set());
     expect(cov.pct).toBe(100);
     expect(cov.newCount).toBe(0);
   });
 
   test("card NOT in deck → conjugated form unknown", async () => {
     fakeTokens = [{ surface_form: "食べた", basic_form: "食べる", pos: "動詞" }];
-    knownFronts = new Set(["飲む"]); // different verb
-    const cov = await coverageOfCues([cue("x")], EMPTY_INDEX, new Set());
+    const cov = await coverageOfCues([cue("x")], indexOf(["飲む"]), new Set()); // different verb
     expect(cov.pct).toBe(0);
     expect(cov.newCount).toBe(1);
   });
 
   test("knownWords set with lemma key marks conjugation as known", async () => {
     fakeTokens = [{ surface_form: "食べた", basic_form: "食べる", pos: "動詞" }];
-    knownFronts = new Set();
     // Pass the wordKey (食べる) in knownWords
     const cov = await coverageOfCues([cue("x")], EMPTY_INDEX, new Set(["食べる"]));
     expect(cov.pct).toBe(100);
@@ -163,7 +156,6 @@ describe("coverageOfCues — homograph handling", () => {
       { surface_form: "辛い", basic_form: "辛い_karai", pos: "形容詞", reading: "カライ" },
       { surface_form: "辛い", basic_form: "辛い_tsurai", pos: "形容詞", reading: "ツライ" },
     ];
-    knownFronts = new Set();
     const cov = await coverageOfCues([cue("x")], EMPTY_INDEX, new Set());
     expect(cov.newCount).toBe(2);
   });
@@ -173,8 +165,7 @@ describe("coverageOfCues — homograph handling", () => {
       { surface_form: "辛い", basic_form: "辛い_karai",  pos: "形容詞" },
       { surface_form: "辛い", basic_form: "辛い_tsurai", pos: "形容詞" },
     ];
-    knownFronts = new Set(["辛い_karai"]);
-    const cov = await coverageOfCues([cue("x")], EMPTY_INDEX, new Set());
+    const cov = await coverageOfCues([cue("x")], indexOf(["辛い_karai"]), new Set());
     expect(cov.pct).toBe(50);
     expect(cov.newCount).toBe(1);
   });
@@ -192,7 +183,6 @@ describe("coverageOfCues — i1density and lemma keying", () => {
       { surface_form: "食べた",   basic_form: "食べる", pos: "動詞" },
       { surface_form: "食べない", basic_form: "食べる", pos: "動詞" },
     ];
-    knownFronts = new Set();
     const cov = await coverageOfCues([cue("x")], EMPTY_INDEX, new Set());
     expect(cov.i1density).toBe(0); // cueUnknown=2, not 1
     expect(cov.newCount).toBe(1);  // but only 1 DISTINCT unknown lemma
@@ -203,16 +193,14 @@ describe("coverageOfCues — i1density and lemma keying", () => {
       { surface_form: "猫",    basic_form: "猫",    pos: "名詞" }, // known
       { surface_form: "食べた", basic_form: "食べる", pos: "動詞" }, // unknown
     ];
-    knownFronts = new Set(["猫"]);
-    const cov = await coverageOfCues([cue("x")], EMPTY_INDEX, new Set());
+    const cov = await coverageOfCues([cue("x")], indexOf(["猫"]), new Set());
     expect(cov.i1density).toBe(1);
     expect(cov.newCount).toBe(1);
   });
 
   test("all known: i1density=0 (no cue has exactly 1 unknown)", async () => {
     fakeTokens = [{ surface_form: "猫", basic_form: "猫", pos: "名詞" }];
-    knownFronts = new Set(["猫"]);
-    const cov = await coverageOfCues([cue("x")], EMPTY_INDEX, new Set());
+    const cov = await coverageOfCues([cue("x")], indexOf(["猫"]), new Set());
     expect(cov.i1density).toBe(0);
     expect(cov.pct).toBe(100);
   });
@@ -225,7 +213,6 @@ describe("coverageOfCues — i1density and lemma keying", () => {
 describe("coverageOfCues — edge cases", () => {
   test("no cues → pct 100, newCount 0, i1density 0", async () => {
     fakeTokens = [];
-    knownFronts = new Set();
     const cov = await coverageOfCues([], EMPTY_INDEX, new Set());
     expect(cov.pct).toBe(100);
     expect(cov.newCount).toBe(0);
@@ -234,7 +221,6 @@ describe("coverageOfCues — edge cases", () => {
 
   test("all-punctuation cue: i1density=0, pct=100 (vacuous)", async () => {
     fakeTokens = [{ surface_form: "。", pos: "記号" }];
-    knownFronts = new Set();
     const cov = await coverageOfCues([cue("。")], EMPTY_INDEX, new Set());
     expect(cov.i1density).toBe(0);
     expect(cov.pct).toBe(100);
@@ -248,8 +234,7 @@ describe("coverageOfCues — edge cases", () => {
       { surface_form: "B", basic_form: "B", pos: "名詞" },
       { surface_form: "C", basic_form: "C", pos: "名詞" },
     ];
-    knownFronts = new Set(["A"]);
-    const cov = await coverageOfCues([cue("x")], EMPTY_INDEX, new Set());
+    const cov = await coverageOfCues([cue("x")], indexOf(["A"]), new Set());
     expect(cov.pct).toBe(33);
   });
 });
