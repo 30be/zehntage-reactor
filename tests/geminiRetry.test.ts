@@ -76,3 +76,40 @@ describe("callGemini retry/backoff", () => {
     expect(out[0]!.text).toBe("перевод");
   });
 });
+
+describe("translateCues count-mismatch resilience", () => {
+  const twoCues: Cue[] = [
+    { start: 0, end: 1, text: "alpha" },
+    { start: 1, end: 2, text: "beta" },
+  ];
+
+  test("recovers by retrying once when first batch returns wrong count", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      // first: wrong count (1 for 2 cues) → TranslationCountError → retry
+      return calls === 1
+        ? jsonResp(["only-one"])
+        : jsonResp(["перевод-a", "перевод-b"]);
+    }) as unknown as typeof fetch;
+
+    const out = await translateCues(twoCues, "ru");
+    expect(calls).toBe(2);
+    expect(out.map((c) => c.text)).toEqual(["перевод-a", "перевод-b"]);
+  });
+
+  test("falls back to ORIGINAL text (not zero output) if count still wrong after retry", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return jsonResp(["always-one"]); // always wrong count
+    }) as unknown as typeof fetch;
+
+    const out = await translateCues(twoCues, "ru");
+    expect(calls).toBe(2); // one initial + one retry, then give up
+    expect(out).toHaveLength(2); // never zero output
+    expect(out.map((c) => c.text)).toEqual(["alpha", "beta"]); // originals kept
+    expect(out[0]!.start).toBe(0); // timings preserved
+    expect(out[1]!.end).toBe(2);
+  });
+});

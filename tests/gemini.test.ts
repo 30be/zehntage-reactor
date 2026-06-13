@@ -6,7 +6,12 @@ import {
   stripEnumerator,
   editDistance,
   acceptCorrection,
+  sanitizeCueLine,
+  buildTranslateBatchPrompt,
+  buildCorrectBatchPrompt,
+  translateCues,
 } from "../src/lib/gemini.ts";
+import type { Cue } from "../src/lib/subs.ts";
 
 describe("buildWordPrompt template substitution", () => {
   test("uses built-in default when no template given", () => {
@@ -150,14 +155,19 @@ describe("acceptCorrection", () => {
     expect(acceptCorrection("hello", "   ")).toBe(false);
   });
 
-  test("small change within 40% budget → accepted", () => {
-    // 'oreki' → 'oreki' (perfect) trivially passes; use a 1-char fix on a 5-char string.
-    // budget = floor(5 * 0.4) = 2; dist=1 → accept
+  test("1-char fix on 5-char string → accepted (dist=1 ≤ limit=1)", () => {
+    // len=5 ≤ 6 → limit=1; dist=1 → accept
     expect(acceptCorrection("oreki", "0reki")).toBe(true);
   });
 
-  test("change exceeding 40% budget → rejected", () => {
-    // 5-char original, budget=2; replace 3 chars → dist=3 > 2 → reject
+  test("2-char rewrite on 5-char string → rejected (dist=2 > limit=1)", () => {
+    // len=5 ≤ 6 → limit=1; dist=2 → reject (previously allowed under old 40% rule)
+    expect(acceptCorrection("oreki", "00eki")).toBe(false);
+  });
+
+  test("change exceeding budget on longer line → rejected", () => {
+    // len=5, but use a string that exceeds even the old budget to keep test valid
+    // 5-char original, limit=1; replace 3 chars → dist=3 > 1 → reject
     expect(acceptCorrection("abcde", "xyzde")).toBe(false);
   });
 
@@ -173,10 +183,72 @@ describe("acceptCorrection", () => {
   });
 
   test("surrogate pair characters count as 1 in budget calculation", () => {
-    // 𩸽 = 1 code point; original = "𩸽abc" (4 code points), budget=floor(4*0.4)=1
+    // 𩸽 = 1 code point; original = "𩸽abc" (4 code points), len=4 ≤ 6 → limit=1
     // 1-char sub → dist=1 ≤ 1 → accept
     const orig = "𩸽abc";
     const corr = "𩸽abx";
     expect(acceptCorrection(orig, corr)).toBe(true);
+  });
+});
+
+describe("sanitizeCueLine (ASS multiline cues → one wire line)", () => {
+  test("collapses literal ASS hard-break \\N marker to a space", () => {
+    expect(sanitizeCueLine("first\\Nsecond")).toBe("first second");
+  });
+
+  test("collapses literal ASS \\n marker to a space", () => {
+    expect(sanitizeCueLine("first\\nsecond")).toBe("first second");
+  });
+
+  test("collapses real newlines (\\n \\r \\r\\n) to a space", () => {
+    expect(sanitizeCueLine("a\nb\rc\r\nd")).toBe("a b c d");
+  });
+
+  test("collapses runs of whitespace and trims", () => {
+    expect(sanitizeCueLine("  a   b  ")).toBe("a b");
+  });
+
+  test("single-line text is unchanged (srt cues stay intact)", () => {
+    expect(sanitizeCueLine("just one line")).toBe("just one line");
+  });
+});
+
+describe("batch prompts: each cue is exactly ONE physical line", () => {
+  test("translate prompt: multiline cue does not add extra numbered lines", () => {
+    const lines = ["plain one", "two\\Nwith\\Nbreaks", "three\nreal\nnewline"];
+    const prompt = buildTranslateBatchPrompt(lines, "ru");
+    // The numbered region must have exactly 3 numbered lines.
+    const numbered = prompt.split("\n").filter((l) => /^\d+\.\s/.test(l));
+    expect(numbered).toHaveLength(3);
+    expect(numbered[1]).toBe("2. two with breaks");
+    expect(numbered[2]).toBe("3. three real newline");
+  });
+
+  test("correct prompt: multiline cue does not add extra numbered lines", () => {
+    const lines = ["a", "b\\Nb2", "c\nc2"];
+    const prompt = buildCorrectBatchPrompt(lines, ["折木"]);
+    const numbered = prompt.split("\n").filter((l) => /^\d+\.\s/.test(l));
+    expect(numbered).toHaveLength(3);
+  });
+});
+
+describe("translateCues (GEMINI_FAKE) with multiline cues", () => {
+  test("a multiline cue still yields exactly N outputs, timings preserved", async () => {
+    const prev = process.env.GEMINI_FAKE;
+    process.env.GEMINI_FAKE = "1";
+    try {
+      const cues: Cue[] = [
+        { start: 0, end: 1, text: "hello" },
+        { start: 1, end: 2, text: "multi\\Nline\\Ncue" },
+        { start: 2, end: 3, text: "real\nnewline\ncue" },
+      ];
+      const out = await translateCues(cues, "ru");
+      expect(out).toHaveLength(3);
+      expect(out[0]!.start).toBe(0);
+      expect(out[2]!.end).toBe(3);
+    } finally {
+      if (prev === undefined) delete process.env.GEMINI_FAKE;
+      else process.env.GEMINI_FAKE = prev;
+    }
   });
 });

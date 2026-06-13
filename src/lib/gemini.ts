@@ -96,6 +96,14 @@ class RetryableHttpError extends Error {
   }
 }
 
+/**
+ * Thrown when a Gemini batch returns a different number of items than were sent.
+ * This is the failure mode the .ass-multiline bug produced; translateCues treats
+ * it as recoverable (retry once, then keep originals) rather than fatal, so a
+ * single count hiccup degrades gracefully instead of nuking the whole episode.
+ */
+export class TranslationCountError extends Error {}
+
 async function callGemini(
   prompt: string,
   schema: unknown,
@@ -376,9 +384,30 @@ export function languageName(code: string): string {
   return LANG_NAMES[code.toLowerCase()] ?? code;
 }
 
+/**
+ * Collapse a cue's text into a SINGLE physical line for the numbered batch wire
+ * format. ASS dialogue cues can carry INTERNAL line breaks (real `\r\n`/`\n`/`\r`
+ * characters) as well as the literal ASS hard-break markers `\N` / `\n`
+ * (backslash followed by N/n, as they appear inside the .ass text). If any of
+ * these survive into the prompt, a single cue becomes MULTIPLE lines on the wire
+ * and Gemini returns a different line count than the input cue count, which
+ * trips assertTranslationCount and fails the whole episode. We replace all of
+ * them (and any run of whitespace) with a single space. Exported for testing.
+ */
+export function sanitizeCueLine(text: string): string {
+  return text
+    // literal ASS hard-break markers: backslash + N or n
+    .replace(/\\[Nn]/g, " ")
+    // real line breaks
+    .replace(/\r\n|\r|\n/g, " ")
+    // collapse runs of whitespace into one space
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function buildTranslateBatchPrompt(lines: string[], targetLang: string): string {
   const target = languageName(targetLang);
-  const numbered = lines.map((l, i) => `${i + 1}. ${l.replace(/\n/g, " ")}`).join("\n");
+  const numbered = lines.map((l, i) => `${i + 1}. ${sanitizeCueLine(l)}`).join("\n");
   return `Translate the following numbered subtitle lines into ${target}. They are consecutive lines from one video — use the surrounding lines for context, but translate each line separately. The reader is LEARNING the source language: translate literally, preserving the source word choices, grammatical structure, and word order as far as the target language allows — do NOT polish into nice idiomatic prose. A slightly awkward but transparent translation is better than a natural-sounding loose one. Keep each line concise. Return exactly ${lines.length} translations, in order, one per input line. Return ONLY the translated line text — do NOT include the line number or any prefix.
 
 ${numbered}`;
@@ -389,7 +418,7 @@ const BATCH_SIZE = 100;
 /** Exported for testing. Throws if translation count doesn't match cue count. */
 export function assertTranslationCount(translations: string[], expected: number): void {
   if (translations.length !== expected) {
-    throw new Error(
+    throw new TranslationCountError(
       `Gemini returned ${translations.length} translations for ${expected} cues`,
     );
   }
@@ -417,7 +446,7 @@ const CORRECT_BATCH_SCHEMA = {
 } as const;
 
 export function buildCorrectBatchPrompt(lines: string[], glossary: string[]): string {
-  const numbered = lines.map((l, i) => `${i + 1}. ${l.replace(/\n/g, " ")}`).join("\n");
+  const numbered = lines.map((l, i) => `${i + 1}. ${sanitizeCueLine(l)}`).join("\n");
   const gloss = glossary.join("、");
   return `The following ${lines.length} numbered lines are Japanese subtitles produced by automatic speech recognition (whisper). They may contain MISHEARD or garbled PROPER NOUNS (names of people and places). Using ONLY the glossary of correct proper nouns below, fix any garbled proper noun to its correct form. DO NOT change any other words, grammar, kana, conjugations, or punctuation. If a line contains no glossary proper noun, return it completely unchanged. Return EXACTLY ${lines.length} lines, in the same order, one per input line. Return ONLY the corrected line text — do NOT include the line number or any prefix.
 
@@ -453,13 +482,21 @@ export function editDistance(a: string, b: string): number {
  * Decide whether a proposed correction is safe to accept. A correction that
  * changes too much of the line (relative to its length) suggests the model
  * rewrote non-name text, so we reject it and keep the original. Exported for
- * testing. Threshold ~40% of the original line's characters.
+ * testing.
+ *
+ * Budget formula (code-point length):
+ *   len <= 6  → max 1 edit  (short lines: very conservative)
+ *   len > 6   → floor(0.4 * len)  (existing ~40% rule, minimum 1)
+ *
+ * Being stricter on short lines is safe: it just means keeping the original
+ * more often, which is the fail-safe direction.
  */
 export function acceptCorrection(original: string, corrected: string): boolean {
   if (corrected === original) return true;
   if (!corrected.trim()) return false;
   const dist = editDistance(original, corrected);
-  const limit = Math.max(1, Math.floor([...original].length * 0.4));
+  const len = [...original].length;
+  const limit = len <= 6 ? 1 : Math.max(1, Math.floor(len * 0.4));
   return dist <= limit;
 }
 
@@ -517,19 +554,53 @@ export async function translateCues(
     onProgress?.(cues.length, cues.length);
     return cues.map((c) => ({ start: c.start, end: c.end, text: `[${targetLang}] ${c.text}` }));
   }
-  const out: Cue[] = [];
-  for (let i = 0; i < cues.length; i += BATCH_SIZE) {
-    const batch = cues.slice(i, i + BATCH_SIZE);
+  // Translate ONE batch, throwing on any error / count mismatch. Returns the
+  // translated texts in order. Sanitization in buildTranslateBatchPrompt should
+  // keep the wire count == batch length, so a mismatch here is exceptional.
+  const translateBatch = async (batch: Cue[]): Promise<string[]> => {
     const result = (await callGemini(
       buildTranslateBatchPrompt(batch.map((c) => c.text), targetLang),
       TRANSLATE_BATCH_SCHEMA,
     )) as { translations: string[] };
     if (!Array.isArray(result.translations)) {
-      throw new Error("Gemini returned no translations array");
+      throw new TranslationCountError("Gemini returned no translations array");
     }
     assertTranslationCount(result.translations, batch.length);
+    return result.translations.map((t, j) => stripEnumerator(t, j));
+  };
+
+  const out: Cue[] = [];
+  for (let i = 0; i < cues.length; i += BATCH_SIZE) {
+    const batch = cues.slice(i, i + BATCH_SIZE);
+    let texts: string[];
+    try {
+      texts = await translateBatch(batch);
+    } catch (e1) {
+      // Only a COUNT mismatch is recoverable here. Fatal errors (bad API key /
+      // 4xx, exhausted transient retries, network) still propagate so a real
+      // failure isn't silently turned into an untranslated sidecar.
+      if (!(e1 instanceof TranslationCountError)) throw e1;
+      // Resilience safety net: a count hiccup on one batch must NOT fail the
+      // whole episode (which would leave ZERO ru output). Retry the batch once;
+      // if it STILL mismatches, fall back to keeping the ORIGINAL (untranslated)
+      // cue text for this batch — graceful degradation mirroring correctNames'
+      // fail-safe spirit (some untranslated cues > no episode output at all).
+      console.warn(
+        `translateCues: batch at ${i} count mismatch (${e1.message}); retrying once`,
+      );
+      try {
+        texts = await translateBatch(batch);
+      } catch (e2) {
+        if (!(e2 instanceof TranslationCountError)) throw e2;
+        console.warn(
+          `translateCues: batch at ${i} still mismatched (${e2.message}); ` +
+            `keeping original text for ${batch.length} cues`,
+        );
+        texts = batch.map((c) => c.text);
+      }
+    }
     batch.forEach((c, j) => {
-      out.push({ start: c.start, end: c.end, text: stripEnumerator(result.translations[j]!, j) });
+      out.push({ start: c.start, end: c.end, text: texts[j]! });
     });
     onProgress?.(Math.min(i + BATCH_SIZE, cues.length), cues.length);
   }
