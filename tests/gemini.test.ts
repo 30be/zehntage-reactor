@@ -1,5 +1,5 @@
 import { expect, test, describe } from "bun:test";
-import { buildWordPrompt, DEFAULT_LOOKUP_PROMPT } from "../src/lib/gemini.ts";
+import { buildWordPrompt, DEFAULT_LOOKUP_PROMPT, assertTranslationCount } from "../src/lib/gemini.ts";
 
 describe("buildWordPrompt template substitution", () => {
   test("uses built-in default when no template given", () => {
@@ -31,5 +31,29 @@ describe("buildWordPrompt template substitution", () => {
     expect(DEFAULT_LOOKUP_PROMPT).toContain("{word}");
     expect(DEFAULT_LOOKUP_PROMPT).toContain("{context}");
     expect(DEFAULT_LOOKUP_PROMPT).toContain("{source}");
+  });
+});
+
+describe("assertTranslationCount", () => {
+  test("exact match does not throw", () => {
+    expect(() => assertTranslationCount(["a", "b", "c"], 3)).not.toThrow();
+  });
+
+  test("too few translations throws with clear message", () => {
+    expect(() => assertTranslationCount(["a", "b"], 3)).toThrow(
+      "Gemini returned 2 translations for 3 cues",
+    );
+  });
+
+  test("too many translations throws with clear message", () => {
+    expect(() => assertTranslationCount(["a", "b", "c", "d"], 3)).toThrow(
+      "Gemini returned 4 translations for 3 cues",
+    );
+  });
+
+  test("empty array for non-zero expected throws", () => {
+    expect(() => assertTranslationCount([], 1)).toThrow(
+      "Gemini returned 0 translations for 1 cues",
+    );
   });
 });

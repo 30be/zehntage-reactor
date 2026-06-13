@@ -315,6 +315,15 @@ ${numbered}`;
 
 const BATCH_SIZE = 100;
 
+/** Exported for testing. Throws if translation count doesn't match cue count. */
+export function assertTranslationCount(translations: string[], expected: number): void {
+  if (translations.length !== expected) {
+    throw new Error(
+      `Gemini returned ${translations.length} translations for ${expected} cues`,
+    );
+  }
+}
+
 export async function translateCues(
   cues: Cue[],
   targetLang: string,
@@ -335,8 +344,9 @@ export async function translateCues(
     if (!Array.isArray(result.translations)) {
       throw new Error("Gemini returned no translations array");
     }
+    assertTranslationCount(result.translations, batch.length);
     batch.forEach((c, j) => {
-      out.push({ start: c.start, end: c.end, text: result.translations[j] ?? c.text });
+      out.push({ start: c.start, end: c.end, text: result.translations[j]! });
     });
     onProgress?.(Math.min(i + BATCH_SIZE, cues.length), cues.length);
   }
