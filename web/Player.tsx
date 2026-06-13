@@ -1737,8 +1737,11 @@ export function Player({ entry, startAt, toast, settings }: Props) {
 
   const popupFront = useMemo(() => {
     if (!popup) return null;
+    // Front uses the dictionary (lemma) form so all conjugations match (the
+    // lookup reading is the dict-form reading — it's looked up on the lemma).
+    const word = popup.dictForm ?? popup.surface;
     const reading = lookup?.reading || popup.reading;
-    return reading ? `${popup.surface} [${reading}]` : popup.surface;
+    return reading ? `${word} [${reading}]` : word;
   }, [popup, lookup]);
 
   // The deck front this popup actually refers to: reading-aware match for
@@ -1795,7 +1798,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     }
     try {
       await api.ankiAdd({
-        word: popup.surface,
+        word: popup.dictForm ?? popup.surface,
         reading: lookup.reading || popup.reading || "",
         translation: lookup.translation,
         notes: iPlusOne

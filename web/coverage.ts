@@ -26,9 +26,10 @@ export interface Coverage {
   i1density: number;
 }
 
-// v2: bumped when the tokenizer changed (proper-noun merge) so all cached
-// coverage numbers recompute against the new tokenization.
-export const CACHE_PREFIX = "zr.cov.v2.";
+// v3: bumped when interactive Anki adds switched to writing the dictionary
+// (lemma) form as the card front, so cached coverage recomputes against the
+// corrected lemma-add behaviour (all conjugations now match a single card).
+export const CACHE_PREFIX = "zr.cov.v3.";
 
 // Cache key deliberately does NOT include the cue count: knowing it would
 // require downloading the full cue list, which is exactly the expensive call
