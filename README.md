@@ -57,6 +57,7 @@ Bindings match physical keys (`e.code`), so they work on any layout.
 | Shift+← → | previous / next episode |
 | p | autopause |
 | l / w | cue sidebar / pre-study panel |
+| q | comprehension quiz (watched cues) |
 | b / bb | peek translation / toggle blur |
 | i | picture-in-picture |
 | k / x | mark word known / blacklist |

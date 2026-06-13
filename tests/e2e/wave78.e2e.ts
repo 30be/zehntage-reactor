@@ -48,6 +48,15 @@ test("blacklisted lemma is excluded from the pre-study panel", async ({
 }) => {
   await page.addInitScript(() => {
     localStorage.setItem("zr.blacklist", JSON.stringify(["友達"]));
+    // Reset zr.known so server-side state from other tests (e.g. the i+1
+    // wave12 spec that pushes a far-future-timestamped known-list) cannot
+    // bleed in and hide 明日 / 友達 from the prestudy panel.
+    localStorage.setItem("zr.known", JSON.stringify([]));
+    const farFuture = Date.now() + 2e9;
+    localStorage.setItem(
+      "zr.sync.ts",
+      JSON.stringify({ "zr.blacklist": farFuture, "zr.known": farFuture }),
+    );
   });
   await openPlayer(page, "clip.mp4");
   await seekTo(page, 3); // 勉強します。 — an active cue makes tokens visible

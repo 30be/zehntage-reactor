@@ -192,4 +192,10 @@ test("pre-study promotes i+1 candidates with a badge", async ({ page }) => {
   const row = panel.locator(".prestudy-row", { hasText: "勉強" });
   await expect(row).toBeVisible();
   await expect(row.locator(".badge.iplus")).toHaveText("i+1");
+
+  // Clean up: the addInitScript pushed zr.known (with a far-future ts) to the
+  // server. Wipe it so subsequent tests don't inherit a poisoned known-list.
+  await page.request.post("/api/state", {
+    data: { "zr.known": { v: " zr-deleted", ts: Date.now() + 2e9 } },
+  });
 });

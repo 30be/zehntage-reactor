@@ -14,6 +14,7 @@ export interface PlayerHotkeyCtx {
   stageRef: React.RefObject<HTMLDivElement | null>;
   // panel / popup state (refs so the handler never goes stale)
   preStudyOpenRef: React.RefObject<boolean>;
+  quizOpenRef: React.RefObject<boolean>;
   popupOpenRef: React.RefObject<boolean>;
   popupKeyRef: React.RefObject<string | null>;
   hoveredKeyRef: React.RefObject<string | null>;
@@ -46,6 +47,7 @@ export interface PlayerHotkeyCtx {
   toggleBlacklist: (key: string) => void;
   gotoEpisode: (dir: 1 | -1) => Promise<void>;
   togglePreStudy: () => void;
+  toggleQuiz: () => void;
   toggleAutopause: () => void;
   toggleHud: () => void;
   toggleEcho: () => void;
@@ -61,7 +63,7 @@ const RATES = [0.5, 0.75, 1, 1.25, 1.5];
 const LETTERS: Record<string, string> = {
   KeyF: "f", KeyA: "a", KeyR: "r", KeyL: "l", KeyK: "k", KeyS: "s",
   KeyP: "p", KeyG: "g", KeyW: "w", KeyB: "b", KeyI: "i", KeyX: "x",
-  KeyO: "o", KeyE: "e", KeyJ: "j",
+  KeyO: "o", KeyE: "e", KeyJ: "j", KeyQ: "q",
 };
 const HANDLED = new Set([
   " ",
@@ -71,7 +73,7 @@ const HANDLED = new Set([
   "Tab",
   ...Object.values(LETTERS),
 ]);
-const REPEAT_TOGGLES = new Set([" ", "f", "l", "k", "s", "p", "g", "a", "w", "b", "i", "x", "o", "e", "j"]);
+const REPEAT_TOGGLES = new Set([" ", "f", "l", "k", "s", "p", "g", "a", "w", "b", "i", "x", "o", "e", "j", "q"]);
 
 export function usePlayerHotkeys(ctx: PlayerHotkeyCtx): void {
   const ctxRef = useRef(ctx);
@@ -87,8 +89,12 @@ export function usePlayerHotkeys(ctx: PlayerHotkeyCtx): void {
       const v = c.videoRef.current;
       if (!v) return;
       const active = document.activeElement;
-      // Real text inputs keep their native behavior entirely.
+      // Real text inputs keep their native behavior entirely (incl. the cloze
+      // answer field — so typing "q" there never closes the quiz).
       if (isTextInput(active) || isTextInput(e.target as Element | null)) return;
+      // The quiz overlay owns the keyboard while open (its own capture handler
+      // takes number/arrow/Enter/Esc); only `q` falls through here, to close.
+      if (c.quizOpenRef.current && (LETTERS[e.code] ?? e.key) !== "q") return;
       // Layout-independent letter token: physical key for letters, e.key else.
       const kb = LETTERS[e.code] ?? e.key;
       // Focused <select>/<button>: letter hotkeys still work (no conflict),
@@ -289,6 +295,9 @@ export function usePlayerHotkeys(ctx: PlayerHotkeyCtx): void {
         }
         case "w":
           c.togglePreStudy();
+          break;
+        case "q":
+          c.toggleQuiz();
           break;
         case "p":
           c.toggleAutopause();

@@ -68,6 +68,8 @@ import {
   type PreStudyState,
 } from "./player/PreStudyPanel.tsx";
 import { Vbar } from "./player/Vbar.tsx";
+import { QuizPanel, type QuizResult } from "./player/QuizPanel.tsx";
+import { buildQuiz, type QuizCue, type QuizItem } from "./quiz.ts";
 
 interface Props {
   entry: LibraryEntry;
@@ -440,6 +442,80 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         : prev,
     );
   }, []);
+
+  // --- comprehension quiz (`q`): short check built from watched cues ---
+  const [quiz, setQuiz] = useState<QuizItem[] | null>(null);
+  const quizOpenRef = useRef(false);
+  useEffect(() => {
+    quizOpenRef.current = quiz != null;
+  }, [quiz]);
+
+  const buildQuizFromWatched = useCallback(async (): Promise<QuizItem[]> => {
+    const v = videoRef.current;
+    const t = v ? v.currentTime - subOffsetRef.current : Infinity;
+    // cues the user has already watched (start has passed); fall back to all.
+    const ja = primaryCuesRef.current.filter((c) => c.start <= t);
+    const cues = (ja.length > 0 ? ja : primaryCuesRef.current).slice(-40);
+    const sec = secondaryCuesRef.current;
+    const tok = await getTokenizer().catch(() => null);
+    const quizCues: QuizCue[] = cues.map((c) => {
+      // align translation by cue overlap (same approach as the active-cue map)
+      const mid = (c.start + c.end) / 2;
+      const s = sec.find((x) => x.start <= mid && x.end >= mid);
+      const words: { surface: string; lemma: string }[] = [];
+      if (tok) {
+        for (const tk of tok.tokenize(c.text)) {
+          if (!isLexical(tk)) continue;
+          if (tk.pos === "助詞" || tk.pos === "助動詞") continue;
+          words.push({ surface: tk.surface_form, lemma: wordKey(tk) });
+        }
+      }
+      return { text: c.text, translation: s?.text, words };
+    });
+    // deck = lemmas already mined (preferred cloze blanks)
+    const deck = new Set<string>();
+    for (const it of quizCues) {
+      for (const w of it.words ?? []) {
+        if (
+          matchFront(
+            wordIndexRef.current,
+            w.surface,
+            undefined,
+            w.lemma,
+          ) != null
+        )
+          deck.add(w.lemma);
+      }
+    }
+    return buildQuiz(quizCues, { deck, known: knownWordsRef.current, count: 6 });
+  }, []);
+
+  const toggleQuiz = useCallback(() => {
+    setQuiz((prev) => {
+      if (prev) return null;
+      void buildQuizFromWatched().then((items) => {
+        if (!mountedRef.current) return;
+        if (items.length === 0) {
+          toast("not enough watched cues for a quiz");
+          setQuiz(null);
+          return;
+        }
+        setQuiz(items);
+      });
+      return prev; // open only once items are ready (avoids an empty flash)
+    });
+  }, [buildQuizFromWatched, toast]);
+
+  const onQuizDone = useCallback(
+    (r: QuizResult) => {
+      tmEvent("quiz.result", {
+        mediaId: entry.id,
+        total: r.total,
+        correct: r.correct,
+      });
+    },
+    [entry.id],
+  );
 
   // --- shadowing loop (`s`): kept in refs to avoid re-renders on every cue ---
   // idx = primary-cue index being looped; remaining = repeats left.
@@ -1582,6 +1658,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     videoRef,
     stageRef,
     preStudyOpenRef,
+    quizOpenRef,
     popupOpenRef,
     popupKeyRef,
     hoveredKeyRef,
@@ -1609,6 +1686,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     toggleBlacklist,
     gotoEpisode,
     togglePreStudy,
+    toggleQuiz,
     toggleAutopause,
     toggleHud,
     toggleEcho,
@@ -2209,6 +2287,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     toggleAutopause,
     toggleSidebar,
     togglePreStudy,
+    toggleQuiz,
     toggleFullscreen,
     changeOffset,
     gotoEpisode,
@@ -2225,6 +2304,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     toggleAutopause,
     toggleSidebar,
     togglePreStudy,
+    toggleQuiz,
     toggleFullscreen,
     changeOffset,
     gotoEpisode,
@@ -2243,6 +2323,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       { id: "pl.autopause", title: "player: toggle autopause", hint: "p", run: () => c().toggleAutopause() },
       { id: "pl.sidebar", title: "player: toggle cue sidebar", hint: "l", run: () => c().toggleSidebar() },
       { id: "pl.prestudy", title: "player: pre-study panel", hint: "w", run: () => c().togglePreStudy() },
+      { id: "pl.quiz", title: "player: comprehension quiz", hint: "q", run: () => c().toggleQuiz() },
       { id: "pl.hud", title: "player: toggle session HUD", hint: "o", run: () => c().toggleHud() },
       { id: "pl.echo", title: "player: toggle echo dictation", hint: "e", run: () => c().toggleEcho() },
       { id: "pl.iplus1", title: "player: jump to next i+1 cue", hint: "j", run: () => c().seekIPlusOne() },
@@ -2569,6 +2650,14 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           onToggleItem={togglePreItem}
           onBulkAdd={() => void onBulkAdd()}
           onClose={() => setPreStudy(null)}
+        />
+      )}
+
+      {quiz && (
+        <QuizPanel
+          items={quiz}
+          onClose={() => setQuiz(null)}
+          onDone={onQuizDone}
         />
       )}
 

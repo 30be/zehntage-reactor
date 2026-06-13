@@ -81,6 +81,7 @@ export const HOTKEYS: HotkeyRow[] = [
   { keys: "p", what: "toggle autopause", scope: "player" },
   { keys: "l", what: "cue-list sidebar", scope: "player" },
   { keys: "w", what: "pre-study panel (upcoming words)", scope: "player" },
+  { keys: "q", what: "comprehension quiz (watched cues)", scope: "player" },
   { keys: "b / bb", what: "peek translation / toggle blur", scope: "player" },
   { keys: "i", what: "picture-in-picture", scope: "player" },
   { keys: "k", what: "mark hovered word known", scope: "player" },
