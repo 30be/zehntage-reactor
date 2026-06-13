@@ -31,7 +31,9 @@ export async function mediaDurationSec(path: string): Promise<number> {
 }
 
 export function contentTypeFor(path: string): string {
-  const ext = path.slice(path.lastIndexOf(".")).toLowerCase();
+  const dotIdx = path.lastIndexOf(".");
+  if (dotIdx === -1) return "application/octet-stream";
+  const ext = path.slice(dotIdx).toLowerCase();
   return CONTENT_TYPES[ext] ?? "application/octet-stream";
 }
 

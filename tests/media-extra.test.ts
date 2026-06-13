@@ -17,19 +17,12 @@ import type { CodecInfo } from "../src/lib/media.ts";
 
 describe("contentTypeFor — extended edge cases", () => {
   it("returns application/octet-stream for file with no extension", () => {
-    // BUG NOTE (latent, benign for current CONTENT_TYPES):
-    // contentTypeFor uses path.lastIndexOf('.') which returns -1 for no-dot filenames.
-    // .slice(-1) then returns the LAST CHARACTER of the path, not a real extension.
-    // e.g. "Makefile" → ext = "e" (the letter 'e'), not ".mkv" etc., so it still
-    // falls through to "application/octet-stream" — correct result, wrong path.
-    // Source: src/lib/media.ts:34
-    // Repro: contentTypeFor("Makefile") → ext becomes "e" via slice(-1)
-    const ct = contentTypeFor("Makefile");
-    // Should not crash and should return a string
-    expect(typeof ct).toBe("string");
-    // Should not be one of the known video/audio types
-    expect(ct).not.toBe("video/mp4");
-    expect(ct).not.toBe("video/x-matroska");
+    // FIX (src/lib/media.ts): lastIndexOf('.') === -1 for no-dot filenames.
+    // Previously .slice(-1) extracted the last character (bogus "extension").
+    // Now we guard: dotIdx === -1 → return default immediately.
+    expect(contentTypeFor("Makefile")).toBe("application/octet-stream");
+    expect(contentTypeFor("README")).toBe("application/octet-stream");
+    expect(contentTypeFor("LICENSE")).toBe("application/octet-stream");
   });
 
   it("picks extension from the LAST dot in multi-dot filenames", () => {
