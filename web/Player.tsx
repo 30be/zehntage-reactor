@@ -41,7 +41,7 @@ import { refreshAnkiWords, useAnkiWordsLive } from "./ankicache.ts";
 import { registerCommands } from "./commands.ts";
 import { rankPreStudy } from "./prestudy.ts";
 import { nextIPlusOne } from "./iplusone.ts";
-import { scoreDictation, tooShortForEcho } from "./dictation.ts";
+import { scoreDictation } from "./dictation.ts";
 import { isJaLang } from "./lang.ts";
 import { readKnownWords } from "./coverage.ts";
 import {
@@ -60,6 +60,10 @@ import {
   type QaItem,
 } from "./player/shared.ts";
 import { useWhisperJob } from "./player/useWhisperJob.ts";
+import { shouldSkipAutopause } from "./player/autopause.ts";
+import { computeCueUnknowns } from "./player/cueUnknowns.ts";
+import { pickResumeTime } from "./player/resume.ts";
+import { findSkipTarget } from "./player/skipGap.ts";
 import { usePlayerHotkeys } from "./player/useHotkeys.ts";
 import { LookupPanel } from "./player/LookupPanel.tsx";
 import {
@@ -764,21 +768,11 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     void getTokenizer()
       .then((tok) => {
         if (cancelled) return;
-        const lemmas: string[][] = [];
-        const counts = displayCues.map((c) => {
-          const us: string[] = [];
-          for (const t of tok.tokenize(c.text)) {
-            if (!isLexical(t)) continue;
-            if (t.pos === "助詞" || t.pos === "助動詞") continue; // particles/aux
-            const key = wordKey(t);
-            if (knownWords.has(key) || blacklist.has(key)) continue;
-            if (matchFront(wordIndex, t.surface_form, t.reading, t.basic_form) != null)
-              continue;
-            us.push(key);
-          }
-          lemmas.push(us);
-          return us.length;
-        });
+        const { counts, lemmas } = computeCueUnknowns(
+          displayCues.map((c) => c.text),
+          tok,
+          { wordIndex, knownWords, blacklist },
+        );
         if (!cancelled) {
           cueUnknownsRef.current = counts;
           cueUnknownLemmasRef.current = lemmas;
@@ -1173,14 +1167,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       if (autoResumedRef.current) return;
       try {
         const saved = parseFloat(localStorage.getItem(posKey) ?? "");
-        if (
-          Number.isFinite(saved) &&
-          saved > 15 &&
-          v.duration > 0 &&
-          saved < v.duration - 10
-        ) {
+        const target = pickResumeTime({ saved, duration: v.duration });
+        if (target != null) {
           autoResumedRef.current = true;
-          v.currentTime = saved;
+          v.currentTime = target;
         }
       } catch {
         /* ignore */
@@ -1252,13 +1242,13 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           // or a streaming whisper cue appended after the last compute) →
           // pause, the same safe default as a missing counts array.
           const cueCount = cueUnknownsRef.current?.[prev];
-          const echoSkip = echo && tooShortForEcho(prevCue!.text);
-          const skip =
-            echo
-              ? echoSkip
-              : apModeRef.current === "unknown" &&
-                cueCount != null &&
-                cueCount < apMinRef.current;
+          const skip = shouldSkipAutopause({
+            echo,
+            mode: apModeRef.current,
+            min: apMinRef.current,
+            cueText: prevCue!.text,
+            unknownCount: cueCount ?? null,
+          });
           if (skip) {
             lastAutopausedIdx.current = prev; // don't re-check this cue
           } else {
@@ -2225,19 +2215,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     if (!v) return;
     const cues = displayCues;
     const upd = () => {
-      let target: number | null = null;
-      if (v.currentTime > 10 && cues.length > 0) {
-        const t = v.currentTime - subOffset;
-        if (activeCueIndex(cues, t) < 0) {
-          const nextIdx = cues.findIndex((c) => c.start > t);
-          if (nextIdx >= 0) {
-            const prevEnd = nextIdx > 0 ? cues[nextIdx - 1]!.end : 0;
-            if (cues[nextIdx]!.start - prevEnd > 60) {
-              target = Math.max(0, cues[nextIdx]!.start + subOffset - 1);
-            }
-          }
-        }
-      }
+      const target = findSkipTarget(cues, v.currentTime, subOffset);
       setSkipTarget((prev) => (prev === target ? prev : target));
     };
     v.addEventListener("timeupdate", upd);
