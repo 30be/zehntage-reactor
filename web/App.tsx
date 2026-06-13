@@ -2020,8 +2020,147 @@ function Settings({
           </div>
         </section>
 
+        <DataSection setSettings={setSettings} />
+
         <div className="hint">Changes save automatically.</div>
       </div>
     </>
+  );
+}
+
+// Export / import the JSON data bundle (settings + state + events).
+// Importing overwrites settings/state, so it asks for an inline confirm first.
+function DataSection({
+  setSettings,
+}: {
+  setSettings: (s: Record<string, unknown>) => void;
+}) {
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const [pending, setPending] = useState<unknown | null>(null);
+  const [pendingName, setPendingName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(
+    null,
+  );
+
+  const onExport = useCallback(async () => {
+    setMsg(null);
+    try {
+      const bundle = await api.exportData();
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `zehntage-export-${bundle.exportedAt.slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setMsg({ kind: "ok", text: "Exported." });
+    } catch (e) {
+      setMsg({ kind: "error", text: `Export failed: ${e instanceof Error ? e.message : e}` });
+    }
+  }, []);
+
+  const onPick = useCallback(async (file: File) => {
+    setMsg(null);
+    try {
+      const parsed = JSON.parse(await file.text());
+      setPending(parsed);
+      setPendingName(file.name);
+    } catch {
+      setMsg({ kind: "error", text: "Not valid JSON." });
+    }
+  }, []);
+
+  const onConfirm = useCallback(async () => {
+    if (pending == null) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      const res = await api.importData(pending);
+      // Refresh the in-memory settings so the UI reflects the imported values.
+      const next = await api.getSettings();
+      setSettings(next);
+      setPending(null);
+      setPendingName("");
+      setMsg({
+        kind: "ok",
+        text: `Imported${res.settingsImported ? " settings," : ""} ${res.stateKeys} state keys. Reloading…`,
+      });
+      // State sync reads from the server on load; reload to re-hydrate cleanly.
+      window.setTimeout(() => window.location.reload(), 800);
+    } catch (e) {
+      setMsg({ kind: "error", text: `Import failed: ${e instanceof Error ? e.message : e}` });
+    } finally {
+      setBusy(false);
+    }
+  }, [pending, setSettings]);
+
+  return (
+    <section className="form-group">
+      <h2 className="group-title">Data</h2>
+      <div className="field">
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="btn sm" onClick={onExport}>
+            Export data (JSON)
+          </button>
+          <button className="btn sm" onClick={() => fileRef.current?.click()}>
+            Import data (JSON)
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="application/json,.json"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void onPick(f);
+              e.target.value = "";
+            }}
+          />
+        </div>
+        <div className="hint">
+          Exports settings, progress and stats. Importing overwrites settings
+          and merges progress; telemetry events are skipped.
+        </div>
+        {pending != null && (
+          <div className="state" role="alert" style={{ marginTop: 8 }}>
+            <span>
+              Import “{pendingName}”? This overwrites settings and merges saved
+              progress.
+            </span>
+            <span style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <button
+                className="btn sm primary"
+                disabled={busy}
+                onClick={() => void onConfirm()}
+              >
+                {busy ? "Importing…" : "Confirm import"}
+              </button>
+              <button
+                className="btn sm ghost"
+                disabled={busy}
+                onClick={() => {
+                  setPending(null);
+                  setPendingName("");
+                }}
+              >
+                Cancel
+              </button>
+            </span>
+          </div>
+        )}
+        {msg && (
+          <div
+            className={msg.kind === "error" ? "state error" : "state"}
+            role="status"
+            style={{ marginTop: 8 }}
+          >
+            {msg.text}
+          </div>
+        )}
+      </div>
+    </section>
   );
 }

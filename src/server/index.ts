@@ -69,6 +69,11 @@ import {
 } from "../lib/telemetry.ts";
 import { readState, mergeIntoFile, type ZrState } from "../lib/state.ts";
 import {
+  buildExportBundle,
+  exportFileName,
+  importBundle,
+} from "../lib/datatransfer.ts";
+import {
   searchEntries,
   listFiles,
   downloadFile,
@@ -1478,6 +1483,34 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
           return json({ ok: true, path: dest, lang, bytes });
         } catch (e) {
           return jimakuErr(e);
+        }
+      }
+
+      // --- data export / import (portable JSON bundle, see lib/datatransfer.ts) ---
+      if (req.method === "GET" && path === "/api/export") {
+        const bundle = await buildExportBundle();
+        return new Response(JSON.stringify(bundle, null, 2), {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+            "Content-Disposition": `attachment; filename="${exportFileName()}"`,
+          },
+        });
+      }
+
+      if (req.method === "POST" && path === "/api/import") {
+        let raw: unknown;
+        try {
+          raw = await req.json();
+        } catch {
+          return err("invalid JSON body", 400);
+        }
+        // Events are skipped by default; ?importEvents=1 opts in.
+        const importEvents = url.searchParams.get("importEvents") === "1";
+        try {
+          return json(await importBundle(raw, { importEvents }));
+        } catch (e) {
+          return err(e instanceof Error ? e.message : "import failed", 400);
         }
       }
 

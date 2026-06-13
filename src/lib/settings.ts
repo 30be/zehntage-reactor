@@ -39,13 +39,18 @@ const DEFAULTS: Settings = {
 };
 
 // ZR_CONFIG_DIR override keeps tests away from the user's real settings.
-const dir =
-  process.env.ZR_CONFIG_DIR || join(homedir(), ".config", "zehntage-reactor");
-const file = join(dir, "settings.json");
+// Resolved lazily (per call) so tests can set the env var after import — same
+// pattern as state.ts.
+function configDir(): string {
+  return process.env.ZR_CONFIG_DIR || join(homedir(), ".config", "zehntage-reactor");
+}
+function settingsFile(): string {
+  return join(configDir(), "settings.json");
+}
 
 export async function readSettings(): Promise<Settings> {
   try {
-    const data = (await Bun.file(file).json()) as Partial<Settings>;
+    const data = (await Bun.file(settingsFile()).json()) as Partial<Settings>;
     return { ...DEFAULTS, ...data };
   } catch {
     return { ...DEFAULTS };
@@ -55,7 +60,7 @@ export async function readSettings(): Promise<Settings> {
 export async function writeSettings(patch: Partial<Settings>): Promise<Settings> {
   const current = await readSettings();
   const next = { ...current, ...patch };
-  await mkdir(dir, { recursive: true });
-  await Bun.write(file, JSON.stringify(next, null, 2));
+  await mkdir(configDir(), { recursive: true });
+  await Bun.write(settingsFile(), JSON.stringify(next, null, 2));
   return next;
 }

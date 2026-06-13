@@ -80,6 +80,19 @@ Bindings match physical keys (`e.code`), so they work on any layout.
 - Telemetry and backups: `~/.local/share/zehntage-reactor`
 - Pure logic lives in `src/lib/` and `web/*.ts`, bun-testable without DOM
 
+## Data export & import
+
+Settings → `~/.config/zehntage-reactor/settings.json`. Synced state
+(known words, blacklist, resume/reading positions) →
+`~/.config/zehntage-reactor/state.json`. Telemetry →
+`~/.local/share/zehntage-reactor/events.jsonl`.
+
+The Settings page has **Export data (JSON)** (downloads a
+`{ version, exportedAt, settings, state, events }` bundle) and
+**Import data (JSON)** (merges settings + state via last-write-wins;
+events are skipped by default). Endpoints: `GET /api/export`,
+`POST /api/import`.
+
 ## Development
 
 Gates before shipping:

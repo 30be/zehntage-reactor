@@ -269,6 +269,22 @@ export interface DueRow {
   lemmas: { lemma: string; count: number }[];
 }
 
+export interface ExportBundle {
+  version: number;
+  exportedAt: string;
+  settings: Record<string, unknown>;
+  state: Record<string, { v: string; ts: number }>;
+  events: Array<Record<string, unknown>>;
+  eventsTruncated: boolean;
+}
+
+export interface ImportResult {
+  settingsImported: boolean;
+  stateKeys: number;
+  eventsImported: number;
+  appVersion: string;
+}
+
 export const api = {
   library: () => jget<LibraryEntry[]>("/api/library"),
   mediaInfo: (id: string) => jget<MediaInfo>(`/api/media/${id}/info`),
@@ -382,6 +398,11 @@ export const api = {
   getSettings: () => jget<Record<string, unknown>>("/api/settings"),
   saveSettings: (patch: Record<string, unknown>) =>
     jpost<Record<string, unknown>>("/api/settings", patch),
+  // Fetch the full export bundle (parsed JSON; caller triggers the download).
+  exportData: () => jget<ExportBundle>("/api/export"),
+  // Apply a bundle. Events are skipped server-side by default.
+  importData: (bundle: unknown) =>
+    jpost<ImportResult>("/api/import", bundle),
 };
 
 export function mediaUrl(id: string): string {
