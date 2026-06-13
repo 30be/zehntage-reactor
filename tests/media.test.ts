@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { contentTypeFor, mergeAudioSpans } from "../src/lib/media.ts";
+import { contentTypeFor, mergeAudioSpans, mediaDurationSec } from "../src/lib/media.ts";
 import type { AudioSpan } from "../src/lib/media.ts";
 
 // NOTE: serveFileWithRange is skipped here — it calls Bun.file(path) eagerly
@@ -144,5 +144,25 @@ describe("mergeAudioSpans", () => {
     ];
     const result = mergeAudioSpans(spans); // default pad+gap
     expect(result).toHaveLength(1);
+  });
+});
+
+describe("mediaDurationSec", () => {
+  it("returns 0 for a non-existent file (graceful contract)", async () => {
+    // ffprobe will error on a missing path; the function must return 0, not throw.
+    // This documents the 'graceful fallback' contract without requiring real media.
+    // Guard: if ffprobe is not installed, the spawn itself throws — skip gracefully.
+    try {
+      const dur = await mediaDurationSec("/tmp/__nonexistent_file_zr_test__.mkv");
+      expect(typeof dur).toBe("number");
+      expect(Number.isFinite(dur)).toBe(true);
+      expect(dur).toBe(0);
+    } catch (e: unknown) {
+      // ffprobe not available in this environment — skip silently
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!msg.includes("ffprobe") && !msg.includes("spawn") && !msg.includes("ENOENT")) {
+        throw e; // unexpected error — re-throw
+      }
+    }
   });
 });

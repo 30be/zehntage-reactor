@@ -1,5 +1,12 @@
 import { expect, test, describe } from "bun:test";
-import { buildWordPrompt, DEFAULT_LOOKUP_PROMPT, assertTranslationCount } from "../src/lib/gemini.ts";
+import {
+  buildWordPrompt,
+  DEFAULT_LOOKUP_PROMPT,
+  assertTranslationCount,
+  stripEnumerator,
+  editDistance,
+  acceptCorrection,
+} from "../src/lib/gemini.ts";
 
 describe("buildWordPrompt template substitution", () => {
   test("uses built-in default when no template given", () => {
@@ -55,5 +62,121 @@ describe("assertTranslationCount", () => {
     expect(() => assertTranslationCount([], 1)).toThrow(
       "Gemini returned 0 translations for 1 cues",
     );
+  });
+});
+
+describe("stripEnumerator", () => {
+  test("strips '1.' prefix for index 0", () => {
+    expect(stripEnumerator("1. こんにちは", 0)).toBe("こんにちは");
+  });
+
+  test("strips '2)' prefix for index 1", () => {
+    expect(stripEnumerator("2) hello", 1)).toBe("hello");
+  });
+
+  test("does not strip when number does not match index+1", () => {
+    // index=0 → looks for '1.' but line starts with '2.'
+    expect(stripEnumerator("2. wrong", 0)).toBe("2. wrong");
+  });
+
+  test("strips with leading whitespace before number", () => {
+    expect(stripEnumerator("  3. text", 2)).toBe("text");
+  });
+
+  test("no enumerator → returns line unchanged", () => {
+    expect(stripEnumerator("普通の行です", 0)).toBe("普通の行です");
+  });
+
+  test("strips enumerator from line at large index", () => {
+    expect(stripEnumerator("10. tenth line", 9)).toBe("tenth line");
+  });
+
+  test("empty line returns empty string", () => {
+    expect(stripEnumerator("", 0)).toBe("");
+  });
+});
+
+describe("editDistance", () => {
+  test("identical strings have distance 0", () => {
+    expect(editDistance("abc", "abc")).toBe(0);
+  });
+
+  test("empty strings have distance 0", () => {
+    expect(editDistance("", "")).toBe(0);
+  });
+
+  test("empty vs non-empty is length of non-empty", () => {
+    expect(editDistance("", "abc")).toBe(3);
+    expect(editDistance("abc", "")).toBe(3);
+  });
+
+  test("single substitution", () => {
+    expect(editDistance("cat", "bat")).toBe(1);
+  });
+
+  test("single insertion", () => {
+    expect(editDistance("cat", "cats")).toBe(1);
+  });
+
+  test("single deletion", () => {
+    expect(editDistance("cats", "cat")).toBe(1);
+  });
+
+  test("completely different strings", () => {
+    expect(editDistance("abc", "xyz")).toBe(3);
+  });
+
+  test("handles surrogate pairs as single code points", () => {
+    // 𩸽 is a surrogate pair (U+29E3D). editDistance uses [...s] to iterate
+    // code points, so 𩸽 counts as one character, not two surrogates.
+    const fish = "𩸽"; // 1 code point
+    expect(editDistance(fish, fish)).toBe(0);
+    expect(editDistance(fish, "")).toBe(1);
+    expect(editDistance("", fish)).toBe(1);
+  });
+
+  test("Japanese kana strings", () => {
+    expect(editDistance("こんにちは", "こんにちわ")).toBe(1);
+  });
+});
+
+describe("acceptCorrection", () => {
+  test("identical original and corrected → accepted", () => {
+    expect(acceptCorrection("hello", "hello")).toBe(true);
+  });
+
+  test("empty corrected → rejected", () => {
+    expect(acceptCorrection("hello", "")).toBe(false);
+    expect(acceptCorrection("hello", "   ")).toBe(false);
+  });
+
+  test("small change within 40% budget → accepted", () => {
+    // 'oreki' → 'oreki' (perfect) trivially passes; use a 1-char fix on a 5-char string.
+    // budget = floor(5 * 0.4) = 2; dist=1 → accept
+    expect(acceptCorrection("oreki", "0reki")).toBe(true);
+  });
+
+  test("change exceeding 40% budget → rejected", () => {
+    // 5-char original, budget=2; replace 3 chars → dist=3 > 2 → reject
+    expect(acceptCorrection("abcde", "xyzde")).toBe(false);
+  });
+
+  test("short line (1 char): budget = max(1,0) = 1, so 1-char change accepted", () => {
+    // budget = max(1, floor(1*0.4)) = max(1,0) = 1; dist=1 → accept
+    expect(acceptCorrection("a", "b")).toBe(true);
+  });
+
+  test("large change on long line is rejected", () => {
+    const original = "彼女の名前はえるです"; // 9 code points
+    // budget = floor(9 * 0.4) = 3; completely different string → dist >> 3 → reject
+    expect(acceptCorrection(original, "全然違う文章ですよ!")).toBe(false);
+  });
+
+  test("surrogate pair characters count as 1 in budget calculation", () => {
+    // 𩸽 = 1 code point; original = "𩸽abc" (4 code points), budget=floor(4*0.4)=1
+    // 1-char sub → dist=1 ≤ 1 → accept
+    const orig = "𩸽abc";
+    const corr = "𩸽abx";
+    expect(acceptCorrection(orig, corr)).toBe(true);
   });
 });
