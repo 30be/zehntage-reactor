@@ -273,8 +273,28 @@ export function pickConfidentEntry(
 ): ConfidentMatch | null {
   const NAME_OVERLAP_MIN = 0.8;
   const DOMINANCE_MIN = 0.34;
-  const scored = entries
-    .filter((e) => !e.flags.adult)
+  const candidates = entries.filter((e) => !e.flags.adult);
+
+  // Exact-name preference: if exactly ONE candidate has a normalized name
+  // (name/english_name/japanese_name) equal to the normalized query, pick it
+  // outright. This breaks containment-dominance ties between an exact series
+  // and a longer franchise sibling (e.g. "Hyouka" vs "Hyouka: Motsubeki...").
+  const nq = normTitle(query);
+  const exact = candidates.filter((e) =>
+    [e.name, e.english_name, e.japanese_name]
+      .filter((n): n is string => !!n)
+      .some((n) => normTitle(n) === nq),
+  );
+  if (exact.length === 1) {
+    return {
+      entry: exact[0]!,
+      score: 1,
+      runnerUp: 0,
+      reason: `exact-name match "${nq}"`,
+    };
+  }
+
+  const scored = candidates
     .map((e) => {
       const score = Math.max(
         tokenOverlap(query, e.name),

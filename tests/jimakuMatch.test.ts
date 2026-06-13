@@ -31,14 +31,23 @@ describe("pickConfidentEntry", () => {
     expect(got!.score).toBeGreaterThanOrEqual(0.8);
   });
 
-  test("ambiguous close scores returns null", () => {
-    // Two same-franchise siblings both fully contain the query tokens.
+  test("exact series name beats franchise-sibling containment tie", () => {
     const entries = [
-      entry({ id: 1, name: "Fate Stay Night" }),
+      entry({ id: 1451, name: "Hyouka" }),
+      entry({ id: 5815, name: "Hyouka: Motsubeki Mono wa" }),
+    ];
+    const got = pickConfidentEntry("hyouka", entries);
+    expect(got).not.toBeNull();
+    expect(got!.entry.id).toBe(1451);
+  });
+
+  test("ambiguous close scores with no exact match returns null", () => {
+    // Two same-franchise siblings both fully contain the query tokens and
+    // NEITHER equals it exactly -> tie, no dominance, >1 over threshold -> null.
+    const entries = [
+      entry({ id: 1, name: "Fate Stay Night First Season" }),
       entry({ id: 2, name: "Fate Stay Night Unlimited Blade Works" }),
     ];
-    // query "fate stay night" => both score 1.0 (full containment) -> tie, no
-    // dominance, >1 candidate over threshold -> null.
     expect(pickConfidentEntry("fate stay night", entries)).toBeNull();
   });
 
