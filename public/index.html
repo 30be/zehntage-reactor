@@ -8,6 +8,16 @@
       content="The minimalist local player that turns anime into your Anki deck."
     />
     <title>zehntage-reactor</title>
+    <script>
+      // No-flash theme bootstrap: apply the persisted theme before the app
+      // bundle (and thus the first paint) loads.
+      try {
+        var t = localStorage.getItem("zr.theme");
+        if (t === "light" || t === "dark" || t === "system") {
+          document.documentElement.dataset.theme = t;
+        }
+      } catch (e) {}
+    </script>
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body>

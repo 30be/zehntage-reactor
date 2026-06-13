@@ -26,6 +26,11 @@ export interface Settings {
    * means "use the built-in default" (gemini.ts DEFAULT_EXPLAIN_PROMPT).
    */
   explainPrompt: string;
+  /**
+   * UI colour theme. "light" matches the app's current appearance.
+   * "system" follows the OS preference. Default "light".
+   */
+  theme: "light" | "dark" | "system";
   [key: string]: unknown;
 }
 
@@ -36,6 +41,7 @@ const DEFAULTS: Settings = {
   autoQuizPrompt: true,
   lookupPrompt: "",
   explainPrompt: "",
+  theme: "light",
 };
 
 // ZR_CONFIG_DIR override keeps tests away from the user's real settings.
@@ -48,10 +54,18 @@ function settingsFile(): string {
   return join(configDir(), "settings.json");
 }
 
+const VALID_THEMES = new Set<Settings["theme"]>(["light", "dark", "system"]);
+
+function normalize(data: Partial<Settings>): Settings {
+  const merged: Settings = { ...DEFAULTS, ...data };
+  if (!VALID_THEMES.has(merged.theme)) merged.theme = "light";
+  return merged;
+}
+
 export async function readSettings(): Promise<Settings> {
   try {
     const data = (await Bun.file(settingsFile()).json()) as Partial<Settings>;
-    return { ...DEFAULTS, ...data };
+    return normalize(data);
   } catch {
     return { ...DEFAULTS };
   }

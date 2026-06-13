@@ -97,7 +97,21 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    void api.getSettings().then(setSettings).catch(() => {});
+    void api
+      .getSettings()
+      .then((s) => {
+        setSettings(s);
+        // apply the persisted theme once on load, and mirror it to
+        // localStorage so index.html's bootstrap avoids a flash next time.
+        const theme = (s.theme as string) || "light";
+        document.documentElement.dataset.theme = theme;
+        try {
+          localStorage.setItem("zr.theme", theme);
+        } catch {
+          /* ignore storage errors */
+        }
+      })
+      .catch(() => {});
     tmStart();
   }, []);
 
@@ -1803,6 +1817,7 @@ function Settings({
   const [autopauseMinUnknown, setAutopauseMinUnknown] = useState(
     String(Math.max(1, Math.round(Number(settings.autopauseMinUnknown)) || 1)),
   );
+  const [theme, setTheme] = useState((settings.theme as string) || "light");
   const promptDefault = (settings.lookupPromptDefault as string) || "";
   const [lookupPrompt, setLookupPrompt] = useState(
     (settings.lookupPrompt as string) || promptDefault,
@@ -1825,6 +1840,7 @@ function Settings({
     setAutopauseMinUnknown(
       String(Math.max(1, Math.round(Number(settings.autopauseMinUnknown)) || 1)),
     );
+    setTheme((settings.theme as string) || "light");
     const def = (settings.lookupPromptDefault as string) || "";
     setLookupPrompt((settings.lookupPrompt as string) || def);
     const exDef = (settings.explainPromptDefault as string) || "";
@@ -1844,6 +1860,7 @@ function Settings({
     shadowRepeats,
     autopauseMode,
     autopauseMinUnknown,
+    theme,
     lookupPrompt,
     explainPrompt,
   });
@@ -1858,6 +1875,7 @@ function Settings({
     shadowRepeats,
     autopauseMode,
     autopauseMinUnknown,
+    theme,
     lookupPrompt,
     explainPrompt,
   };
@@ -1886,6 +1904,7 @@ function Settings({
           1,
           Math.round(Number(s.autopauseMinUnknown)) || 1,
         ),
+        theme: s.theme,
         lookupPrompt: s.lookupPrompt,
         explainPrompt: s.explainPrompt,
       });
@@ -2081,6 +2100,32 @@ function Settings({
               onBlur={onBlurSave}
             />
             <div className="hint">Min unknown words per cue (unknown mode).</div>
+          </div>
+          <div className="field">
+            <label htmlFor="theme">Theme</label>
+            <select
+              id="theme"
+              aria-label="Theme"
+              title="App color theme: White, Black, or follow your OS (System)"
+              value={theme}
+              onChange={(e) => {
+                const value = e.target.value;
+                setTheme(value);
+                // apply immediately, mirror to localStorage for no-flash boot
+                document.documentElement.dataset.theme = value;
+                try {
+                  localStorage.setItem("zr.theme", value);
+                } catch {
+                  /* ignore storage errors */
+                }
+                scheduleSave();
+              }}
+            >
+              <option value="light">White</option>
+              <option value="dark">Black</option>
+              <option value="system">System</option>
+            </select>
+            <div className="hint">System follows your OS light/dark setting.</div>
           </div>
         </section>
 
