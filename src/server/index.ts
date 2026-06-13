@@ -52,6 +52,7 @@ import {
   ankiLocalAvailable,
   storeMedia,
   retrieveMedia,
+  bustListWordsCache,
 } from "../lib/anki.ts";
 import { readSettings, writeSettings } from "../lib/settings.ts";
 import {
@@ -261,7 +262,86 @@ function bustAnkiWordsCache(): void {
   ankiWordsGen++;
   ankiWordsCache = null;
   ankiWordsInflight = null; // detach a stale inflight — start fresh
+  ankiCardsCache = null; // /api/anki/cards derives from listWords too
+  bustListWordsCache(); // shared listWords cache must not serve pre-mutation data
   void refreshAnkiWordsCache().catch(() => {});
+}
+
+// --- /api/anki/cards payload cache ---
+// Mirrors the /api/anki/words pattern: stale-while-revalidate with a 60s TTL.
+// Derives from the SAME shared listWords() cache, so a Cards-page mount that
+// also fetches /api/anki/words pays at most one findNotes+notesInfo roundtrip.
+const ANKI_CARDS_TTL_MS = 60_000;
+interface AnkiCardsCacheEntry {
+  body: string; // serialized card array
+  ts: number;
+}
+let ankiCardsCache: AnkiCardsCacheEntry | null = null;
+let ankiCardsInflight: Promise<AnkiCardsCacheEntry> | null = null;
+
+function refreshAnkiCardsCache(): Promise<AnkiCardsCacheEntry> {
+  if (!ankiCardsInflight) {
+    const p = (async () => {
+      const cards = (await listWords()).filter(
+        (c) =>
+          (Array.isArray(c.tags) && c.tags.includes("zehntage")) ||
+          /\.(mkv|mp4)\s*@\s*\d+:\d{2}/i.test(c.context ?? ""),
+      );
+      const body = JSON.stringify(
+        cards.map((c) => ({
+          front: c.front ?? "",
+          back: c.back ?? "",
+          notes: c.notes ?? "",
+          context: c.context ?? "",
+          ...(typeof c.noteId === "number" ? { noteId: c.noteId } : {}),
+        })),
+      );
+      const entry: AnkiCardsCacheEntry = { body, ts: Date.now() };
+      ankiCardsCache = entry;
+      return entry;
+    })().finally(() => {
+      if (ankiCardsInflight === p) ankiCardsInflight = null;
+    });
+    ankiCardsInflight = p;
+  }
+  return ankiCardsInflight;
+}
+
+// --- Anki media bytes cache ---
+// Media is immutable per filename, so cache decoded bytes in-process and serve
+// hits directly (saves an AnkiConnect retrieveMediaFile roundtrip per <img>).
+// Bounded LRU: evict least-recently-used until under both the entry cap and
+// the total-byte cap. Misses/errors are not cached.
+const ANKI_MEDIA_MAX_ENTRIES = 512;
+const ANKI_MEDIA_MAX_BYTES = 128 * 1024 * 1024; // 128 MiB
+const ankiMediaCache = new Map<string, Uint8Array>(); // insertion order = LRU
+let ankiMediaBytes = 0;
+
+function ankiMediaGet(name: string): Uint8Array | undefined {
+  const v = ankiMediaCache.get(name);
+  if (v !== undefined) {
+    // Touch: move to most-recently-used end.
+    ankiMediaCache.delete(name);
+    ankiMediaCache.set(name, v);
+  }
+  return v;
+}
+
+function ankiMediaPut(name: string, bytes: Uint8Array): void {
+  const existing = ankiMediaCache.get(name);
+  if (existing) ankiMediaBytes -= existing.byteLength;
+  ankiMediaCache.set(name, bytes);
+  ankiMediaBytes += bytes.byteLength;
+  while (
+    ankiMediaCache.size > ANKI_MEDIA_MAX_ENTRIES ||
+    ankiMediaBytes > ANKI_MEDIA_MAX_BYTES
+  ) {
+    const oldest = ankiMediaCache.keys().next().value;
+    if (oldest === undefined) break;
+    const evicted = ankiMediaCache.get(oldest);
+    ankiMediaCache.delete(oldest);
+    if (evicted) ankiMediaBytes -= evicted.byteLength;
+  }
 }
 
 let translatePumpRunning = false;
@@ -1079,20 +1159,16 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       // — keep a card when it carries our "zehntage" tag (local AnkiConnect)
       // or its context contains our source line ("<episode>.mkv @ mm:ss").
       if (req.method === "GET" && path === "/api/anki/cards") {
-        const cards = (await listWords()).filter(
-          (c) =>
-            (Array.isArray(c.tags) && c.tags.includes("zehntage")) ||
-            /\.(mkv|mp4)\s*@\s*\d+:\d{2}/i.test(c.context ?? ""),
-        );
-        return json(
-          cards.map((c) => ({
-            front: c.front ?? "",
-            back: c.back ?? "",
-            notes: c.notes ?? "",
-            context: c.context ?? "",
-            ...(typeof c.noteId === "number" ? { noteId: c.noteId } : {}),
-          })),
-        );
+        let c = ankiCardsCache;
+        if (!c) {
+          c = await refreshAnkiCardsCache();
+        } else if (Date.now() - c.ts > ANKI_CARDS_TTL_MS) {
+          // Stale: serve immediately, refresh in the background.
+          void refreshAnkiCardsCache().catch(() => {});
+        }
+        return new Response(c.body, {
+          headers: { "Content-Type": "application/json" },
+        });
       }
 
       // Media proxy: serve files from the LOCAL Anki collection (AnkiConnect
@@ -1102,8 +1178,13 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       if (req.method === "GET" && ankiMedia) {
         const name = decodeURIComponent(ankiMedia[1]!);
         if (name.includes("/") || name.includes("..")) return err("bad name", 400);
-        const bytes = await retrieveMedia(name);
-        if (!bytes) return err("media not found", 404);
+        let bytes = ankiMediaGet(name);
+        if (!bytes) {
+          const fetched = await retrieveMedia(name);
+          if (!fetched) return err("media not found", 404); // don't cache misses
+          ankiMediaPut(name, fetched);
+          bytes = fetched;
+        }
         const types: Record<string, string> = {
           ".jpg": "image/jpeg",
           ".jpeg": "image/jpeg",
@@ -1120,7 +1201,7 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         return new Response(bytes, {
           headers: {
             "Content-Type": types[extname(name).toLowerCase()] ?? "application/octet-stream",
-            "Cache-Control": "max-age=300",
+            "Cache-Control": "public, max-age=31536000, immutable",
           },
         });
       }

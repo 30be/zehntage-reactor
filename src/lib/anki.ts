@@ -325,11 +325,44 @@ async function zehntageRequest(
   return resp.json();
 }
 
-export async function listWords(): Promise<AnkiCard[]> {
+async function listWordsRaw(): Promise<AnkiCard[]> {
   if (ankiFake()) return [...fakeCards.values()];
   if (await ankiLocalAvailable()) return acListCards();
   const list = await zehntageRequest("/zehntage/list", "GET");
   return Array.isArray(list) ? (list as AnkiCard[]) : [];
+}
+
+// Shared short-TTL cache + in-flight de-dup for listWords(): both
+// /api/anki/cards and /api/anki/words call this, often at the same mount,
+// each triggering a findNotes+notesInfo roundtrip. Concurrent callers await
+// one promise; results are reused for LIST_WORDS_TTL_MS so the two endpoints
+// don't each pay the cost. Errors are NOT cached (the inflight clears and the
+// cached value is left untouched).
+const LIST_WORDS_TTL_MS = 60_000;
+let listWordsCache: { at: number; cards: AnkiCard[] } | null = null;
+let listWordsInflight: Promise<AnkiCard[]> | null = null;
+
+export function bustListWordsCache(): void {
+  listWordsCache = null;
+  listWordsInflight = null;
+}
+
+export async function listWords(): Promise<AnkiCard[]> {
+  // Fake mode reads a mutable in-memory map directly — never cache it.
+  if (ankiFake()) return [...fakeCards.values()];
+  const c = listWordsCache;
+  if (c && Date.now() - c.at < LIST_WORDS_TTL_MS) return c.cards;
+  if (listWordsInflight) return listWordsInflight;
+  const p = listWordsRaw()
+    .then((cards) => {
+      listWordsCache = { at: Date.now(), cards };
+      return cards;
+    })
+    .finally(() => {
+      if (listWordsInflight === p) listWordsInflight = null;
+    });
+  listWordsInflight = p;
+  return p;
 }
 
 /** New endpoint; may not exist yet on the server — callers fall back gracefully. */
