@@ -1548,3 +1548,19 @@ textarea.prompt {
 }
 .cheat-row .palette-kbd { min-width: 92px; text-align: center; }
 .cheat-what { color: var(--fg); }
+
+/* health debug view */
+.health-page { padding: 1.5rem; max-width: 900px; }
+.health-title { font-size: 1rem; font-weight: 600; margin-bottom: 1rem; letter-spacing: .04em; text-transform: uppercase; }
+.health-section { margin-bottom: 2rem; }
+.health-section-title { font-size: .75rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; opacity: .55; margin-bottom: .5rem; }
+.health-table { border-collapse: collapse; font-size: .8rem; font-family: monospace; width: 100%; }
+.health-table th { text-align: left; padding: .2rem .6rem; border-bottom: 1px solid currentColor; opacity: .5; font-weight: 400; }
+.health-table td { padding: .2rem .6rem; vertical-align: top; }
+.health-table tr:hover td { background: rgba(128,128,128,.08); }
+.health-type { opacity: .85; }
+.health-bar { font-family: monospace; letter-spacing: -.05em; opacity: .6; }
+.health-warn { color: var(--c-warn, #c80); }
+.health-err { color: var(--c-err, #c00); }
+.health-empty { font-size: .75rem; opacity: .4; padding: .3rem .6rem; }
+.health-loading { font-size: .8rem; opacity: .6; }

@@ -9,6 +9,7 @@ import {
 } from "./api.ts";
 import { Player } from "./Player.tsx";
 import { ReadRoute } from "./ReadRoute.tsx";
+import { HealthRoute } from "./HealthRoute.tsx";
 import { Palette } from "./Palette.tsx";
 import { HOTKEYS } from "./commands.ts";
 import { startSync } from "./sync.ts";
@@ -40,7 +41,8 @@ type Route =
   | { name: "settings" }
   | { name: "stats" }
   | { name: "cards" }
-  | { name: "home" };
+  | { name: "home" }
+  | { name: "health" };
 
 function parseHash(): Route {
   const h = window.location.hash.replace(/^#\/?/, "");
@@ -57,6 +59,7 @@ function parseHash(): Route {
   if (h === "stats") return { name: "stats" };
   if (h === "cards") return { name: "cards" };
   if (h === "home") return { name: "home" };
+  if (h === "health") return { name: "health" };
   return { name: "library" };
 }
 
@@ -165,6 +168,7 @@ export function App() {
           {navItem("Cards", <CardsIcon />, "#/cards", route.name === "cards")}
           {navItem("Stats", <StatsIcon />, "#/stats", route.name === "stats")}
           {navItem("Settings", <SettingsIcon />, "#/settings", route.name === "settings")}
+          {navItem("Health", <span>⬡</span>, "#/health", route.name === "health")}
         </nav>
       </aside>
 
@@ -173,6 +177,7 @@ export function App() {
         {route.name === "library" && <Library go={go} toast={toast} />}
         {route.name === "stats" && <Stats go={go} />}
         {route.name === "cards" && <Cards go={go} toast={toast} />}
+        {route.name === "health" && <HealthRoute />}
         {route.name === "settings" && (
           <Settings settings={settings} setSettings={setSettings} toast={toast} />
         )}

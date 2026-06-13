@@ -12,6 +12,7 @@
 
 import { useEffect, useState } from "react";
 import type { AnkiWord, AnkiWordsResponse, ProgressEntry } from "./api.ts";
+import { tmEvent } from "./telemetry.ts";
 
 const KEY = "zr.ankiCache";
 /** Stay below typical 5MB localStorage quotas; skip persisting if bigger. */
@@ -88,7 +89,9 @@ function revalidate(): Promise<AnkiWordsResponse> {
       const cached = readAnkiCache();
       const headers: Record<string, string> = {};
       if (cached?.etag) headers["If-None-Match"] = cached.etag;
+      const _ankiT0 = Date.now();
       const r = await fetch("/api/anki/words", { headers });
+      tmEvent("perf.client.anki_hydrate", { ms: Date.now() - _ankiT0, status: r.status });
       if (r.status === 304 && cached) {
         writeAnkiCache(cached.data, cached.etag); // bump ts
         return cached.data;

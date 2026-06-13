@@ -62,6 +62,7 @@ import {
   episodeSeries,
   overview,
   toCsv,
+  healthSummaryFromFile,
   type TelemetryEvent,
 } from "../lib/telemetry.ts";
 import { readState, mergeIntoFile, type ZrState } from "../lib/state.ts";
@@ -228,7 +229,9 @@ function refreshAnkiWordsCache(): Promise<AnkiWordsCacheEntry> {
   if (!ankiWordsInflight) {
     const gen = ankiWordsGen;
     const p = (async () => {
+      const _wordsT0 = Date.now();
       const [words, progress] = await Promise.all([listWords(), getProgress()]);
+      void logEvent("perf.anki", { op: "words", ms: Date.now() - _wordsT0 });
       const body = JSON.stringify({ words, progress });
       const entry: AnkiWordsCacheEntry = {
         body,
@@ -268,7 +271,15 @@ async function pumpTranslateBatch(library: Library): Promise<void> {
         const entry = library.get(item.entryId);
         if (!entry) throw new Error("entry no longer in library");
         const cues = await cuesForTrack(entry, item.sourceTrack);
-        const translated = await translateCues(cues, item.targetLang);
+        const _trT0 = Date.now();
+        let translated: Awaited<ReturnType<typeof translateCues>>;
+        try {
+          translated = await translateCues(cues, item.targetLang);
+        } catch (e) {
+          void logEvent("anomaly.gemini_fail", { op: "translate", error: String(e), mediaId: item.entryId });
+          throw e;
+        }
+        void logEvent("perf.gemini", { op: "translate", ms: Date.now() - _trT0, mediaId: item.entryId, cues: cues.length });
         await Bun.write(sidecarPath(entry, item.targetLang), cuesToSrt(translated));
         await library.refresh();
         item.status = "done";
@@ -555,10 +566,27 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
     console.warn(`[subs-cleanup] failed: ${e}`),
   );
 
+  /** Collapse variable path segments (hex ids, numeric ids) to ":id" for grouping. */
+  function routePattern(pathname: string): string {
+    return pathname
+      .replace(/\/[a-f0-9]{8,}\b/g, "/:id")   // hex mediaId
+      .replace(/\/\d+(?=\/|$)/g, "/:n")         // numeric id
+      .replace(/\/[A-Za-z0-9+/=]{20,}(?=\/|$)/g, "/:b64"); // base64 segments
+  }
+
+  let _routeSampleN = 0;
+  function shouldLogRoute(ms: number): boolean {
+    if (ms > 50) return true;
+    _routeSampleN++;
+    return _routeSampleN % 10 === 0;
+  }
+
   const fetchHandler = async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const path = url.pathname;
+    const _t0 = Date.now();
 
+    const _respond = async (): Promise<Response> => {
     try {
       // --- static / SPA ---
       if (req.method === "GET" && (path === "/" || path === "/index.html")) {
@@ -699,10 +727,18 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         const existing = whisperQueue.activeFor(entry.absPath, lang);
         if (existing) return json({ jobId: existing.id, status: existing.status });
         const job = whisperQueue.enqueue(entry.absPath, lang, sidecarPath(entry, lang));
+        const _whisperT0 = Date.now();
         const doneListener = (e: WhisperEvent) => {
           if (e.type !== "status") return;
-          if (e.status === "done")
+          if (e.status === "done") {
+            const _wMs = Date.now() - _whisperT0;
             void logEvent("whisper_done", { mediaId: entry.id, lang });
+            void logEvent("perf.whisper", { ms: _wMs, mediaId: entry.id, lang, cues: job.cues.length });
+            // Emit anomaly for each coverage warning the job accumulated.
+            for (const w of job.warnings) {
+              void logEvent("anomaly.whisper_warning", { message: w, mediaId: entry.id, lang });
+            }
+          }
           if (e.status === "done" || e.status === "error" || e.status === "canceled")
             job.listeners.delete(doneListener);
         };
@@ -908,12 +944,20 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         const cacheKey = `${body.sentence} ${body.secondary ?? ""} ${body.source ?? ""} ${body.context ?? ""}`;
         const cached = explainCache.get(cacheKey);
         if (cached) return json(cached);
-        const res = await explainSentence(
-          body.sentence,
-          body.secondary ?? "",
-          body.source ?? "",
-          body.context ?? "",
-        );
+        const _exT0 = Date.now();
+        let res: Awaited<ReturnType<typeof explainSentence>>;
+        try {
+          res = await explainSentence(
+            body.sentence,
+            body.secondary ?? "",
+            body.source ?? "",
+            body.context ?? "",
+          );
+        } catch (e) {
+          void logEvent("anomaly.gemini_fail", { op: "explain", error: String(e) });
+          throw e;
+        }
+        void logEvent("perf.gemini", { op: "explain", ms: Date.now() - _exT0 });
         explainCachePut(cacheKey, res);
         void logEvent("explain", { len: body.sentence.length });
         return json(res);
@@ -967,15 +1011,22 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         }
 
         void logEvent("lookup", { word: body.word, mediaId: body.mediaId });
-        return json(
-          await lookupWord(
+        const _gT0 = Date.now();
+        let _lookupResult: Awaited<ReturnType<typeof lookupWord>>;
+        try {
+          _lookupResult = await lookupWord(
             body.word,
             body.context ?? "",
             body.source ?? "",
             image,
             body.secondary,
-          ),
-        );
+          );
+        } catch (e) {
+          void logEvent("anomaly.gemini_fail", { op: "lookup", error: String(e) });
+          throw e;
+        }
+        void logEvent("perf.gemini", { op: "lookup", ms: Date.now() - _gT0 });
+        return json(_lookupResult);
       }
 
       // --- directory browser (root navigator in the Library view) ---
@@ -1088,7 +1139,9 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         //   (4) [sound:...]  (5) source "file @ mm:ss" LAST.
         // On the remote anki-mcp path the image travels via the `image`
         // param instead (the remote server controls its placement).
+        const _ankiProbeT0 = Date.now();
         const useLocal = await ankiLocalAvailable();
+        void logEvent("perf.anki", { op: "probe", ms: Date.now() - _ankiProbeT0, local: useLocal });
         let imgLine: string | undefined;
         let soundLine: string | undefined;
         let sourceLine: string | undefined;
@@ -1152,19 +1205,22 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
           .join("<br>");
 
         const front = body.reading ? `${body.word} [${body.reading}]` : body.word;
+        const _addT0 = Date.now();
         await addCard({
           front,
           back: body.translation,
           notes: body.notes ?? "",
           context,
-          // Marks the card as ours for the Cards tab filter. Local AnkiConnect
-          // sets it as a real note tag; the remote anki-mcp may ignore the
-          // field, in which case the context source-line pattern still matches.
           tags: ["zehntage"],
           ...(image ? { image, image_field: "context" } : {}),
         });
+        const _addMs = Date.now() - _addT0;
         bustAnkiWordsCache();
+        void logEvent("perf.anki", { op: "add", ms: _addMs });
         void logEvent("anki_add", { word: body.word, mediaId: body.mediaId });
+        if (_addMs > 3000) {
+          void logEvent("anomaly.anki_slow", { op: "add", ms: _addMs });
+        }
         return json({ ok: true });
       }
 
@@ -1273,7 +1329,9 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         }
         const knownSet = new Set(known);
         const entries = library.list();
+        const _tokT0 = Date.now();
         const indexes = await collectIndexes(entries, 30); // budget: ≤30 new builds
+        void logEvent("perf.tokenize", { op: "comprehensibility", ms: Date.now() - _tokT0, indexed: indexes.size });
         const out: {
           mediaId: string;
           name: string;
@@ -1308,7 +1366,9 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
             .filter(Boolean),
         );
         const entries = library.list();
+        const _tokDueT0 = Date.now();
         const indexes = await collectIndexes(entries, 30);
+        void logEvent("perf.tokenize", { op: "due", ms: Date.now() - _tokDueT0, indexed: indexes.size });
         const out: {
           mediaId: string;
           name: string;
@@ -1339,7 +1399,9 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
           .filter(Boolean);
         const wanted = new Set(ids);
         const scope = library.list().filter((e) => wanted.has(e.id));
+        const _tokSfT0 = Date.now();
         const indexes = await collectIndexes(scope, Math.max(1, scope.length));
+        void logEvent("perf.tokenize", { op: "showfreq", ms: Date.now() - _tokSfT0, indexed: indexes.size });
         return json(Object.fromEntries(showFrequency(indexes.values())));
       }
 
@@ -1427,6 +1489,11 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         }
       }
 
+      // --- health / perf summary (last 24h) ---
+      if (req.method === "GET" && path === "/api/health/summary") {
+        return json(await healthSummaryFromFile());
+      }
+
       // --- other static assets in public/ ---
       if (req.method === "GET" && !path.startsWith("/api/")) {
         const file = Bun.file(join(PUBLIC_DIR, path.slice(1)));
@@ -1444,6 +1511,19 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
     } catch (e) {
       return err(e instanceof Error ? e.message : String(e));
     }
+    }; // end _respond
+
+    const _res = await _respond();
+    const _ms = Date.now() - _t0;
+    if (shouldLogRoute(_ms)) {
+      void logEvent("perf.route", {
+        path: routePattern(path),
+        ms: _ms,
+        status: _res.status,
+        method: req.method,
+      });
+    }
+    return _res;
   };
 
   // Try preferred port, fall back to an ephemeral one.

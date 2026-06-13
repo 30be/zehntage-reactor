@@ -31,8 +31,11 @@ function flush(useBeacon = false): void {
   if (queue.length === 0) return;
   const events = queue.splice(0, queue.length);
   const body = JSON.stringify({ events });
-  if (useBeacon && typeof navigator !== "undefined" && navigator.sendBeacon) {
-    const ok = navigator.sendBeacon(
+  const nav = navigator as Navigator & {
+    sendBeacon?: (url: string, data?: Blob) => boolean;
+  };
+  if (useBeacon && typeof navigator !== "undefined" && nav.sendBeacon) {
+    const ok = nav.sendBeacon(
       "/api/events",
       new Blob([body], { type: "application/json" }),
     );
@@ -61,4 +64,37 @@ export function tmStart(): void {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") flush(true);
   });
+}
+
+// ---------------------------------------------------------------------------
+// Client perf marks — thin wrappers around performance.mark/measure.
+// Results are posted via the existing queue (no extra flush, no spam).
+// ---------------------------------------------------------------------------
+
+/** Drop a named mark (no event posted yet — call tmMeasure later). */
+export function tmMark(name: string): void {
+  try { performance.mark(name); } catch { /* noop */ }
+}
+
+/**
+ * Measure from `startMark` to now, post as a perf.client.* telemetry event.
+ * The mark is cleared after measuring (avoids stale marks on re-renders).
+ */
+export function tmMeasure(
+  eventType: string,
+  startMark: string,
+  payload: Record<string, unknown> = {},
+): void {
+  try {
+    const entries = performance.getEntriesByName(startMark, "mark");
+    if (entries.length === 0) return;
+    const ms = performance.now() - entries[entries.length - 1]!.startTime;
+    performance.clearMarks(startMark);
+    tmEvent(eventType, { ms: Math.round(ms), ...payload });
+  } catch { /* noop */ }
+}
+
+/** Post an anomaly event immediately into the telemetry queue. */
+export function tmAnomaly(type: string, payload: Record<string, unknown> = {}): void {
+  tmEvent(`anomaly.${type}`, payload);
 }

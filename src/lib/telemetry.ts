@@ -392,3 +392,119 @@ export function toCsv(rows: EpisodeDayRow[]): string {
   for (const r of rows) lines.push(CSV_HEADER.map((k) => csvCell(r[k])).join(","));
   return lines.join("\n") + "\n";
 }
+
+// --- health / perf summary (last 24h) ------------------------------------
+
+export interface PerfStat {
+  type: string;
+  count: number;
+  p50: number;
+  p95: number;
+  min: number;
+  max: number;
+}
+
+export interface SlowRoute {
+  ts: number;
+  path: string;
+  ms: number;
+  status: number;
+}
+
+export interface AnomalyCount {
+  type: string;
+  count: number;
+}
+
+export interface WhisperWarning {
+  ts: number;
+  message: string;
+  mediaId?: string;
+}
+
+export interface HealthSummary {
+  perfStats: PerfStat[];
+  slowestRoutes: SlowRoute[];
+  anomalyCounts: AnomalyCount[];
+  whisperWarnings: WhisperWarning[];
+  windowMs: number; // always 24h
+}
+
+const HEALTH_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+function percentile(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0;
+  const idx = Math.floor((p / 100) * (sorted.length - 1));
+  return sorted[Math.min(idx, sorted.length - 1)]!;
+}
+
+export function healthSummary(
+  events: TelemetryEvent[],
+  now = Date.now(),
+): HealthSummary {
+  const cutoff = now - HEALTH_WINDOW_MS;
+  const recent = events.filter((e) => e.ts >= cutoff);
+
+  // perf.* → collect ms values per type
+  const perfBuckets = new Map<string, number[]>();
+  // anomaly.* → counts
+  const anomalyMap = new Map<string, number>();
+  // whisper warnings
+  const whisperWarnings: WhisperWarning[] = [];
+  // slowest routes (perf.route only)
+  const routeEvents: SlowRoute[] = [];
+
+  for (const e of recent) {
+    if (e.type.startsWith("perf.")) {
+      const ms = typeof e.ms === "number" ? e.ms : null;
+      if (ms !== null) {
+        let bucket = perfBuckets.get(e.type);
+        if (!bucket) { bucket = []; perfBuckets.set(e.type, bucket); }
+        bucket.push(ms);
+      }
+      if (e.type === "perf.route") {
+        routeEvents.push({
+          ts: e.ts,
+          path: typeof e.path === "string" ? e.path : "?",
+          ms: typeof e.ms === "number" ? e.ms : 0,
+          status: typeof e.status === "number" ? e.status : 0,
+        });
+      }
+    } else if (e.type.startsWith("anomaly.")) {
+      anomalyMap.set(e.type, (anomalyMap.get(e.type) ?? 0) + 1);
+      if (e.type === "anomaly.whisper_warning") {
+        whisperWarnings.push({
+          ts: e.ts,
+          message: typeof e.message === "string" ? e.message : String(e.message ?? ""),
+          ...(typeof e.mediaId === "string" ? { mediaId: e.mediaId } : {}),
+        });
+      }
+    }
+  }
+
+  const perfStats: PerfStat[] = [...perfBuckets.entries()].map(([type, vals]) => {
+    const sorted = [...vals].sort((a, b) => a - b);
+    return {
+      type,
+      count: sorted.length,
+      p50: percentile(sorted, 50),
+      p95: percentile(sorted, 95),
+      min: sorted[0]!,
+      max: sorted[sorted.length - 1]!,
+    };
+  }).sort((a, b) => a.type.localeCompare(b.type));
+
+  const slowestRoutes = [...routeEvents]
+    .sort((a, b) => b.ms - a.ms)
+    .slice(0, 10);
+
+  const anomalyCounts: AnomalyCount[] = [...anomalyMap.entries()]
+    .map(([type, count]) => ({ type, count }))
+    .sort((a, b) => b.count - a.count);
+
+  return { perfStats, slowestRoutes, anomalyCounts, whisperWarnings, windowMs: HEALTH_WINDOW_MS };
+}
+
+export async function healthSummaryFromFile(now = Date.now()): Promise<HealthSummary> {
+  return healthSummary(await readEvents(), now);
+}

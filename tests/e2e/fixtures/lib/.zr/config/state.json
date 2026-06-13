@@ -1,34 +1,18 @@
 {
+  "zr.e2e.1781336381083": {
+    "v": "hello",
+    "ts": 1781336381083
+  },
   "zr.lastMedia": {
     "v": "2328ae29a728",
     "ts": 0
   },
-  "zr.tracks.2328ae29a728": {
-    "v": "{\"primary\":\"sidecar:ja.srt\",\"secondary\":\"sidecar:gen:ru\"}",
-    "ts": 1781303218468
-  },
-  "zr.sidebar": {
-    "v": "1",
-    "ts": 1781303163327
-  },
-  "zr.known": {
-    "v": "[\"する\",\"行く\",\"読む\",\"話す\",\"来る\",\"なる\",\"気\",\"本\",\"友達\",\"明日\"]",
-    "ts": 1782303185494
-  },
-  "zr.tracks.c4c16ec0b0a1": {
-    "v": "{\"primary\":\"sidecar:ja.srt\",\"secondary\":\"\"}",
-    "ts": 1781303203864
-  },
-  "zr.pos.c4c16ec0b0a1": {
-    "v": "7.024431",
-    "ts": 1781303204029
-  },
-  "zr.e2e.1781303215293": {
-    "v": "hello",
-    "ts": 1781303215293
-  },
   "zr.blacklist": {
     "v": "[\"友達\"]",
     "ts": 0
+  },
+  "zr.tracks.2328ae29a728": {
+    "v": "{\"primary\":\"sidecar:ja.srt\",\"secondary\":\"sidecar:gen:ru\"}",
+    "ts": 1781336383883
   }
 }

@@ -31,7 +31,7 @@ import { Sidebar } from "./Sidebar.tsx";
 import { loadAccents } from "./accent.ts";
 import { readBlacklist, writeBlacklist } from "./blacklist.ts";
 import { freqRank, loadFreq } from "./freq.ts";
-import { tmHeartbeat, tmEvent } from "./telemetry.ts";
+import { tmHeartbeat, tmEvent, tmAnomaly } from "./telemetry.ts";
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -743,10 +743,14 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     }
     let cancelled = false;
     setCuesLoading(true);
+    const _cueFetchT0 = Date.now();
     void api
       .cues(entry.id, primaryId)
       .then((c) => {
         if (cancelled) return;
+        const _ms = Date.now() - _cueFetchT0;
+        tmEvent("perf.client.cue_fetch", { ms: _ms, trackId: primaryId });
+        if (_ms > 1000) tmAnomaly("cue_fetch_slow", { ms: _ms, trackId: primaryId });
         // cues are in — NOW start the (main-thread-heavy) dict init so the
         // plain-text line renders first and tokens swap in when ready
         warmTokenizer();
@@ -1581,6 +1585,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       : popup.context;
     let p = inflight.current.get(cacheKey);
     if (!p) {
+      const _lookupT0 = Date.now();
       p = api.lookup({
         word: surface,
         context: ctx,
@@ -1588,6 +1593,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         secondary: popup.secondary,
       })
         .then((res) => {
+          tmEvent("perf.client.lookup", { ms: Date.now() - _lookupT0, word: surface });
           lookupCache.current.set(cacheKey, res);
           return res;
         })

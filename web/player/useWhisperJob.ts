@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type Cue, type SubTrackInfo } from "../api.ts";
 import { isJaLang } from "../lang.ts";
+import { tmAnomaly } from "../telemetry.ts";
 
 export interface WhisperJob {
   whisperBusy: boolean;
@@ -143,6 +144,7 @@ export function useWhisperJob(opts: {
       return;
     }
     whisperRetryRef.current += 1;
+    tmAnomaly("sse_reconnect", { jobId: whisperJobRef.current, attempt: whisperRetryRef.current });
     window.setTimeout(() => {
       if (!mountedRef.current) return; // Player unmounted — no orphan SSE
       if (whisperEsRef.current != null) return; // already reattached
