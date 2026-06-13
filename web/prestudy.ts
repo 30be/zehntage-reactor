@@ -18,17 +18,17 @@ export interface PreRankFlags {
   muddy: boolean;
 }
 
-export function rankPreStudy<T extends { lemma: string; checked: boolean }>(
+export function rankPreStudy<T extends { key: string; checked: boolean }>(
   items: T[],
-  cueUnknownLemmas: string[][],
+  cueUnknownKeys: string[][],
 ): (T & PreRankFlags)[] {
-  const cueSets = cueUnknownLemmas.map((l) => new Set(l));
+  const cueSets = cueUnknownKeys.map((l) => new Set(l));
   const flagged = items.map((it) => {
     let appears = 0;
     let clean = 0;
     let muddyCues = 0;
     for (const s of cueSets) {
-      if (!s.has(it.lemma)) continue;
+      if (!s.has(it.key)) continue;
       appears++;
       if (s.size === 1) clean++;
       if (s.size >= MUDDY_UNKNOWNS) muddyCues++;

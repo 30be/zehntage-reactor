@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { rankPreStudy, MUDDY_UNKNOWNS } from "../web/prestudy.ts";
 
-const item = (lemma: string, checked = true) => ({ lemma, checked });
+const item = (key: string, checked = true) => ({ key, checked });
 
 describe("rankPreStudy", () => {
   test("promotes i+1 candidates to the top (stable within groups)", () => {
@@ -9,7 +9,7 @@ describe("rankPreStudy", () => {
     // "c" is the only unknown in one cue; a/b share a 2-unknown cue
     const cues = [["a", "b"], ["c"]];
     const out = rankPreStudy(items, cues);
-    expect(out.map((x) => x.lemma)).toEqual(["c", "a", "b"]);
+    expect(out.map((x) => x.key)).toEqual(["c", "a", "b"]);
     expect(out[0]!.iPlusOne).toBe(true);
     expect(out[1]!.iPlusOne).toBe(false);
   });
@@ -26,9 +26,9 @@ describe("rankPreStudy", () => {
       ["f"],
     ];
     const out = rankPreStudy(items, cues);
-    const g = out.find((x) => x.lemma === "g")!;
+    const g = out.find((x) => x.key === "g")!;
     expect(g.muddy).toBe(true);
-    expect(out[out.length - 1]!.lemma).toBe("g");
+    expect(out[out.length - 1]!.key).toBe("g");
     expect(g.checked).toBe(false); // demoted past the top-5 → unchecked
   });
 

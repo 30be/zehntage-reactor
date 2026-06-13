@@ -6,7 +6,12 @@ import { freqTier } from "../freq.ts";
 
 // One unknown word in the pre-study (`w`) panel.
 export interface PreStudyItem {
-  lemma: string; // dictionary form (wordKey) — what gets added to Anki
+  // Homograph-aware identity key (`lemma|reading|pos`, see web/tokenizer.ts
+  // vocabKey). Used for known/blacklist `.has()` filtering, dedup, ranking and
+  // checkbox toggling — MUST match the key the known/blacklist sets are written
+  // with, otherwise filtering silently no-ops.
+  key: string;
+  lemma: string; // bare dictionary form — what's displayed + added to Anki
   reading?: string; // hiragana
   rank: number | null; // frequency rank, null = not in the 30k list
   context: string; // cue text where the word first appears
@@ -77,14 +82,14 @@ export function PreStudyPanel({
         )}
         {preStudy.items.map((it) => (
           <label
-            key={it.lemma}
+            key={it.key}
             className={`prestudy-row${it.added ? " added" : ""}`}
           >
             <input
               type="checkbox"
               checked={it.checked}
               disabled={it.added || preBusy}
-              onChange={() => onToggleItem(it.lemma)}
+              onChange={() => onToggleItem(it.key)}
             />
             <span className="ps-word">{it.lemma}</span>
             {it.reading && it.reading !== it.lemma && (

@@ -177,23 +177,26 @@ test("due words from progress get the .due class", async ({ page }) => {
 });
 
 test("pre-study promotes i+1 candidates with a badge", async ({ page }) => {
-  // leave 勉強 / 図書館 as the only unknowns of their cues
+  // leave 勉強 as the only unknown of its cue
   await deleteFront(page, "勉強 [べんきょう]");
-  await deleteFront(page, "図書館 [としょかん]");
+  // Start from an empty known-set so server state from earlier specs (which may
+  // push a far-future-ts known-list) can't pre-mark 勉強.
   await page.addInitScript(() => {
-    localStorage.setItem(
-      "zr.known",
-      JSON.stringify(["する", "行く", "読む", "話す", "来る", "なる", "気", "本", "友達", "明日"]),
-    );
-    // pin the key against the zr.* server sync (local ts wins)
+    localStorage.setItem("zr.known", JSON.stringify([]));
     localStorage.setItem(
       "zr.sync.ts",
       JSON.stringify({ "zr.known": Date.now() + 1e9 }),
     );
   });
   await openPlayer(page, "clip.mp4");
-  await seekTo(page, 3); // 勉強します。 (cue window covers all fixture cues)
+  await seekTo(page, 3); // 勉強します。
   await waitForTokens(page);
+  // Mark the verb stem する (し) known through the real `k` hotkey so it's
+  // persisted under the homograph-aware vocabKey — leaving 勉強 the SOLE unknown
+  // of its cue (i+1). Pre-seeding the bare lemma "する" no longer matches the
+  // token key the pre-study scan looks up.
+  await page.locator(".sub-primary .tok", { hasText: "し" }).first().hover();
+  await page.keyboard.press("k");
   await page.keyboard.press("w");
   const panel = page.locator(".lookup.prestudy");
   await expect(panel).toBeVisible();

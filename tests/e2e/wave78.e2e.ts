@@ -47,18 +47,21 @@ test("blacklisted lemma is excluded from the pre-study panel", async ({
   page,
 }) => {
   await page.addInitScript(() => {
-    localStorage.setItem("zr.blacklist", JSON.stringify(["友達"]));
     // Reset zr.known so server-side state from other tests (e.g. the i+1
     // wave12 spec that pushes a far-future-timestamped known-list) cannot
     // bleed in and hide 明日 / 友達 from the prestudy panel.
     localStorage.setItem("zr.known", JSON.stringify([]));
     const farFuture = Date.now() + 2e9;
-    localStorage.setItem(
-      "zr.sync.ts",
-      JSON.stringify({ "zr.blacklist": farFuture, "zr.known": farFuture }),
-    );
+    localStorage.setItem("zr.sync.ts", JSON.stringify({ "zr.known": farFuture }));
   });
   await openPlayer(page, "clip.mp4");
+  // Blacklist 友達 through the real `x` hotkey so the persisted entry is the
+  // app's homograph-aware vocabKey (`lemma|reading|pos`) — pre-seeding the
+  // bare lemma "友達" no longer matches the token key the panel looks up.
+  await seekTo(page, 19); // 友達と話します。
+  await waitForTokens(page);
+  await page.locator(".sub-primary .tok", { hasText: "友達" }).first().hover();
+  await page.keyboard.press("x");
   await seekTo(page, 3); // 勉強します。 — an active cue makes tokens visible
   await waitForTokens(page);
   await page.keyboard.press("w");

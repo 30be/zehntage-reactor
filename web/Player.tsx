@@ -16,7 +16,7 @@ import {
   type EncounterHit,
 } from "./api.ts";
 import { activeCueIndex, contextAround } from "./cues.ts";
-import { getTokenizer, isLexical, kataToHira, type KToken } from "./tokenizer.ts";
+import { getTokenizer, isLexical, kataToHira, lemmaOf, type KToken } from "./tokenizer.ts";
 import { matchFront } from "./progress.ts";
 import { wordKey } from "./TokenLine.tsx";
 import { Sidebar } from "./Sidebar.tsx";
@@ -345,7 +345,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         unknowns.push(key);
         if (seen.has(key)) continue;
         seen.set(key, {
-          lemma: key,
+          key,
+          lemma: lemmaOf(tk),
           reading: tk.reading ? kataToHira(tk.reading) : undefined,
           rank: freqRank(freq, tk),
           context: cue.text,
@@ -380,13 +381,13 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     });
   }, [buildPreStudy]);
 
-  const togglePreItem = useCallback((lemma: string) => {
+  const togglePreItem = useCallback((key: string) => {
     setPreStudy((prev) =>
       prev
         ? {
             ...prev,
             items: prev.items.map((it) =>
-              it.lemma === lemma ? { ...it, checked: !it.checked } : it,
+              it.key === key ? { ...it, checked: !it.checked } : it,
             ),
           }
         : prev,
@@ -1112,7 +1113,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             ? {
                 ...prev,
                 items: prev.items.map((p) =>
-                  p.lemma === it.lemma ? { ...p, added: true } : p,
+                  p.key === it.key ? { ...p, added: true } : p,
                 ),
               }
             : prev,
