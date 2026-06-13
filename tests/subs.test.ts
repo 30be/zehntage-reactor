@@ -13,6 +13,9 @@ import {
   dropRepeatingCycles,
   cleanCues,
   findCoverageHoles,
+  kanaRatio,
+  looksJapanese,
+  JAPANESE_KANA_MIN,
   type SubTrack,
 } from "../src/lib/subs.ts";
 import { repairHole } from "../src/lib/whisper.ts";
@@ -476,5 +479,56 @@ describe("findCoverageHoles", () => {
   test("gaps under threshold ignored", () => {
     const cues = [mk(0, 100), mk(140, 990)];
     expect(findCoverageHoles(cues, 1000)).toEqual([]);
+  });
+});
+
+describe("kanaRatio / looksJapanese", () => {
+  const cue = (text: string) => ({ start: 0, end: 1, text });
+
+  test("Japanese dialogue → high ratio, looksJapanese true", () => {
+    const jp = "わたしは奉太郎です。今日は学校に行きました。";
+    expect(kanaRatio(jp)).toBeGreaterThan(0.3);
+    expect(looksJapanese([cue(jp)])).toBe(true);
+  });
+
+  test("Chinese hanzi-only → ~0 ratio, looksJapanese false", () => {
+    const zh = "我是折木奉太郎，今天去了学校。";
+    expect(kanaRatio(zh)).toBe(0);
+    expect(looksJapanese([cue(zh)])).toBe(false);
+  });
+
+  test("mixed: mostly Chinese with stray katakana sign stays below threshold", () => {
+    const cues = [
+      cue("第一集 我们一起走吧 这是非常重要的事情"),
+      cue("我是侦探 这就是整个案件的真相所在 你听明白了吗"),
+      cue("如果我们不快点行动 那么所有的努力都将白费"),
+      cue("ロゴ"), // a lone katakana sign amid a wall of hanzi
+    ];
+    expect(kanaRatio(cues.map((c) => c.text).join("\n"))).toBeLessThan(JAPANESE_KANA_MIN);
+    expect(looksJapanese(cues)).toBe(false);
+  });
+
+  test("no kana/CJK at all → ratio 0, false", () => {
+    expect(kanaRatio("Hello World 123")).toBe(0);
+    expect(looksJapanese([cue("Hello World")])).toBe(false);
+  });
+
+  test("empty cue list → false", () => {
+    expect(looksJapanese([])).toBe(false);
+  });
+});
+
+describe("parseAss drops vector-drawing/sign lines", () => {
+  const header =
+    "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n";
+
+  test("\\p1 drawing dialogue is skipped, real dialogue kept", () => {
+    const ass =
+      header +
+      "Dialogue: 0,0:00:01.00,0:00:02.00,Sign,,0,0,0,,{\\p1}m 0 0 l 100 0 100 100 0 100{\\p0}\n" +
+      "Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,こんにちは\n";
+    const cues = parseAss(ass);
+    expect(cues).toHaveLength(1);
+    expect(cues[0]!.text).toBe("こんにちは");
   });
 });

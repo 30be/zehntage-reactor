@@ -29,6 +29,8 @@ import {
   languageName,
   parseSidecarTrackId,
   collapseRepeatedCues,
+  looksJapanese,
+  JAPANESE_KANA_MIN,
   type Cue,
   type SubTrack,
 } from "../lib/subs.ts";
@@ -84,6 +86,7 @@ import {
   downloadFile,
   pickConfidentEntry,
   fileMatchesEpisode,
+  rankJimakuCandidates,
   JimakuError,
 } from "../lib/jimaku.ts";
 import { showFrequency } from "../lib/mining.ts";
@@ -510,74 +513,104 @@ async function tryJimakuJa(library: Library, entry: LibraryEntry): Promise<boole
     return false;
   }
   const files = await listFiles(match.entry.id, episode);
-  const subFiles = files.filter((f) => /\.(srt|ass|ssa|vtt)$/i.test(f.name));
-  const candidate = subFiles.find((f) => fileMatchesEpisode(f.name, episode));
-  if (!candidate) {
+  // Build an ORDERED, best-first candidate list (prefer text formats + JA hints,
+  // demote Chinese fansubs) and require the episode to be pinned on the filename.
+  const candidates = rankJimakuCandidates(files).filter((f) =>
+    fileMatchesEpisode(f.name, episode),
+  );
+  if (candidates.length === 0) {
     void logEvent("jimaku_no_file", { mediaId: entry.id, entryId: match.entry.id, episode });
     return false;
   }
 
-  const ext = extname(candidate.name).toLowerCase() || ".srt";
-  const lang = jimakuLang(candidate.name); // "ja" unless suffixed
-  if (!isJapaneseLang(lang)) return false; // only fetch JA here
-  // Same external-sidecar convention as /api/jimaku/download: next to the
-  // video, NOT under subs/ — so origin=external (distinguishable from whisper).
-  const base = basename(entry.absPath, extname(entry.absPath));
-  const dest = join(dirname(entry.absPath), `${base}.${lang}${ext}`);
-  // Download to a temp path and only rename to the real sidecar AFTER the
-  // quality gate passes. A crash/failure must never leave an unvetted sidecar
-  // at `dest` (hasJapaneseTrack would then trust it forever).
-  const tmp = `${dest}.tmp-${process.pid}`;
-
-  await downloadFile(candidate.url, tmp);
-
-  // Quality / sync gate (run on the temp file).
-  let cues: Cue[];
-  try {
-    cues = parseSubtitleText(await Bun.file(tmp).text(), ext);
-  } catch {
-    await rm(tmp).catch(() => {});
-    void logEvent("anomaly.jimaku_reject", { mediaId: entry.id, reason: "unparseable" });
-    return false;
-  }
   const dur = await mediaDurationSec(entry.absPath);
   if (dur <= 0) {
     // ffprobe couldn't determine duration => coverage/overrun/late-start checks
     // are skipped (only cue-count + density apply). Surface it so a toothless
     // gate is visible, but don't hard-fail regen on an ffprobe hiccup.
-    void logEvent("anomaly.jimaku_no_duration", {
-      mediaId: entry.id,
-      file: candidate.name,
-    });
-  }
-  const q = subPassesQuality(cues, dur);
-  if (!q.ok) {
-    await rm(tmp).catch(() => {});
-    void logEvent("anomaly.jimaku_reject", {
-      mediaId: entry.id,
-      reason: q.reason,
-      file: candidate.name,
-    });
-    return false;
-  }
-  // Passed — atomically publish the vetted sub to its final sidecar path.
-  try {
-    await rename(tmp, dest);
-  } catch (e) {
-    await rm(tmp).catch(() => {});
-    void logEvent("anomaly.jimaku_reject", { mediaId: entry.id, reason: `rename failed: ${String(e)}` });
-    return false;
+    void logEvent("anomaly.jimaku_no_duration", { mediaId: entry.id });
   }
 
-  await library.refresh();
-  void logEvent("jimaku_auto", {
-    mediaId: entry.id,
-    entryId: match.entry.id,
-    file: candidate.name,
-    score: match.score,
-    reason: match.reason,
-  });
-  return true;
+  // Try candidates best-first. The first that passes ALL gates — episode pin
+  // (already filtered), quality/sync, AND the Japanese language guard — wins and
+  // is atomically published. Each rejection deletes its temp and falls through
+  // to the next; if none pass we return false → whisper fallback.
+  for (const candidate of candidates) {
+    const ext = extname(candidate.name).toLowerCase() || ".srt";
+    const lang = jimakuLang(candidate.name); // "ja" unless suffixed
+    if (!isJapaneseLang(lang)) continue; // only fetch JA-tagged tracks here
+    // Same external-sidecar convention as /api/jimaku/download: next to the
+    // video, NOT under subs/ — so origin=external (distinguishable from whisper).
+    const base = basename(entry.absPath, extname(entry.absPath));
+    const dest = join(dirname(entry.absPath), `${base}.${lang}${ext}`);
+    // Download to a temp path and only rename to the real sidecar AFTER every
+    // gate passes. A crash/failure must never leave an unvetted sidecar at
+    // `dest` (hasJapaneseTrack would then trust it forever).
+    const tmp = `${dest}.tmp-${process.pid}`;
+
+    await downloadFile(candidate.url, tmp);
+
+    let cues: Cue[];
+    try {
+      cues = parseSubtitleText(await Bun.file(tmp).text(), ext);
+    } catch {
+      await rm(tmp).catch(() => {});
+      void logEvent("anomaly.jimaku_reject", {
+        mediaId: entry.id,
+        reason: "unparseable",
+        file: candidate.name,
+      });
+      continue;
+    }
+
+    // Language guard (PRIMARY defense against Chinese fansubs): a real JA track
+    // is kana-heavy; Chinese hanzi-only subs score ~0. Reject below threshold.
+    if (!looksJapanese(cues)) {
+      await rm(tmp).catch(() => {});
+      void logEvent("anomaly.jimaku_reject", {
+        mediaId: entry.id,
+        reason: `not-japanese (kana<${JAPANESE_KANA_MIN})`,
+        file: candidate.name,
+      });
+      continue;
+    }
+
+    const q = subPassesQuality(cues, dur);
+    if (!q.ok) {
+      await rm(tmp).catch(() => {});
+      void logEvent("anomaly.jimaku_reject", {
+        mediaId: entry.id,
+        reason: q.reason,
+        file: candidate.name,
+      });
+      continue;
+    }
+
+    // Passed — atomically publish the vetted sub to its final sidecar path.
+    try {
+      await rename(tmp, dest);
+    } catch (e) {
+      await rm(tmp).catch(() => {});
+      void logEvent("anomaly.jimaku_reject", {
+        mediaId: entry.id,
+        reason: `rename failed: ${String(e)}`,
+        file: candidate.name,
+      });
+      continue;
+    }
+
+    await library.refresh();
+    void logEvent("jimaku_auto", {
+      mediaId: entry.id,
+      entryId: match.entry.id,
+      file: candidate.name,
+      score: match.score,
+      reason: match.reason,
+    });
+    return true;
+  }
+
+  return false;
 }
 
 /**

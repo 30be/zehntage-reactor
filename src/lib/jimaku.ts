@@ -324,3 +324,42 @@ export function pickConfidentEntry(
 export function fileMatchesEpisode(fileName: string, episode: number): boolean {
   return guessEpisode(fileName) === episode;
 }
+
+// --- candidate ordering (Japanese-track selection) --------------------------
+// jimaku entries frequently carry Chinese fansub uploads (星空字幕组 / XKsub:
+// Chinese text + ASS vector typesetting) alongside or instead of real JA subs.
+// Order candidates best-first so the language guard downstream rarely has to
+// reject; if the best truly is Chinese, the kana guard is the hard backstop.
+
+/** Signals (in the filename) that a sub is Japanese — boosts rank. */
+const JA_HINT = /(?:^|[._\-\s\[(])(?:ja|jp|jpn)(?:[._\-\s\])]|$)|日本語/i;
+/** Signals that a sub is Chinese (or otherwise non-JA) — demotes rank. */
+const CN_HINT =
+  /(?:^|[._\-\s\[(])(?:chs|cht|sc|tc|zh|zh-?(?:cn|hk|tw)|gb|big5)(?:[._\-\s\])]|$)|中文|简体|繁體|简|繁|星空|xksub/i;
+
+/**
+ * Score a single jimaku filename for "likely Japanese dialogue", higher = better.
+ *  +format: text formats (srt/vtt) over styled (ass/ssa) — less typesetting noise;
+ *  +language: explicit JA hint boosts, CN hint penalizes (penalty dominates a
+ *   format bonus so a CN .srt never outranks a JA .ass).
+ */
+export function scoreJimakuCandidate(fileName: string): number {
+  let score = 0;
+  if (/\.(srt|vtt)$/i.test(fileName)) score += 2;
+  else if (/\.(ass|ssa)$/i.test(fileName)) score += 0;
+  if (JA_HINT.test(fileName)) score += 10;
+  if (CN_HINT.test(fileName)) score -= 20;
+  return score;
+}
+
+/**
+ * Order subtitle files best-first for JA selection. Pure & stable: ties keep the
+ * original (server) order. Only `.srt/.vtt/.ass/.ssa` are considered subs.
+ */
+export function rankJimakuCandidates<T extends { name: string }>(files: T[]): T[] {
+  return files
+    .filter((f) => /\.(srt|ass|ssa|vtt)$/i.test(f.name))
+    .map((f, i) => ({ f, i, s: scoreJimakuCandidate(f.name) }))
+    .sort((a, b) => b.s - a.s || a.i - b.i)
+    .map((x) => x.f);
+}

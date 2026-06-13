@@ -164,17 +164,63 @@ export function parseAss(text: string): Cue[] {
       const end = parseTimestamp(get("End"));
       if (Number.isNaN(start) || Number.isNaN(end)) continue;
       // Text is everything from textIdx on (it may itself contain commas).
-      let body = parts.slice(textIdx).join(",");
-      body = body
+      const raw = parts.slice(textIdx).join(",");
+      // Drop vector-drawing dialogue (\p1..\p0 blocks): signs/typesetting, not
+      // speech. After stripping override tags the remaining body is just drawing
+      // commands (m/l/b/s/p coords), which would otherwise dilute the kana guard.
+      if (/\\p[1-9]/.test(raw)) continue;
+      let body = raw
         .replace(/\{[^}]*\}/g, "") // override tags
         .replace(/\\N|\\n/g, "\n")
         .replace(/\\h/g, " ")
         .trim();
+      // Leftover that is ONLY ASS drawing tokens (e.g. "m 0 0 l 10 0 b ...") —
+      // no letters/CJK at all — is a drawing fragment; skip it.
+      if (body && /^[\s\d.mlbspconMLBSPCON-]+$/.test(body) && /[a-z]/i.test(body)) {
+        continue;
+      }
       if (body) cues.push({ start, end, text: body });
     }
   }
   cues.sort((a, b) => a.start - b.start);
   return cues;
+}
+
+// --- language detection (jimaku non-Japanese guard) -------------------------
+
+/**
+ * Fraction of hiragana+katakana among all "scriptful" chars (kana + CJK
+ * ideographs). Japanese dialogue is kana-heavy (particles, okurigana,
+ * inflections); Chinese (even Chinese fansubs of anime) is hanzi-only with a
+ * kana ratio of ~0. Returns 0 when there are no kana/CJK chars at all.
+ *
+ *   Hiragana: U+3040–U+309F   Katakana: U+30A0–U+30FF
+ *   CJK ideographs: U+4E00–U+9FFF (+ ext A U+3400–U+4DBF)
+ */
+export function kanaRatio(text: string): number {
+  let kana = 0;
+  let cjk = 0;
+  for (const ch of text) {
+    const c = ch.codePointAt(0)!;
+    if ((c >= 0x3040 && c <= 0x30ff)) kana++;
+    else if ((c >= 0x4e00 && c <= 0x9fff) || (c >= 0x3400 && c <= 0x4dbf)) cjk++;
+  }
+  const total = kana + cjk;
+  return total === 0 ? 0 : kana / total;
+}
+
+/** Minimum kana ratio for a track to count as Japanese (rejects Chinese subs). */
+export const JAPANESE_KANA_MIN = 0.06;
+
+/**
+ * Heuristic: does this cue set look like Japanese (vs. a Chinese fansub)?
+ * Aggregates kana ratio over all cue text so a few katakana sign lines in an
+ * otherwise-Chinese file don't flip the verdict. Empty input → false.
+ */
+export function looksJapanese(cues: Cue[], minRatio = JAPANESE_KANA_MIN): boolean {
+  if (cues.length === 0) return false;
+  const all = cues.map((c) => c.text).join("\n");
+  return kanaRatio(all) >= minRatio;
 }
 
 export function parseSubtitleText(text: string, ext: string): Cue[] {

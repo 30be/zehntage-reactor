@@ -7,6 +7,8 @@ import {
   listFiles,
   downloadFile,
   loadJimakuApiKey,
+  scoreJimakuCandidate,
+  rankJimakuCandidates,
   JimakuError,
   type JimakuEntry,
   type JimakuFile,
@@ -213,5 +215,43 @@ describe("loadJimakuApiKey", () => {
     await Bun.write(envFile, 'JIMAKU_API_KEY="from-file"\n');
     expect(await loadJimakuApiKey(envFile)).toBe("from-file");
     await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("rankJimakuCandidates", () => {
+  const f = (name: string) => ({ name });
+
+  test("prefers a JA .srt over a Chinese .ass", () => {
+    const files = [
+      f("[XKsub] Hyouka - 01 [CHS].ass"),
+      f("Hyouka - 01 [ja].srt"),
+    ];
+    expect(rankJimakuCandidates(files).map((x) => x.name)).toEqual([
+      "Hyouka - 01 [ja].srt",
+      "[XKsub] Hyouka - 01 [CHS].ass",
+    ]);
+  });
+
+  test("demotes Chinese even when it is the text format", () => {
+    const files = [f("Hyouka.01.zh.srt"), f("Hyouka.01.ja.ass")];
+    expect(rankJimakuCandidates(files)[0]!.name).toBe("Hyouka.01.ja.ass");
+  });
+
+  test("non-subtitle files are dropped", () => {
+    expect(rankJimakuCandidates([f("readme.txt"), f("a.srt")]).map((x) => x.name)).toEqual([
+      "a.srt",
+    ]);
+  });
+
+  test("ties keep original order (stable)", () => {
+    const files = [f("a.srt"), f("b.srt")];
+    expect(rankJimakuCandidates(files).map((x) => x.name)).toEqual(["a.srt", "b.srt"]);
+  });
+
+  test("scoreJimakuCandidate: CN penalty beats format bonus", () => {
+    expect(scoreJimakuCandidate("x.ja.srt")).toBeGreaterThan(
+      scoreJimakuCandidate("x.chs.srt"),
+    );
+    expect(scoreJimakuCandidate("星空字幕组.ass")).toBeLessThan(0);
   });
 });
