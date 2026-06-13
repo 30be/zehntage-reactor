@@ -41,7 +41,6 @@ import { refreshAnkiWords, useAnkiWordsLive } from "./ankicache.ts";
 import { registerCommands } from "./commands.ts";
 import { rankPreStudy } from "./prestudy.ts";
 import { nextIPlusOne } from "./iplusone.ts";
-import { scoreDictation } from "./dictation.ts";
 import { isJaLang } from "./lang.ts";
 import { readKnownWords } from "./coverage.ts";
 import {
@@ -66,6 +65,8 @@ import { pickResumeTime } from "./player/resume.ts";
 import { usePlayerHotkeys } from "./player/useHotkeys.ts";
 import { useHudAutohide } from "./player/useHudAutohide.ts";
 import { useSubControls } from "./player/useSubControls.ts";
+import { useEcho } from "./player/useEcho.ts";
+import { useHoverPause } from "./player/useHoverPause.ts";
 import { LookupPanel } from "./player/LookupPanel.tsx";
 import {
   PreStudyPanel,
@@ -138,12 +139,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   // True while WE are performing the autopause seek-back, so the user-seek
   // detector below doesn't treat it as a manual seek.
   const internalSeekRef = useRef(false);
-  // True when the video was paused by a hover (word or secondary subtitle),
-  // so closing the popup / leaving the line auto-resumes playback.
-  const pausedByHoverRef = useRef(false);
-  // True while the cursor is over the secondary (RU) line: it holds the hover
-  // pause, so a word-popup close timer must NOT resume playback under it.
-  const secondaryHoveredRef = useRef(false);
   useEffect(() => {
     autopauseRef.current = autopause;
   }, [autopause]);
@@ -659,56 +654,19 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   // While the ask input is focused, the panel must not auto-close on hover-out.
   const askFocusedRef = useRef(false);
 
-  // hover-intent: open the popup only once the cursor RESTS on a word ~200ms;
-  // a separate grace timer hides it after the cursor leaves to empty space.
-  const openTimer = useRef<number | null>(null);
-  const closeTimer = useRef<number | null>(null);
-  const clearOpenTimer = useCallback(() => {
-    if (openTimer.current != null) {
-      window.clearTimeout(openTimer.current);
-      openTimer.current = null;
-    }
-  }, []);
-  const clearCloseTimer = useCallback(() => {
-    if (closeTimer.current != null) {
-      window.clearTimeout(closeTimer.current);
-      closeTimer.current = null;
-    }
-  }, []);
-
-  // --- hover-pause: pause while a popup / secondary line is being read, and
-  // resume only if WE were the ones who paused (not the user). ---
-  const pauseForHover = useCallback(() => {
-    const v = videoRef.current;
-    if (v && !v.paused) {
-      pausedByHoverRef.current = true;
-      v.pause();
-    }
-  }, []);
-  const resumeFromHover = useCallback(() => {
-    if (!pausedByHoverRef.current) return;
-    // The secondary line still holds the pause (user is reading the RU text);
-    // keep the flag so ITS mouseleave performs the resume.
-    if (secondaryHoveredRef.current) return;
-    pausedByHoverRef.current = false;
-    void videoRef.current?.play().catch(() => {});
-  }, []);
-  // Any play not initiated by us (user clicks the video, presses its controls)
-  // means the user took over — never auto-resume on top of that.
-  useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    const onPlay = () => {
-      pausedByHoverRef.current = false;
-      // Playback resuming closes a pinned panel (space, video controls, …).
-      if (pinnedRef.current) {
-        setPinned(false);
-        setPopup(null);
-      }
-    };
-    v.addEventListener("play", onPlay);
-    return () => v.removeEventListener("play", onPlay);
-  }, []);
+  // hover-to-pause engine (extracted). Owns openTimer/closeTimer +
+  // pausedByHoverRef/secondaryHoveredRef; pin/popup state stays in Player and
+  // is passed in so the play-takeover effect closes the pinned panel.
+  const {
+    pauseForHover,
+    resumeFromHover,
+    clearOpenTimer,
+    clearCloseTimer,
+    openTimer,
+    closeTimer,
+    pausedByHoverRef,
+    secondaryHoveredRef,
+  } = useHoverPause({ videoRef, pinnedRef, setPinned, setPopup });
 
   const [videoDuration, setVideoDuration] = useState(0);
   // The stage sizes itself to the video's native aspect ratio so there are
@@ -860,72 +818,27 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   // --- Wave 13.A: smart-resume — now AUTO-resumes on load (see onMeta below).
   // The old "resume at MM:SS? press z" affordance + `z` hotkey were removed.
 
-  // --- Wave 13.B: echo dictation mode (`e`) ---
-  const echoRef = useRef(false);
-  // when paused at a cue end in echo mode, this holds the cue being dictated
-  const [echoCue, setEchoCue] = useState<{ idx: number; text: string } | null>(null);
-  const echoCueRef = useRef<typeof echoCue>(null);
-  useEffect(() => {
-    echoCueRef.current = echoCue;
-  }, [echoCue]);
-  const [echoInput, setEchoInput] = useState("");
-  const [echoResult, setEchoResult] = useState<ReturnType<typeof scoreDictation> | null>(null);
-  const echoInputRef = useRef<HTMLInputElement | null>(null);
-  const toggleEcho = useCallback(() => {
-    const next = !echoRef.current;
-    echoRef.current = next;
-    if (!next) {
-      setEchoCue(null);
-      setEchoInput("");
-      setEchoResult(null);
-    }
-    toast(next ? "echo on" : "echo off");
-  }, [toast]);
-
-  // Echo input keys: Enter = check (then resume on a 2nd Enter), Esc = reveal,
-  // Tab = replay the cue audio. All intercepted so global hotkeys stay dead.
-  const onEchoKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLInputElement>) => {
-      const cue = echoCueRef.current;
-      const v = videoRef.current;
-      if (!cue || !v) return;
-      if (e.key === "Enter") {
-        if (e.nativeEvent.isComposing) return; // IME selection, not submit
-        e.preventDefault();
-        if (echoResult == null) {
-          const res = scoreDictation(cue.text, echoInput);
-          setEchoResult(res);
-          sessEchoRef.current.tried += 1;
-          if (res.total > 0 && res.correct === res.total)
-            sessEchoRef.current.perfect += 1;
-        } else {
-          // already revealed → resume playback into the next cue
-          setEchoCue(null);
-          setEchoInput("");
-          setEchoResult(null);
-          void v.play().catch(() => {});
-        }
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        // give up → reveal the answer (score against empty input)
-        if (echoResult == null) {
-          setEchoResult(scoreDictation(cue.text, echoInput));
-          sessEchoRef.current.tried += 1;
-        }
-      } else if (e.key === "Tab") {
-        e.preventDefault();
-        // replay the cue audio from its start, then keep the input focused
-        const c = displayCues[cue.idx];
-        if (c) {
-          internalSeekRef.current = true;
-          v.currentTime = Math.max(0, c.start + subOffsetRef.current);
-          void v.play().catch(() => {});
-        }
-      }
-    },
-    [echoInput, echoResult, displayCues],
-  );
+  // --- Wave 13.B: echo dictation mode (`e`) --- (extracted to useEcho)
+  // internalSeekRef + sessEchoRef stay Player-owned and are passed in.
+  const {
+    echoRef,
+    echoCue,
+    setEchoCue,
+    echoInput,
+    setEchoInput,
+    echoResult,
+    setEchoResult,
+    echoInputRef,
+    toggleEcho,
+    onEchoKeyDown,
+  } = useEcho({
+    videoRef,
+    displayCues,
+    subOffsetRef,
+    internalSeekRef,
+    sessEchoRef,
+    toast,
+  });
 
   // --- Wave 13.C: seek to the next i+1 cue (exactly one unknown token) ---
   const seekIPlusOne = useCallback(() => {
