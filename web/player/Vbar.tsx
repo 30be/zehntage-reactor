@@ -19,6 +19,7 @@ import {
   CaptionsIcon,
 } from "../icons.tsx";
 import { fmtTime, langLabel } from "./shared.ts";
+import { activeCueIndex } from "../cues.ts";
 
 export function Vbar({
   videoRef,
@@ -272,6 +273,15 @@ export function Vbar({
         )}
         <div ref={playedRef} className="seek-played" />
         <div ref={densityMarkerRef} className="density-marker" />
+        {seekHover && (() => {
+          const idx = activeCueIndex(displayCues, seekHover.t);
+          const jaText = idx >= 0 ? displayCues[idx]!.text : null;
+          return jaText ? (
+            <div className="seek-cue-tip" style={{ left: seekHover.x }}>
+              {jaText}
+            </div>
+          ) : null;
+        })()}
         {seekHover && (
           <div className="seek-tip" style={{ left: seekHover.x }}>
             {fmtTime(seekHover.t)}
