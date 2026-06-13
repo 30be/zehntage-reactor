@@ -246,6 +246,7 @@ export async function uploadImage(
     method: "POST",
     headers: { "Content-Type": mimeType },
     body: bytes,
+    signal: AbortSignal.timeout(30_000),
   });
   if (!resp.ok) {
     throw new Error(`anki-mcp upload error ${resp.status}: ${await resp.text()}`);
@@ -270,7 +271,7 @@ export async function uploadMedia(
   const { base } = await ankiBase();
   const form = new FormData();
   form.append("file", new Blob([bytes], { type: mimeType }), filename);
-  const resp = await fetch(`${base}/upload`, { method: "POST", body: form });
+  const resp = await fetch(`${base}/upload`, { method: "POST", body: form, signal: AbortSignal.timeout(30_000) });
   if (!resp.ok) {
     throw new Error(`anki-mcp upload error ${resp.status}: ${await resp.text()}`);
   }

@@ -262,9 +262,12 @@ function bustAnkiWordsCache(): void {
   ankiWordsGen++;
   ankiWordsCache = null;
   ankiWordsInflight = null; // detach a stale inflight — start fresh
+  ankiCardsGen++; // invalidate any cards refresh that started pre-mutation
   ankiCardsCache = null; // /api/anki/cards derives from listWords too
+  ankiCardsInflight = null; // detach a stale cards inflight — start fresh
   bustListWordsCache(); // shared listWords cache must not serve pre-mutation data
   void refreshAnkiWordsCache().catch(() => {});
+  void refreshAnkiCardsCache().catch(() => {});
 }
 
 // --- /api/anki/cards payload cache ---
@@ -278,9 +281,14 @@ interface AnkiCardsCacheEntry {
 }
 let ankiCardsCache: AnkiCardsCacheEntry | null = null;
 let ankiCardsInflight: Promise<AnkiCardsCacheEntry> | null = null;
+// Generation guard (mirrors ankiWordsGen): a bust invalidates any refresh that
+// STARTED before it, so a pre-mutation inflight can never repopulate the cache
+// with stale (pre-add/pre-delete) data.
+let ankiCardsGen = 0;
 
 function refreshAnkiCardsCache(): Promise<AnkiCardsCacheEntry> {
   if (!ankiCardsInflight) {
+    const gen = ankiCardsGen;
     const p = (async () => {
       const cards = (await listWords()).filter(
         (c) =>
@@ -297,7 +305,8 @@ function refreshAnkiCardsCache(): Promise<AnkiCardsCacheEntry> {
         })),
       );
       const entry: AnkiCardsCacheEntry = { body, ts: Date.now() };
-      ankiCardsCache = entry;
+      // A bust happened while we were fetching — this payload is stale.
+      if (gen === ankiCardsGen) ankiCardsCache = entry;
       return entry;
     })().finally(() => {
       if (ankiCardsInflight === p) ankiCardsInflight = null;
@@ -329,7 +338,10 @@ function ankiMediaGet(name: string): Uint8Array | undefined {
 
 function ankiMediaPut(name: string, bytes: Uint8Array): void {
   const existing = ankiMediaCache.get(name);
-  if (existing) ankiMediaBytes -= existing.byteLength;
+  if (existing) {
+    ankiMediaBytes -= existing.byteLength;
+    ankiMediaCache.delete(name); // re-insert so an overwrite moves it to MRU
+  }
   ankiMediaCache.set(name, bytes);
   ankiMediaBytes += bytes.byteLength;
   while (

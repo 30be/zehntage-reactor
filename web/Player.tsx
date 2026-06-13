@@ -1115,11 +1115,20 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       ? startAt
       : null,
   );
+  // Sticky flag: an explicit deep-link "@t" was provided for the CURRENT
+  // episode load. Unlike startAtRef (which is nulled once consumed), this stays
+  // true so the auto-resume path can never override the deep-link seek
+  // regardless of loadedmetadata handler ordering.
+  const hasDeepLinkRef = useRef(startAtRef.current != null);
+  useEffect(() => {
+    hasDeepLinkRef.current = false;
+  }, [entry.id]);
   // Re-navigating to the same episode with a new "@t" doesn't remount the
   // Player (key={entry.id} is unchanged), so consume prop changes here too.
   useEffect(() => {
     if (!(typeof startAt === "number" && Number.isFinite(startAt) && startAt >= 0)) return;
     const v = videoRef.current;
+    hasDeepLinkRef.current = true;
     if (v && v.readyState >= 1) {
       v.currentTime = Math.min(v.duration || Infinity, startAt);
       startAtRef.current = null;
@@ -1158,6 +1167,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       }
       // Auto-resume: no explicit deep-link, so jump to the saved position
       // once. Skips near-start (<15s) / near-end (within 10s of duration).
+      // An explicit deep-link "@t" ALWAYS wins: bail even if startAtRef was
+      // already consumed by the deep-link effect (handler-order independent).
+      if (hasDeepLinkRef.current) return;
       if (autoResumedRef.current) return;
       try {
         const saved = parseFloat(localStorage.getItem(posKey) ?? "");
@@ -1351,7 +1363,14 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       navBusyRef.current = true;
       try {
         const lib = await api.library();
-        const sorted = lib.slice().sort((a, b) => a.name.localeCompare(b.name));
+        const sorted = lib
+          .slice()
+          .sort((a, b) =>
+            a.name.localeCompare(b.name, undefined, {
+              numeric: true,
+              sensitivity: "base",
+            }),
+          );
         const i = sorted.findIndex((e) => e.id === entry.id);
         const next = i >= 0 ? sorted[i + dir] : undefined;
         if (!next) {
@@ -1874,7 +1893,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     setLookupFromDeck(false);
     // Cache key includes the cue context so the same word in a NEW sentence
     // gets a fresh, context-correct answer instead of a stale cached one.
-    const cacheKey = `${popup.surface} ${popup.context}`;
+    const cacheKey = `${popup.surface} ${popup.context} :: ${popup.secondary ?? ""}`;
     const cached = lookupCache.current.get(cacheKey);
     if (cached) {
       setLookup(cached);
@@ -1933,7 +1952,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         source: entry.name,
         noCache: true,
       });
-      lookupCache.current.set(`${popup.surface} ${popup.context}`, res);
+      lookupCache.current.set(`${popup.surface} ${popup.context} :: ${popup.secondary ?? ""}`, res);
       setLookup(res);
       setLookupFromDeck(false);
     } catch (e) {
