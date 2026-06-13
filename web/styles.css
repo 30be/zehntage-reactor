@@ -320,10 +320,10 @@ textarea.prompt {
   font-size: 0.5em;
   font-weight: 600;
   line-height: 1;
-  border: 1px solid rgba(255, 255, 255, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.45);
   border-radius: 50%;
   color: #fff;
-  opacity: 0.72;
+  opacity: 0.4;
   cursor: pointer;
   vertical-align: middle;
   transition: opacity 0.12s;
@@ -393,9 +393,15 @@ textarea.prompt {
   max-width: 360px;
 }
 .continue-name {
+  flex: 1;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.continue-card .badge {
+  flex: none;
+  white-space: nowrap;
 }
 
 /* ---- pinned lookup panel (click-to-pin; appended) ---- */

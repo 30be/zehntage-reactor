@@ -31,6 +31,15 @@ describe("blankOut", () => {
   test("missing surface leaves text untouched", () => {
     expect(blankOut("あいう", "xyz")).toBe("あいう");
   });
+  test("blanks the lexical core, not the surrounding brackets", () => {
+    // a wrapped surface must not leave a dangling bracket like `＿＿＿音楽]`
+    expect(blankOut("[音楽]", "音楽")).toBe(`[${BLANK}]`);
+    expect(blankOut("「本」", "「本」")).toBe(`「${BLANK}」`);
+    expect(blankOut("[音楽]", "[音楽]")).toBe(`[${BLANK}]`);
+  });
+  test("never blanks a punctuation-only surface", () => {
+    expect(blankOut("[音楽]", "[")).toBe("[音楽]");
+  });
 });
 
 describe("pickClozeWord", () => {
@@ -52,6 +61,13 @@ describe("pickClozeWord", () => {
   test("returns null with no content words", () => {
     expect(pickClozeWord({ text: "。", words: [] }, new Set(), new Set())).toBeNull();
   });
+  test("rejects punctuation/bracket-only surfaces", () => {
+    // a cue tokenized into nothing but bracket chars has no lexical word
+    const cue: QuizCue = { text: "[音楽]", words: [w("["), w("音楽"), w("]")] };
+    expect(pickClozeWord(cue, new Set(), new Set())?.surface).toBe("音楽");
+    const onlyBrackets: QuizCue = { text: "[]", words: [w("["), w("]")] };
+    expect(pickClozeWord(onlyBrackets, new Set(), new Set())).toBeNull();
+  });
 });
 
 describe("normalizeAnswer / checkCloze", () => {
@@ -61,6 +77,16 @@ describe("normalizeAnswer / checkCloze", () => {
   test("checkCloze tolerant match", () => {
     expect(checkCloze(" 図書館 ", "図書館")).toBe(true);
     expect(checkCloze("ちがう", "図書館")).toBe(false);
+  });
+  test("strips brackets/punctuation from a guess", () => {
+    expect(normalizeAnswer("[音楽]")).toBe("音楽");
+    expect(normalizeAnswer("[")).toBe("");
+  });
+  test("a punctuation-only guess is never correct", () => {
+    // bogus input like a lone "[" must not score correct against anything
+    expect(checkCloze("[", "[音楽]")).toBe(false);
+    expect(checkCloze("　", "本")).toBe(false);
+    expect(checkCloze("！？", "！？")).toBe(false);
   });
 });
 
@@ -120,6 +146,34 @@ describe("buildQuiz", () => {
 
   test("skips empty cues and produces nothing from junk", () => {
     expect(buildQuiz([{ text: "  " }], { seed: 1 })).toEqual([]);
+  });
+
+  test("a purely bracketed non-speech cue produces no quiz", () => {
+    // [音楽] / （笑） / ♪ / (applause) carry no lexical content → no cloze, and
+    // the prompt must never come out mangled like `＿＿＿音楽]`.
+    const annotations: QuizCue[] = [
+      { text: "[音楽]", words: [w("["), w("音楽"), w("]")] },
+      { text: "（笑）", words: [w("（"), w("笑"), w("）")] },
+      { text: "♪" },
+      { text: "(applause)" },
+    ];
+    for (const cue of annotations) {
+      expect(buildQuiz([cue], { seed: 1 })).toEqual([]);
+    }
+  });
+
+  test("blanks a real word in speech that contains brackets, no stray bracket", () => {
+    // real speech (not a pure annotation) that quotes a word: the blank must
+    // land on the lexical core and never leave a dangling bracket.
+    const cue: QuizCue = {
+      text: "彼は「本」と言った。",
+      words: [w("彼"), w("本"), w("言っ", "言う")],
+    };
+    const items = buildQuiz([cue], { seed: 1, deck: new Set(["本"]) });
+    expect(items).toHaveLength(1);
+    const it = items[0] as ClozeItem;
+    expect(it.answer).toBe("本");
+    expect(it.prompt).toBe(`彼は「${BLANK}」と言った。`);
   });
 
   test("never exceeds available material", () => {

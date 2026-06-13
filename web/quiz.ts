@@ -48,6 +48,45 @@ export type QuizItem = ClozeItem | McItem;
 
 export const BLANK = "＿＿＿";
 
+// Bracket/quote/musical wrappers mark non-speech subtitle annotations
+// ([音楽], （笑）, ♪, (applause), 「…」 …): "[]【】（）()「」『』♪〜~" and friends.
+// We never blank these out and a cue made up entirely of them (or other
+// punctuation) carries no lexical content to quiz on.
+// Anything that is NOT a "real word" character: brackets, punctuation, spaces.
+// Used to reject punctuation-only guesses and punctuation-only surfaces. We
+// keep letters/digits of any script (Unicode \p{L}\p{N}) plus the JP long mark.
+const NON_LEXICAL = /[^\p{L}\p{N}ー]+/gu;
+
+/** A surface is lexical if it contains at least one letter/digit (i.e. there's
+ *  something to recall once brackets/punctuation are stripped). */
+function hasLexicalContent(s: string): boolean {
+  return s.replace(NON_LEXICAL, "").length > 0;
+}
+
+// Recognized open→close bracket pairs for non-speech annotations.
+const BRACKET_PAIRS: Record<string, string> = {
+  "[": "]", "【": "】", "（": "）", "(": ")",
+  "「": "」", "『": "』",
+};
+
+/** True if the whole cue is a non-speech bracketed annotation ([音楽], （笑）,
+ *  (applause), 「…」, ♪ …) — i.e. nothing but a single wrapped span or pure
+ *  musical/ornamental marks, with no speech around it. */
+function isNonSpeechAnnotation(text: string): boolean {
+  const t = text.trim();
+  if (t.length === 0) return false;
+  // pure musical/ornamental marks (♪, 〜, ~) with no lexical content
+  if (!hasLexicalContent(t)) return true;
+  // a single fully-wrapped span: opens with a bracket, closes with its match,
+  // and the inside contains no further closing bracket of that pair.
+  const close = BRACKET_PAIRS[t[0]!];
+  if (close && t.endsWith(close)) {
+    const inner = t.slice(1, -1);
+    if (!inner.includes(close)) return true;
+  }
+  return false;
+}
+
 // Small deterministic PRNG (mulberry32) so generation is seedable + testable.
 function rng(seed: number): () => number {
   let a = seed >>> 0;
@@ -89,7 +128,9 @@ export function pickClozeWord(
   deck: Set<string>,
   known: Set<string>,
 ): { surface: string; lemma: string } | null {
-  const words = (cue.words ?? []).filter((w) => w.surface.length > 0);
+  // Only real words are eligible: a surface that is purely brackets/punctuation
+  // (e.g. a "[" token, or a 「 from a wrapped annotation) carries no content.
+  const words = (cue.words ?? []).filter((w) => hasLexicalContent(w.surface));
   if (words.length === 0) return null;
   const inDeck = words.find((w) => deck.has(w.lemma));
   if (inDeck) return inDeck;
@@ -101,11 +142,22 @@ export function pickClozeWord(
   return unknown ?? longest;
 }
 
-/** Replace the FIRST occurrence of `surface` in `text` with BLANK. */
+/** Replace the FIRST occurrence of `surface` in `text` with BLANK. Only the
+ *  lexical core of `surface` is blanked: leading/trailing wrapper or punctuation
+ *  characters stay in the prompt so we never leave a dangling bracket and never
+ *  blank a non-word. Returns the text unchanged if there's nothing to blank. */
 export function blankOut(text: string, surface: string): string {
-  const i = text.indexOf(surface);
+  // strip wrapper/punctuation off the ends so we blank the word, not its frame
+  const core = trimWrappers(surface);
+  if (core.length === 0 || !hasLexicalContent(core)) return text;
+  const i = text.indexOf(core);
   if (i < 0) return text;
-  return text.slice(0, i) + BLANK + text.slice(i + surface.length);
+  return text.slice(0, i) + BLANK + text.slice(i + core.length);
+}
+
+/** Strip leading/trailing wrapper + punctuation characters from a surface. */
+function trimWrappers(s: string): string {
+  return s.replace(/^[^\p{L}\p{N}ー]+/u, "").replace(/[^\p{L}\p{N}ー]+$/u, "");
 }
 
 /**
@@ -155,26 +207,34 @@ export function buildQuiz(cues: QuizCue[], opts: QuizOptions = {}): QuizItem[] {
       continue;
     }
 
+    // A cue that is purely a bracketed non-speech annotation ([音楽], （笑）, ♪,
+    // (applause)) is not real speech → never a cloze.
+    if (isNonSpeechAnnotation(cue.text)) continue;
     const word = pickClozeWord(cue, deck, known);
     if (word) {
-      items.push({
-        kind: "cloze",
-        prompt: blankOut(cue.text, word.surface),
-        answer: word.surface,
-        translation: tr,
-      });
+      const answer = trimWrappers(word.surface);
+      const prompt = blankOut(cue.text, word.surface);
+      // only emit if we actually blanked something out (prompt changed)
+      if (answer.length > 0 && prompt !== cue.text) {
+        items.push({ kind: "cloze", prompt, answer, translation: tr });
+      }
     }
   }
 
   return items;
 }
 
-/** Normalize a free-text cloze answer for tolerant comparison. */
+/** Normalize a free-text cloze answer for tolerant comparison. Strips all
+ *  whitespace, brackets and punctuation so only lexical characters remain; a
+ *  punctuation-only guess (e.g. "[") normalizes to the empty string. */
 export function normalizeAnswer(s: string): string {
-  return s.trim().replace(/\s+/g, "").toLowerCase();
+  return s.replace(NON_LEXICAL, "").toLowerCase();
 }
 
-/** True if a typed cloze answer matches the expected surface. */
+/** True if a typed cloze answer matches the expected surface. An empty
+ *  normalized guess (whitespace/punctuation only) is never correct. */
 export function checkCloze(typed: string, answer: string): boolean {
-  return normalizeAnswer(typed) === normalizeAnswer(answer);
+  const t = normalizeAnswer(typed);
+  if (t.length === 0) return false;
+  return t === normalizeAnswer(answer);
 }
