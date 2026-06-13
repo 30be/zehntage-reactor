@@ -706,6 +706,19 @@ function JimakuFind({
 }
 
 function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) => void }) {
+  const [retranslating, setRetranslating] = useState<Set<string>>(() => new Set());
+  const doRetranslate = useCallback(async (id: string, ev: React.MouseEvent) => {
+    ev.stopPropagation();
+    setRetranslating((s) => new Set(s).add(id));
+    try {
+      await api.retranslate(id);
+      toast("Re-translation started");
+    } catch (err) {
+      toast(`Re-translate failed: ${err instanceof Error ? err.message : err}`);
+    } finally {
+      setRetranslating((s) => { const n = new Set(s); n.delete(id); return n; });
+    }
+  }, [toast]);
   const [entries, setEntries] = useState<LibraryEntry[] | null>(null);
   // --- transcript search (debounced 300ms; Esc clears) ---
   const [query, setQuery] = useState("");
@@ -1041,6 +1054,16 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
                   >
                     {Math.round(knownPct.get(e.id)! * 100)}% known
                   </span>
+                )}
+                {e.subLangs.includes("ja") && (
+                  <button
+                    className="retranslate-btn muted"
+                    title="Re-translate Russian subtitles from the Japanese track"
+                    disabled={retranslating.has(e.id)}
+                    onClick={(ev) => void doRetranslate(e.id, ev)}
+                  >
+                    {retranslating.has(e.id) ? "…" : "↻ru"}
+                  </button>
                 )}
               </div>
             </div>
