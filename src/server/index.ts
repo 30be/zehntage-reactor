@@ -654,7 +654,7 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         const info = await checkCodecs(entry.absPath).catch(() => null);
         if (info && !info.chromeCompatible) {
           const t = parseFloat(url.searchParams.get("t") ?? "0") || 0;
-          return remuxToFmp4(entry.absPath, t, info);
+          return remuxToFmp4(entry.absPath, t, info, req.signal);
         }
         return serveFileWithRange(entry.absPath, req.headers.get("Range"));
       }

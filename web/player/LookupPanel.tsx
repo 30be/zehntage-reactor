@@ -2,6 +2,7 @@
 // Q/A thread and the ask… input. Pure presentation — lookup/explain fetching
 // and popup state live in Player.tsx. Extracted from Player.tsx.
 
+import { useEffect } from "react";
 import type { EncounterHit, ExplainResult, WordLookup } from "../api.ts";
 import { AccentReading } from "../TokenLine.tsx";
 import { accentOf } from "../accent.ts";
@@ -67,11 +68,25 @@ export function LookupPanel({
   onAsk: () => void;
   onClose: () => void;
 }) {
+  useEffect(() => {
+    // a11y: auto-focus the first focusable child (or the panel itself) on open
+    // so keyboard users land inside the dialog. The panel is unmounted/remounted
+    // on each open, so this runs once per open.
+    const first = lookupRef.current?.querySelector<HTMLElement>(
+      'button,input,[tabindex]:not([tabindex="-1"])',
+    );
+    (first ?? lookupRef.current)?.focus();
+  }, [lookupRef]);
+
   return (
     <div
       ref={lookupRef}
       className={`lookup${pinned ? " pinned" : ""}`}
       style={popupPos}
+      role="dialog"
+      aria-label="Word lookup"
+      aria-modal="true"
+      tabIndex={-1}
       onMouseEnter={onPanelEnter}
       onMouseLeave={onPanelLeave}
     >

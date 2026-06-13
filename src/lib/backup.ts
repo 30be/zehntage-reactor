@@ -222,6 +222,24 @@ export async function restoreBackup(tarPath: string): Promise<RestoreResult> {
   }
   const staging = await mkdtemp(join(tmpdir(), "zr-restore-"));
   try {
+    // Path-traversal guard: list entries before extracting and reject any
+    // that contain ".." segments or start with "/" (absolute paths).
+    const listProc = Bun.spawn(["tar", "-tzf", tarPath], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const listCode = await listProc.exited;
+    if (listCode !== 0) {
+      const err = await new Response(listProc.stderr).text();
+      throw new Error(`tar -tzf failed (exit ${listCode}): ${err.trim()}`);
+    }
+    const listing = await new Response(listProc.stdout).text();
+    for (const entry of listing.split("\n")) {
+      if (!entry) continue;
+      if (entry.startsWith("/") || entry.split("/").includes("..")) {
+        throw new Error(`Refusing to extract archive: unsafe path "${entry}"`);
+      }
+    }
     await runTar(["-xzf", tarPath, "-C", staging]);
 
     let manifest: BackupManifest | null = null;

@@ -38,8 +38,8 @@ export function logEvent(
 export function logEvents(events: TelemetryEvent[]): Promise<void> {
   if (events.length === 0) return Promise.resolve();
   const lines = events
-    .filter((e) => e && typeof e.type === "string")
-    .map((e) => JSON.stringify({ ...e, ts: typeof e.ts === "number" ? e.ts : Date.now() }))
+    .filter((e) => e && typeof e.type === "string" && Number.isFinite(e.ts) && e.ts > 0)
+    .map((e) => JSON.stringify({ ...e, ts: e.ts }))
     .join("\n");
   if (!lines) return Promise.resolve();
   const file = eventsFilePath();
@@ -131,6 +131,7 @@ export function summarizeEvents(events: TelemetryEvent[]): StatsSummary {
   };
 
   for (const e of events) {
+    if (!Number.isFinite(e.ts)) continue;
     const d = day(e.ts);
     const id = typeof e.mediaId === "string" ? e.mediaId : null;
     if (id) d.media.add(id);

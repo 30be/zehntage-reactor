@@ -206,9 +206,11 @@ class WhisperQueue {
     // The temp wav is removed in `finally` on EVERY exit path (cancel during
     // extraction, ffmpeg/whisper errors, success) — no leaked wavs in tmpdir.
     try {
-      if ((await ff.exited) !== 0) {
+      const ffStderr = new Response(ff.stderr as ReadableStream).text();
+      const [ffCode, ffErrText] = await Promise.all([ff.exited, ffStderr]);
+      if (ffCode !== 0) {
         if (job.canceled) return;
-        throw new Error(`ffmpeg audio extraction failed: ${await new Response(ff.stderr as ReadableStream).text()}`);
+        throw new Error(`ffmpeg audio extraction failed: ${ffErrText}`);
       }
       if (job.canceled) return;
 
@@ -264,6 +266,7 @@ class WhisperQueue {
     );
     job.proc = proc;
     const passCues: Cue[] = [];
+    const stderrPromise = new Response(proc.stderr as ReadableStream).text();
     const decoder = new TextDecoder();
     let buffer = "";
     for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
@@ -280,10 +283,10 @@ class WhisperQueue {
         }
       }
     }
-    const code = await proc.exited;
+    const [code, stderrText] = await Promise.all([proc.exited, stderrPromise]);
     if (!job.canceled && code !== 0) {
       throw new Error(
-        `whisper-cli exited with ${code}: ${(await new Response(proc.stderr as ReadableStream).text()).slice(0, 300)}`,
+        `whisper-cli exited with ${code}: ${stderrText.slice(0, 300)}`,
       );
     }
     return passCues;

@@ -129,7 +129,7 @@ export function parseSrt(text: string): Cue[] {
     const cleaned = stripHtmlishTags(body);
     if (cleaned) cues.push({ start, end, text: cleaned });
   }
-  return cues;
+  return cues.sort((a, b) => a.start - b.start);
 }
 
 export function parseVtt(text: string): Cue[] {
@@ -432,7 +432,10 @@ export async function probeStreams(file: string): Promise<FfprobeStream[]> {
     ["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", file],
     { stdout: "pipe", stderr: "pipe" },
   );
-  const out = await new Response(proc.stdout).text();
+  const [out] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
   if ((await proc.exited) !== 0) throw new Error(`ffprobe failed for ${file}`);
   const data = JSON.parse(out) as { streams?: FfprobeStream[] };
   return data.streams ?? [];
@@ -491,9 +494,11 @@ export async function extractEmbeddedTrack(
     ],
     { stdout: "pipe", stderr: "pipe" },
   );
-  const out = await new Response(proc.stdout).text();
+  const [out, err] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
   if ((await proc.exited) !== 0) {
-    const err = await new Response(proc.stderr).text();
     throw new Error(`ffmpeg subtitle extraction failed: ${err.slice(0, 300)}`);
   }
   if (key != null) {

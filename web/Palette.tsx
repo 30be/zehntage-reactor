@@ -35,6 +35,9 @@ export function Palette({ go, toast, settings, setSettings }: Props) {
   const [q, setQ] = useState("");
   const [sel, setSel] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const prevFocusRef = useRef<HTMLElement | null>(null);
+  const paletteRef = useRef<HTMLDivElement>(null);
+  const sheetDialogRef = useRef<HTMLDivElement>(null);
   // bump to re-read the registry when scopes register/unregister while open
   const [, setTick] = useState(0);
   useEffect(() => onCommandsChange(() => setTick((t) => t + 1)), []);
@@ -55,6 +58,14 @@ export function Palette({ go, toast, settings, setSettings }: Props) {
     setOpen(false);
     setQ("");
     setSel(0);
+    prevFocusRef.current?.focus();
+    prevFocusRef.current = null;
+  }, []);
+
+  const closeSheet = useCallback(() => {
+    setSheet(false);
+    prevFocusRef.current?.focus();
+    prevFocusRef.current = null;
   }, []);
 
   // settings quickies write through the same saveSettings + setSettings pair
@@ -167,7 +178,7 @@ export function Palette({ go, toast, settings, setSettings }: Props) {
         if (sheetRef.current) {
           e.preventDefault();
           e.stopPropagation();
-          setSheet(false);
+          closeSheet();
         } else if (openRef.current) {
           e.preventDefault();
           e.stopPropagation();
@@ -190,11 +201,21 @@ export function Palette({ go, toast, settings, setSettings }: Props) {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [close]);
+  }, [close, closeSheet]);
 
   useEffect(() => {
-    if (open) inputRef.current?.focus();
+    if (open) {
+      prevFocusRef.current = document.activeElement as HTMLElement;
+      inputRef.current?.focus();
+    }
   }, [open]);
+
+  useEffect(() => {
+    if (sheet) {
+      prevFocusRef.current = document.activeElement as HTMLElement;
+      sheetDialogRef.current?.querySelector<HTMLElement>("button")?.focus();
+    }
+  }, [sheet]);
 
   if (!open && !sheet) return null;
 
@@ -206,10 +227,30 @@ export function Palette({ go, toast, settings, setSettings }: Props) {
       {open && (
         <div className="palette-backdrop" onMouseDown={close}>
           <div
+            ref={paletteRef}
             className="palette"
             role="dialog"
             aria-label="Command palette"
+            aria-modal="true"
             onMouseDown={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") { close(); return; }
+              if (e.key === "Tab") {
+                const focusable = paletteRef.current
+                  ? Array.from(paletteRef.current.querySelectorAll<HTMLElement>(
+                      'button,input,[tabindex]:not([tabindex="-1"])'
+                    ))
+                  : [];
+                if (focusable.length === 0) { e.preventDefault(); return; }
+                const first = focusable[0]!;
+                const last = focusable[focusable.length - 1]!;
+                if (e.shiftKey && document.activeElement === first) {
+                  e.preventDefault(); last.focus();
+                } else if (!e.shiftKey && document.activeElement === last) {
+                  e.preventDefault(); first.focus();
+                }
+              }
+            }}
           >
             <input
               ref={inputRef}
@@ -230,6 +271,9 @@ export function Palette({ go, toast, settings, setSettings }: Props) {
                 } else if (e.key === "Enter") {
                   e.preventDefault();
                   run(commands[sel]);
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  close();
                 }
               }}
             />
@@ -253,14 +297,27 @@ export function Palette({ go, toast, settings, setSettings }: Props) {
         </div>
       )}
       {sheet && (
-        <div className="palette-backdrop" onMouseDown={() => setSheet(false)}>
+        <div className="palette-backdrop" onMouseDown={closeSheet}>
           <div
+            ref={sheetDialogRef}
             className="cheatsheet"
             role="dialog"
             aria-label="Hotkeys"
+            aria-modal="true"
             onMouseDown={(e) => e.stopPropagation()}
+            onKeyDown={(e) => { if (e.key === "Escape") closeSheet(); }}
           >
-            <div className="cheat-title">hotkeys</div>
+            <div className="cheat-title">
+              hotkeys
+              <button
+                type="button"
+                className="cheat-close"
+                aria-label="Close hotkey reference"
+                onClick={closeSheet}
+              >
+                ✕
+              </button>
+            </div>
             <div className="cheat-cols">
               {(["player", "read", "global"] as const).map((scope) => (
                 <div key={scope} className="cheat-col">

@@ -86,13 +86,14 @@ function CueRow({
 
   return (
     <div ref={rowRef} className={`cue-row${active ? " active" : ""}`}>
-      <span
+      <button
+        type="button"
         className="cue-time"
-        title="Jump to this line"
+        aria-label={`Jump to ${fmtTime(cue.start)}`}
         onClick={onSeek}
       >
         {fmtTime(cue.start)}
-      </span>
+      </button>
       <div className="cue-body">
         <div className="cue-text">
           <TokenLine
@@ -109,13 +110,18 @@ function CueRow({
             onWordClick={(tok, e) => onWordClick(tok, e, cue.text)}
           />
           {secondary && (
-            <span
+            <button
+              type="button"
               className="cue-sec-q"
+              aria-label="Show translation"
+              aria-expanded={secShown}
               onMouseEnter={() => setSecShown(true)}
               onMouseLeave={() => setSecShown(false)}
+              onFocus={() => setSecShown(true)}
+              onBlur={() => setSecShown(false)}
             >
               ?{secShown && <span className="cue-sec">{secondary}</span>}
-            </span>
+            </button>
           )}
         </div>
       </div>

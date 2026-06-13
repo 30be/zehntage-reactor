@@ -36,9 +36,17 @@ export function QuizPanel({
   const [choice, setChoice] = useState<number | null>(null);
   const [typed, setTyped] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const prevFocusRef = useRef<HTMLElement | null>(null);
 
   const done = idx >= items.length;
   const item = items[idx];
+
+  // save focus on mount, restore on unmount
+  useEffect(() => {
+    prevFocusRef.current = document.activeElement as HTMLElement;
+    return () => { prevFocusRef.current?.focus(); };
+  }, []);
 
   // report the score exactly once, when the run finishes
   const reportedRef = useRef(false);
@@ -143,7 +151,30 @@ export function QuizPanel({
   }, [done, answered, item, choice, answerMc, answerCloze, next, onClose, onRetry]);
 
   return (
-    <div className="quiz-overlay" role="dialog" aria-label="comprehension quiz">
+    <div
+      ref={overlayRef}
+      className="quiz-overlay"
+      role="dialog"
+      aria-label="Comprehension quiz"
+      aria-modal="true"
+      onKeyDown={(e) => {
+        if (e.key === "Tab") {
+          const focusable = overlayRef.current
+            ? Array.from(overlayRef.current.querySelectorAll<HTMLElement>(
+                'button,input,[tabindex]:not([tabindex="-1"])'
+              ))
+            : [];
+          if (focusable.length === 0) { e.preventDefault(); return; }
+          const first = focusable[0]!;
+          const last = focusable[focusable.length - 1]!;
+          if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault(); last.focus();
+          } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault(); first.focus();
+          }
+        }
+      }}
+    >
       <div className="quiz-card">
         {done ? (
           <div className="quiz-end">

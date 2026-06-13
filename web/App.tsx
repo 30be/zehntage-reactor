@@ -240,7 +240,7 @@ function entryBadge(status: BatchStatus | null, entryId: string): string | null 
   if (t?.status === "running") return "translating…";
   if (t?.status === "queued") return "translate queued";
   if (w?.status === "error" || t?.status === "error") return "error";
-  if (w?.status === "done" || t?.status === "done") return "✓";
+  if (w?.status === "done" && (!t || t.status === "done")) return "✓";
   return null;
 }
 
@@ -687,6 +687,8 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
   const [sortBusy, setSortBusy] = useState(false);
   // entryId -> count of due Anki words appearing in the episode (SRS hint)
   const [dueCounts, setDueCounts] = useState<Map<string, number>>(() => new Map());
+  // shared anki word list — fetched once, reused by dueCounts effect and toggleSort
+  const [ankiData, setAnkiData] = useState<Awaited<ReturnType<typeof api.ankiWords>> | null>(null);
   // "study next" curriculum hint: a quiet toggle that marks the single
   // best-learning-value episode, derived from the coverage already computed in
   // idle time (web/curriculum.ts ranking — no extra fetch).
@@ -701,6 +703,43 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
     return studyNext(signals);
   }, [entries, coverage]);
 
+  // true once coverage has data for at least one entry — distinguishes
+  // "still computing" from "genuinely no recommendation"
+  const studyNextReady = coverage.size > 0;
+
+  // --- continue watching: most-recent episodes with a resume position ---
+  const continueWatching = useMemo(
+    () =>
+      pickContinueWatching(readResumeRecords((entries ?? []).map((e) => e.id)))
+        .map((r) => ({ rec: r, entry: (entries ?? []).find((e) => e.id === r.id) }))
+        .filter((x): x is { rec: typeof x.rec; entry: LibraryEntry } => !!x.entry),
+    [entries],
+  );
+
+  const savedPositions = useMemo(
+    () => new Map((entries ?? []).map((e) => [e.id, savedPos(e.id)])),
+    [entries],
+  );
+
+  const ordered = useMemo(() => {
+    const base = entries ?? [];
+    let o =
+      sortMode === "known" && knownPct
+        ? base
+            .slice()
+            .sort(
+              (a, b) =>
+                (knownPct.get(b.id) ?? -1) - (knownPct.get(a.id) ?? -1),
+            )
+        : base;
+    if (showStudyNext && studyNextId) {
+      const rest = o.filter((e) => e.id !== studyNextId);
+      const top = o.find((e) => e.id === studyNextId);
+      o = top ? [top, ...rest] : o;
+    }
+    return o;
+  }, [entries, sortMode, knownPct, showStudyNext, studyNextId]);
+
   const toggleSort = useCallback(async () => {
     if (sortMode === "known") {
       setSortMode("name");
@@ -711,7 +750,8 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
     setSortBusy(true);
     try {
       // known set = local zr.known + Anki card lemmas (front sans reading)
-      const anki = await api.ankiWords().catch(() => ({ words: [], progress: {} }));
+      const anki = ankiData ?? await api.ankiWords().catch(() => ({ words: [], progress: {} }));
+      if (!ankiData) setAnkiData(anki as Awaited<ReturnType<typeof api.ankiWords>>);
       const known = new Set<string>([...readKnownWords(), ...readBlacklist()]);
       for (const w of anki.words) known.add(w.front.replace(/\s*\[.*$/, "").trim());
       const rows = await api.indexComprehensibility([...known]);
@@ -721,7 +761,7 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
     } finally {
       setSortBusy(false);
     }
-  }, [sortMode, knownPct, sortBusy]);
+  }, [sortMode, knownPct, sortBusy, ankiData]);
 
   // SRS hint badges: due-word intersection per entry. Due info is BEST-EFFORT
   // approximated from Anki progress (interval > 0 && queue in {1,2}) because
@@ -732,6 +772,7 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
     void (async () => {
       const anki = await api.ankiWords().catch(() => null);
       if (!anki || cancelled) return;
+      if (!cancelled) setAnkiData(anki);
       const dueFronts = anki.words
         .map((w) => w.front)
         .filter((f) => {
@@ -825,13 +866,6 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
       </>
     );
 
-  // --- continue watching: most-recent episodes with a resume position ---
-  const continueWatching = pickContinueWatching(
-    readResumeRecords(entries.map((e) => e.id)),
-  )
-    .map((r) => ({ rec: r, entry: entries.find((e) => e.id === r.id) }))
-    .filter((x): x is { rec: typeof x.rec; entry: LibraryEntry } => !!x.entry);
-
   return (
     <>
       <h1 className="h1">Library</h1>
@@ -857,6 +891,7 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
       <input
         className="search-input"
         type="text"
+        aria-label="Search library"
         placeholder="search transcripts…"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
@@ -903,29 +938,11 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
           aria-pressed={showStudyNext}
           onClick={() => setShowStudyNext((v) => !v)}
         >
-          study next{showStudyNext && !studyNextId ? ": …" : ""}
+          study next{showStudyNext ? (studyNextReady ? (studyNextId ? "" : ": —") : ": …") : ""}
         </button>
       </div>
       <div className="grid">
-        {(() => {
-          let ordered =
-            sortMode === "known" && knownPct
-              ? entries
-                  .slice()
-                  .sort(
-                    (a, b) =>
-                      (knownPct.get(b.id) ?? -1) - (knownPct.get(a.id) ?? -1),
-                  )
-              : entries;
-          // study-next: float the single recommended episode to the front
-          // without otherwise disturbing the order.
-          if (showStudyNext && studyNextId) {
-            const rest = ordered.filter((e) => e.id !== studyNextId);
-            const top = ordered.find((e) => e.id === studyNextId);
-            ordered = top ? [top, ...rest] : ordered;
-          }
-          return ordered;
-        })().map((e) => (
+        {ordered.map((e) => (
           <div
             key={e.id}
             className={`card${showStudyNext && e.id === studyNextId ? " study-next" : ""}`}
@@ -935,7 +952,7 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
             <div className="meta">
               {e.relPath} · {fmtSize(e.size)}
               {(() => {
-                const p = savedPos(e.id);
+                const p = savedPositions.get(e.id) ?? null;
                 return p != null ? (
                   <span className="resume-hint" title="resume position">
                     {" "}· ▶ {fmtCueTime(p)}
@@ -1450,7 +1467,7 @@ function cardImgSrc(context: string): string | null {
 /** Parse "<episode name> @ mm:ss" out of the context HTML. */
 function cardEpisodeRef(context: string): { name: string; sec: number } | null {
   for (const part of context.split(/<br\s*\/?>/i)) {
-    const m = part.trim().match(/^(.+) @ (\d+):(\d{2})$/);
+    const m = part.trim().match(/^(.+?) @ (\d+):(\d{2})$/);
     if (m) return { name: m[1]!, sec: parseInt(m[2]!, 10) * 60 + parseInt(m[3]!, 10) };
   }
   return null;
@@ -1459,8 +1476,10 @@ function cardEpisodeRef(context: string): { name: string; sec: number } | null {
 const PAGE_SIZE = 50;
 
 function Cards({ go, toast }: { go: (h: string) => void; toast: (m: string) => void }) {
+  type LoadState = "idle" | "loading" | "ok" | "error";
   const [cards, setCards] = useState<FullCard[] | null>(null);
   const [cardsErr, setCardsErr] = useState<string | null>(null);
+  const [loadState, setLoadState] = useState<LoadState>("idle");
   const [entries, setEntries] = useState<LibraryEntry[]>([]);
   // double-click-to-confirm delete: front of the card in "sure?" state
   const [confirmFront, setConfirmFront] = useState<string | null>(null);
@@ -1476,13 +1495,19 @@ function Cards({ go, toast }: { go: (h: string) => void; toast: (m: string) => v
 
   const loadCards = useCallback(() => {
     setCardsErr(null);
-    setCards(null);
+    setLoadState("loading");
+    // keep previous cards visible during retry — avoids null→data double-memo pass
     void fetch("/api/anki/cards")
       .then((r) => (r.ok ? (r.json() as Promise<FullCard[]>) : Promise.reject(r.status)))
-      .then(setCards)
+      .then((data) => {
+        setCards(data);
+        setLoadState("ok");
+      })
       .catch((e) => {
-        setCards([]);
+        setLoadState("error");
         setCardsErr(`anki/cards → ${e instanceof Error ? e.message : e}`);
+        // leave cards as-is (or empty on first load — setCards([]) only when null)
+        setCards((prev) => prev ?? []);
       });
   }, []);
 
@@ -1524,12 +1549,28 @@ function Cards({ go, toast }: { go: (h: string) => void; toast: (m: string) => v
       return;
     }
     setConfirmFront(null);
-    // optimistic removal
-    setCards((prev) => (prev ? prev.filter((c) => c.front !== front) : prev));
+    // optimistic removal — capture the removed card for rollback
+    let removed: FullCard | undefined;
+    setCards((prev) => {
+      if (!prev) return prev;
+      removed = prev.find((c) => c.front === front);
+      return prev.filter((c) => c.front !== front);
+    });
     try {
       await api.ankiDelete(front);
     } catch (e) {
       toast(`Delete failed: ${e instanceof Error ? e.message : e}`);
+      // rollback: re-insert the card in its original position
+      if (removed) {
+        const r = removed;
+        setCards((prev) => {
+          if (!prev) return prev;
+          // insert back sorted by noteId desc (same order as filterCards sort)
+          const idx = prev.findIndex((c) => (c.noteId ?? -1) < (r.noteId ?? -1));
+          if (idx === -1) return [...prev, r];
+          return [...prev.slice(0, idx), r, ...prev.slice(idx)];
+        });
+      }
     }
   };
 
@@ -1540,6 +1581,7 @@ function Cards({ go, toast }: { go: (h: string) => void; toast: (m: string) => v
         <input
           className="search-input cards-search"
           type="text"
+          aria-label="Filter cards by text"
           placeholder="search…"
           title="Filter by front or translation text"
           value={q}
@@ -1549,6 +1591,7 @@ function Cards({ go, toast }: { go: (h: string) => void; toast: (m: string) => v
           }}
         />
         <select
+          aria-label="Filter by date added"
           title="Filter by when the card was added (needs local Anki)"
           value={range}
           onChange={(e) => setRange(e.target.value as DateRange)}
@@ -1559,6 +1602,7 @@ function Cards({ go, toast }: { go: (h: string) => void; toast: (m: string) => v
           <option value="30d">30 days</option>
         </select>
         <select
+          aria-label="Filter by learning stage"
           title="Filter by learning stage (from the SRS interval)"
           value={stage}
           onChange={(e) => setStage(e.target.value as Stage)}
@@ -1569,6 +1613,7 @@ function Cards({ go, toast }: { go: (h: string) => void; toast: (m: string) => v
           <option value="mature">mature</option>
         </select>
         <select
+          aria-label="Filter by word rarity"
           title="Filter by word rarity (frequency tier)"
           value={rarity}
           onChange={(e) => setRarity(e.target.value as Rarity)}
@@ -1873,8 +1918,9 @@ function Settings({
         <section className="form-group">
           <h2 className="group-title">Languages</h2>
           <div className="field">
-            <label>Primary (target)</label>
+            <label htmlFor="settings-primaryLang">Primary (target)</label>
             <input
+              id="settings-primaryLang"
               type="text"
               title="Language you're learning — preferred primary subtitle track (e.g. ja)"
               value={primaryLang}
@@ -1888,8 +1934,9 @@ function Settings({
             <div className="hint">Preferred primary subtitle track.</div>
           </div>
           <div className="field">
-            <label>Secondary (known)</label>
+            <label htmlFor="settings-secondaryLang">Secondary (known)</label>
             <input
+              id="settings-secondaryLang"
               type="text"
               title="Language you already know — preferred translation track (e.g. ru)"
               value={secondaryLang}
@@ -2187,7 +2234,7 @@ function DataSection({
     <section className="form-group">
       <h2 className="group-title">Data</h2>
       <div className="field">
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <div className="field-row">
           <button className="btn sm" onClick={onExport}>
             Export data (JSON)
           </button>
@@ -2211,12 +2258,12 @@ function DataSection({
           and merges progress; telemetry events are skipped.
         </div>
         {pending != null && (
-          <div className="state" role="alert" style={{ marginTop: 8 }}>
+          <div className="state" role="alert">
             <span>
               Import “{pendingName}”? This overwrites settings and merges saved
               progress.
             </span>
-            <span style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <span className="field-row">
               <button
                 className="btn sm primary"
                 disabled={busy}
@@ -2241,7 +2288,6 @@ function DataSection({
           <div
             className={msg.kind === "error" ? "state error" : "state"}
             role="status"
-            style={{ marginTop: 8 }}
           >
             {msg.text}
           </div>

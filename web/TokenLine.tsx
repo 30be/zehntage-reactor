@@ -116,14 +116,23 @@ export function TokenLine({
           !mature &&
           !!tok.reading &&
           HAS_KANJI.test(tok.surface_form);
+        const isInteractive = !!onWordClick;
         return (
           <span
             key={i}
             className={`tok${inDeck ? " known" : ""}${due ? " due" : ""}${unknown ? " unk" : ""}`}
             style={color ? { color } : undefined}
+            role={isInteractive ? "button" : undefined}
+            tabIndex={isInteractive ? 0 : undefined}
             onMouseEnter={onWordEnter ? (e) => onWordEnter(tok, e) : undefined}
             onMouseLeave={onWordLeave}
             onClick={onWordClick ? (e) => onWordClick(tok, e) : undefined}
+            onKeyDown={onWordClick ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onWordClick(tok, e as unknown as React.MouseEvent);
+              }
+            } : undefined}
           >
             {showFuri ? (
               <ruby>

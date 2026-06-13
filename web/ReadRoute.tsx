@@ -537,7 +537,11 @@ export function ReadRoute({
               </span>
             )}
           </div>
-          {lookupLoading && <div className="spin">Looking up…</div>}
+          {lookupLoading && (
+            <div className="spinner-line">
+              <span className="spinner" aria-hidden /> Looking up…
+            </div>
+          )}
           {lookup && (
             <>
               <div className="translation">{lookup.translation}</div>

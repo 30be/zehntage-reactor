@@ -90,6 +90,7 @@ async function apiGet(path: string, opts: JimakuClientOptions = {}): Promise<unk
   }
   const res = await fetch((opts.baseUrl ?? BASE_URL) + path, {
     headers: { Authorization: apiKey, Accept: "application/json" },
+    signal: AbortSignal.timeout(30_000),
   });
   if (!res.ok) {
     let message = `jimaku ${path} failed: HTTP ${res.status}`;
@@ -164,6 +165,7 @@ export async function downloadFile(
   const apiKey = opts.apiKey ?? (await loadJimakuApiKey());
   const res = await fetch(url, {
     headers: apiKey ? { Authorization: apiKey } : {},
+    signal: AbortSignal.timeout(120_000),
   });
   if (!res.ok) {
     throw new JimakuError(`jimaku download failed: HTTP ${res.status}`, res.status);

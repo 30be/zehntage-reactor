@@ -313,7 +313,7 @@ async function zehntageRequest(
     throw new Error("ZEHNTAGE_ANKI_URL or ZEHNTAGE_ANKI_KEY not set in ~/.env");
   }
   const headers: Record<string, string> = { "X-Zehntage-Key": ankiKey };
-  const opts: RequestInit = { method, headers };
+  const opts: RequestInit = { method, headers, signal: AbortSignal.timeout(15000) };
   if (method === "POST") {
     headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body ?? {});

@@ -79,6 +79,7 @@ async function callGemini(
 
   const resp = await fetch(GEMINI_URL, {
     method: "POST",
+    signal: AbortSignal.timeout(60_000),
     headers: {
       "Content-Type": "application/json",
       "x-goog-api-key": geminiApiKey,
@@ -98,7 +99,7 @@ async function callGemini(
   const data = (await resp.json()) as {
     candidates?: { content: { parts: { text?: string }[] } }[];
   };
-  const text = data.candidates?.[0]?.content.parts[0]?.text;
+  const text = data.candidates?.[0]?.content?.parts[0]?.text;
   if (!text) throw new Error("Unexpected Gemini response");
   const cleaned = text.replace(/^```json\s*/, "").replace(/```\s*$/, "").trim();
   return JSON.parse(cleaned);

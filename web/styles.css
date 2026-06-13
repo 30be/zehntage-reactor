@@ -10,6 +10,8 @@
   --accent: #18181b;
   --accent-fg: #fafafa;
   --radius: 8px;
+  --c-warn: #b35454;
+  --c-err:  #9e2f3a;
 }
 
 * { box-sizing: border-box; }
@@ -74,8 +76,8 @@ a { color: inherit; }
 .btn.ghost:hover { background: var(--muted-bg); }
 .btn.sm { padding: 5px 9px; font-size: 13px; }
 .btn.active { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
-.btn.danger { color: #b91c1c; border-color: #fecaca; }
-.btn.danger:hover { background: #fef2f2; }
+.btn.danger { color: #b35454; border-color: var(--border); background: transparent; }
+.btn.danger:hover { background: var(--muted-bg); }
 
 /* ---- card / library grid ---- */
 .grid {
@@ -107,6 +109,7 @@ a { color: inherit; }
   color: var(--muted);
 }
 
+.lookup .badge { color: #a1a1aa; border-color: #3f3f46; }
 .muted { color: var(--muted); }
 .h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 16px; }
 .h2 { font-size: 15px; font-weight: 600; margin: 0 0 10px; }
@@ -179,25 +182,30 @@ a { color: inherit; }
   background: #18181b;
   color: #fafafa;
   border: 1px solid #3f3f46;
-  border-radius: 10px;
+  border-radius: var(--radius);
   box-shadow: 0 12px 40px rgba(0,0,0,0.5);
   padding: 14px 16px;
   font-size: 14px;
 }
 .lookup .word { font-size: 20px; font-weight: 700; }
-/* `a`-toggle state cue: the popup word/sentence turns learning-blue when the
-   card is in the deck (no Add/Delete buttons — color is the only cue) */
+/* `a`-toggle state cue: word/sentence turns learning-blue + gets underline
+   when the card is in the deck. Color alone would fail WCAG 1.4.1 and the
+   original oklch(0.65 0.15 250)≈#3a93e6 fails AA contrast (3.23:1 on white).
+   oklch(0.46 0.15 250)≈#1a66c2 gives ~7:1 on white. */
 .lookup .word.saved,
-.lookup .sentence.saved { color: oklch(0.65 0.15 250); }
+.lookup .sentence.saved {
+  color: oklch(0.46 0.15 250);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
 .lookup .reading { color: #a1a1aa; font-size: 14px; margin-left: 8px; }
 .lookup .translation { margin-top: 8px; font-size: 15px; }
-.lookup .notes { margin-top: 8px; color: #d4d4d8; font-size: 13px; line-height: 1.5; }
+.lookup .notes { margin-top: 8px; color: #a1a1aa; font-size: 13px; line-height: 1.5; }
 .lookup .row { margin-top: 12px; display: flex; gap: 8px; }
 .lookup .btn { background: #fafafa; color: #18181b; border-color: #fafafa; }
 .lookup .btn:hover { background: #e4e4e7; }
-.lookup .btn.danger { background: transparent; color: #fca5a5; border-color: #7f1d1d; }
-.lookup .btn.danger:hover { background: #7f1d1d33; }
-.lookup .spin { color: #a1a1aa; }
+.lookup .btn.danger { background: transparent; color: #f2a0a8; border-color: #9e2f3a; }
+.lookup .btn.danger:hover { background: rgba(158, 47, 58, 0.2); }
 
 /* ---- controls bar ---- */
 .controls {
@@ -270,7 +278,7 @@ textarea.prompt {
 .spinner-line { font-size: 13px; color: var(--muted); margin-top: 8px; }
 
 .btn.icon { padding: 4px 8px; min-width: 0; font-size: 15px; line-height: 1; }
-.switch.inline { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: #444; cursor: pointer; }
+.switch.inline { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); cursor: pointer; }
 .switch.inline input { margin: 0; }
 
 /* --- Library batch actions & job status (appended; do not edit rules above) --- */
@@ -278,12 +286,6 @@ textarea.prompt {
   display: flex;
   gap: 8px;
   margin-bottom: 14px;
-}
-.badge.jobstatus {
-  background: #000;
-  color: #fff;
-  border: 1px solid #000;
-  font-variant-numeric: tabular-nums;
 }
 
 /* ---- whisper streaming progress (Player controls) ---- */
@@ -321,13 +323,14 @@ textarea.prompt {
   border: 1px solid rgba(255, 255, 255, 0.8);
   border-radius: 50%;
   color: #fff;
-  opacity: 0.35;
+  opacity: 0.72;
   cursor: pointer;
   vertical-align: middle;
   transition: opacity 0.12s;
   user-select: none;
 }
-.explain-q:hover { opacity: 1; }
+.explain-q:hover,
+.explain-q:focus { opacity: 1; outline: none; box-shadow: 0 0 0 2px rgba(255,255,255,0.6); }
 
 .lookup .sentence { font-size: 15px; font-weight: 600; line-height: 1.5; }
 .lookup .breakdown { white-space: pre-line; }
@@ -447,6 +450,12 @@ textarea.prompt {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
   cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  padding-top: 4px;
+  font: inherit;
+  font-size: 12px;
 }
 .cue-row .cue-time:hover { text-decoration: underline; color: var(--fg); }
 .cue-row .cue-body { min-width: 0; }
@@ -497,31 +506,10 @@ textarea.prompt {
 }
 
 /* ---- local known-word indicator in the lookup popup (appended) ---- */
-.lookup .known-flag {
-  margin-left: 8px;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: #71717a;
-  border: 1px solid #3f3f46;
-  border-radius: 999px;
-  padding: 1px 7px;
-  vertical-align: middle;
-  user-select: none;
-}
+/* .lookup .known-flag uses .badge + .lookup .badge override (S-12) */
 
 /* ---- frequency tag (popup + pre-study): tiny, dim, no new colors ---- */
-.freq-tag {
-  font-size: 10px;
-  color: #71717a;
-  border: 1px solid #3f3f46;
-  border-radius: 999px;
-  padding: 1px 7px;
-  margin-left: 8px;
-  vertical-align: middle;
-  white-space: nowrap;
-  user-select: none;
-}
+/* .freq-tag uses .badge + .lookup .badge override (S-12) */
 
 /* ---- library card coverage hint ("82% · 47 new") ---- */
 .cov-hint { color: var(--muted); }
@@ -594,9 +582,9 @@ textarea.prompt {
   padding: 7px 12px;
   font: inherit;
   font-size: 14px;
-  color: var(--fg, #e5e5e5);
-  background: var(--muted-bg, rgba(255,255,255,0.04));
-  border: 1px solid var(--border, #333);
+  color: var(--fg);
+  background: var(--muted-bg);
+  border: 1px solid var(--border);
   border-radius: 8px;
   outline: none;
 }
@@ -609,9 +597,9 @@ textarea.prompt {
   font-size: 14px;
   line-height: 1.5;
 }
-.search-hit:hover { background: var(--muted-bg, rgba(255,255,255,0.06)); }
+.search-hit:hover { background: var(--muted-bg); }
 .search-hit .search-meta { color: var(--muted); font-size: 12px; margin-right: 6px; }
-.search-hit mark { background: rgba(250, 204, 21, 0.35); color: inherit; border-radius: 2px; }
+.search-hit mark { background: var(--muted-bg); color: var(--fg); font-weight: 600; border-radius: 2px; }
 
 /* ---- OP/ED skip pill (no dialogue gap) ---- */
 .skip-pill {
@@ -635,22 +623,11 @@ textarea.prompt {
 .today-panel { max-width: 680px; margin: 4px 0 22px; padding: 14px 18px; }
 .today-panel .h2 { margin-top: 0; }
 .today-tiles { display: flex; flex-wrap: wrap; gap: 28px; }
-.today-tiles .stat { color: var(--muted, #a1a1aa); font-size: 14px; }
-.today-tiles .stat-num {
-  color: var(--fg, #e5e5e5);
-  font-size: 22px;
-  font-weight: 600;
-  margin-right: 7px;
-}
+.today-tiles .stat { color: var(--muted); font-size: 14px; }
 
 .stats-totals { display: flex; gap: 32px; margin: 6px 0 22px; }
-.stats-totals .stat { color: var(--muted, #a1a1aa); font-size: 14px; }
-.stats-totals .stat-num {
-  color: var(--fg, #e5e5e5);
-  font-size: 22px;
-  font-weight: 600;
-  margin-right: 7px;
-}
+.stats-totals .stat { color: var(--muted); font-size: 14px; }
+.stat-num { color: var(--fg); font-size: 22px; font-weight: 600; margin-right: 7px; }
 .stats-list { display: flex; flex-direction: column; gap: 4px; max-width: 680px; }
 .stats-row {
   display: flex;
@@ -660,7 +637,7 @@ textarea.prompt {
   border-radius: 6px;
   cursor: pointer;
 }
-.stats-row:hover { background: rgba(255, 255, 255, 0.05); }
+.stats-row:hover { background: var(--muted-bg); }
 .stats-name {
   flex: 0 0 42%;
   overflow: hidden;
@@ -671,12 +648,12 @@ textarea.prompt {
 .stats-bar {
   flex: 1;
   height: 4px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--border);
   border-radius: 2px;
   overflow: hidden;
 }
-.stats-fill { display: block; height: 100%; background: #6ee7b7; }
-.stats-cov { flex: 0 0 auto; color: var(--muted, #a1a1aa); font-size: 12px; }
+.stats-fill { display: block; height: 100%; background: var(--muted); }
+.stats-cov { flex: 0 0 auto; color: var(--muted); font-size: 12px; }
 
 /* ---- custom video controls bar (replaces native controls; appended) ---- */
 .vbar {
@@ -1250,17 +1227,7 @@ textarea.prompt {
 .ep-nav:hover { color: var(--fg); }
 .ep-nav svg { display: block; }
 
-/* "from your deck" tag in the word popup */
-.deck-tag {
-  font-size: 10px;
-  color: #71717a;
-  border: 1px solid #3f3f46;
-  border-radius: 999px;
-  padding: 1px 7px;
-  margin-left: 8px;
-  vertical-align: middle;
-  white-space: nowrap;
-}
+/* "from your deck" tag in the word popup — uses .badge + .lookup .badge override (S-12) */
 
 /* stats: dim one-line explainer under each section heading */
 .section-intro {
@@ -1342,7 +1309,7 @@ textarea.prompt {
   white-space: nowrap;
 }
 .jimaku-row:hover { text-decoration: underline; }
-.jimaku-error { display: block; color: #b91c1c; }
+.jimaku-error { display: block; color: #b35454; }
 
 .home-attrib { margin-top: 6px; font-size: 12px; }
 
@@ -1408,7 +1375,7 @@ textarea.prompt {
   border-color: var(--border);
   color: var(--muted);
 }
-.badge.jobstatus { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.badge.jobstatus { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-variant-numeric: tabular-nums; }
 
 /* subtitle overlay: dim loading indicator while cues are fetched */
 .sub-loading {
@@ -1457,6 +1424,11 @@ textarea.prompt {
   margin-left: 6px;
   color: var(--muted);
   cursor: default;
+  font-size: 12px;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
   font-size: 12px;
 }
 .cue-row:hover .cue-sec-q { visibility: visible; }
@@ -1574,7 +1546,7 @@ textarea.prompt {
 .ep-series,
 .cpm-chart,
 .cum-chart { max-width: 680px; }
-.stats-fill { background: #71717a; } /* was green — keep the page b/w */
+/* .stats-fill background now uses var(--muted) — wave-10 override removed (S-11) */
 .cpm-chart,
 .cum-chart { margin-bottom: 22px; }
 .ep-series { margin-bottom: 22px; }
@@ -1700,7 +1672,7 @@ textarea.prompt {
 /* Shared async-view states. `.empty` (above) is the laconic base; loading
    adds a spinner, error gets a subtle, visible (not silent) treatment. */
 .state { padding: 48px 0; text-align: center; color: var(--muted); }
-.state.error { color: #b91c1c; }
+.state.error { color: #b35454; }
 .state .state-detail { display: block; margin-top: 6px; font-size: 12px; opacity: 0.8; word-break: break-word; }
 .state .retry { margin-top: 14px; }
 
@@ -1764,7 +1736,7 @@ textarea:focus-visible {
   background: #18181b;
   color: #fafafa;
   border: 1px solid #3f3f46;
-  border-radius: 10px;
+  border-radius: var(--radius);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
   padding: 20px 22px;
 }
@@ -1892,4 +1864,65 @@ textarea:focus-visible {
   margin: 1.5rem 0;
   opacity: 0.6;
   font-size: 0.85rem;
+}
+
+/* --- wave-15 layout tokens --- */
+
+/* Read component layout */
+.read-mode {
+  max-width: 42em;
+  margin: 0 auto;
+  padding: 2rem 1rem 6rem;
+  line-height: 2;
+  font-size: 1.15rem;
+}
+.read-mode header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+.read-mode header h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 500;
+  opacity: 0.8;
+}
+.read-para {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1.1rem;
+}
+.read-timestamp {
+  flex: 0 0 3.5em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
+  opacity: 0.35;
+  text-decoration: none;
+  color: inherit;
+  line-height: 2.6;
+  user-select: none;
+}
+.read-para-body {
+  flex: 1;
+  min-width: 0;
+}
+.read-secondary {
+  margin: 0.1rem 0 0;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  opacity: 0.45;
+}
+
+/* Settings Data section */
+.field-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.field .state {
+  padding: 8px 0;
+  margin-top: 8px;
 }

@@ -610,6 +610,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     pinnedRef.current = pinned;
   }, [pinned]);
   const lookupRef = useRef<HTMLDivElement>(null);
+  // a11y: remember focus before the lookup panel opens, restore on close
+  const prevLookupFocusRef = useRef<HTMLElement | null>(null);
   const [popupPos, setPopupPos] = useState<React.CSSProperties>({
     visibility: "hidden",
   });
@@ -1330,6 +1332,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   // known-set key of the word popup currently open (for the `k` hotkey)
   const popupKeyRef = useRef<string | null>(null);
   useEffect(() => {
+    if (popup != null && !popupOpenRef.current) {
+      prevLookupFocusRef.current = document.activeElement as HTMLElement;
+    }
     popupOpenRef.current = popup != null;
     popupKeyRef.current =
       popup && popup.kind === "word"
@@ -1699,6 +1704,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     setPinned(false);
     setPopup(null);
     resumeFromHover();
+    prevLookupFocusRef.current?.focus();
+    prevLookupFocusRef.current = null;
   }, [clearCloseTimer, resumeFromHover]);
 
   // --- global hotkeys (web/player/useHotkeys.ts): work regardless of focus
@@ -2484,9 +2491,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
               onWordClick={onWordClick}
             />
             {primaryText && (
-              <span
+              <button
+                type="button"
                 className="explain-q"
-                title="Explain sentence structure"
+                aria-label="Explain sentence structure"
                 onClick={onExplainClick}
                 onMouseEnter={() => {
                   // same hover-pause as words, so the line stays readable
@@ -2499,7 +2507,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
                 }}
               >
                 ?
-              </span>
+              </button>
             )}
           </div>
           )}

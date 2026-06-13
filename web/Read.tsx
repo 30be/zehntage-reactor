@@ -42,7 +42,6 @@ import {
   writeFurthest,
   calcProgress,
 } from "./readProgress.ts";
-import { clampPopupPos } from "./readlayout.ts";
 
 export interface ReadCue {
   start: number;
@@ -287,25 +286,10 @@ export function Read({
     <div
       className="read-mode"
       data-media-id={mediaId}
-      style={{
-        maxWidth: "42em",
-        margin: "0 auto",
-        padding: "2rem 1rem 6rem",
-        lineHeight: 2,
-        fontSize: "1.15rem",
-      }}
     >
       {/* ---- header ---- */}
-      <header
-        style={{
-          display: "flex",
-          alignItems: "baseline",
-          justifyContent: "space-between",
-          gap: "1rem",
-          marginBottom: "1.5rem",
-        }}
-      >
-        <h2 style={{ margin: 0, fontSize: "1rem", fontWeight: 500, opacity: 0.8 }}>
+      <header>
+        <h2>
           {entryName}
         </h2>
         <div className="read-header-meta">
@@ -366,7 +350,6 @@ export function Read({
           ref={(el) => { paraRefs.current[i] = el; }}
           className={`read-para${cursor === i ? " read-cursor" : ""}`}
           data-para-index={i}
-          style={{ display: "flex", gap: "1rem", marginBottom: "1.1rem" }}
           onClick={() => {
             setCursor(i);
             onCursorActivate?.(i);
@@ -379,22 +362,12 @@ export function Read({
               onJump(p.start);
             }}
             title="jump to this moment"
-            style={{
-              flex: "0 0 3.5em",
-              textAlign: "right",
-              fontVariantNumeric: "tabular-nums",
-              fontSize: "0.75rem",
-              opacity: 0.35,
-              textDecoration: "none",
-              color: "inherit",
-              lineHeight: 2.6,
-              userSelect: "none",
-            }}
+            className="read-timestamp"
           >
             {fmtTime(p.start)}
           </a>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <p style={{ margin: 0 }} lang="ja">
+          <div className="read-para-body">
+            <p lang="ja">
               {renderTokenLine(
                 tokenized?.[i] ?? null,
                 p.lines.join(" "),
@@ -402,15 +375,7 @@ export function Read({
               )}
             </p>
             {showSecondary && p.secondary ? (
-              <p
-                className="read-secondary"
-                style={{
-                  margin: "0.1rem 0 0",
-                  fontSize: "0.85rem",
-                  lineHeight: 1.5,
-                  opacity: 0.45,
-                }}
-              >
+              <p className="read-secondary">
                 {p.secondary}
               </p>
             ) : null}

@@ -135,7 +135,12 @@ export async function serveFileWithRange(
  * On-the-fly remux/transcode to fMP4 for Chrome-incompatible files.
  * Seek via startTime (seconds) — server-side `-ss`, Jellyfin-style.
  */
-export function remuxToFmp4(file: string, startTime: number, info: CodecInfo): Response {
+export function remuxToFmp4(
+  file: string,
+  startTime: number,
+  info: CodecInfo,
+  signal?: AbortSignal,
+): Response {
   const videoArgs =
     info.video === "h264" && !info.reason?.includes("10-bit")
       ? ["-c:v", "copy"]
@@ -161,6 +166,9 @@ export function remuxToFmp4(file: string, startTime: number, info: CodecInfo): R
     "-",
   ];
   const proc = Bun.spawn(args, { stdout: "pipe", stderr: "ignore" });
+  if (signal) {
+    signal.addEventListener("abort", () => { try { proc.kill(); } catch {} }, { once: true });
+  }
   return new Response(proc.stdout, {
     headers: { "Content-Type": "video/mp4" },
   });
