@@ -4,6 +4,7 @@ import {
   acceptCorrection,
   correctNames,
   buildCorrectBatchPrompt,
+  stripEnumerator,
 } from "../src/lib/gemini.ts";
 import { loadGlossary, DEFAULT_GLOSSARY } from "../src/lib/glossary.ts";
 import type { Cue } from "../src/lib/subs.ts";
@@ -66,6 +67,28 @@ describe("correctNames fake mode", () => {
     ];
     const out = await correctNames(cues, DEFAULT_GLOSSARY);
     expect(out).toEqual(cues);
+  });
+});
+
+describe("stripEnumerator leaked-prefix guard", () => {
+  test("strips matching expected number (3. for line index 2)", () => {
+    // line 3 is index 2; model echoed "3. " back into the text
+    expect(stripEnumerator("3. 折木奉太郎", 2)).toBe("折木奉太郎");
+  });
+  test("strips with closing paren and surrounding spaces", () => {
+    expect(stripEnumerator("  4) 古典部 ", 3)).toBe("古典部 ");
+  });
+  test("does NOT strip a non-matching leading number", () => {
+    // line index 2 expects "3."; a legit "99." must be left untouched
+    expect(stripEnumerator("99. 折木奉太郎さんですよね", 2)).toBe(
+      "99. 折木奉太郎さんですよね",
+    );
+  });
+  test("leaves text without enumerator untouched", () => {
+    expect(stripEnumerator("折木奉太郎", 2)).toBe("折木奉太郎");
+  });
+  test("prefix equal to index works at index 0 (line 1)", () => {
+    expect(stripEnumerator("1. こんにちは", 0)).toBe("こんにちは");
   });
 });
 

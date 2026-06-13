@@ -308,7 +308,7 @@ export function languageName(code: string): string {
 export function buildTranslateBatchPrompt(lines: string[], targetLang: string): string {
   const target = languageName(targetLang);
   const numbered = lines.map((l, i) => `${i + 1}. ${l.replace(/\n/g, " ")}`).join("\n");
-  return `Translate the following numbered subtitle lines into ${target}. They are consecutive lines from one video — use the surrounding lines for context, but translate each line separately. The reader is LEARNING the source language: translate literally, preserving the source word choices, grammatical structure, and word order as far as the target language allows — do NOT polish into nice idiomatic prose. A slightly awkward but transparent translation is better than a natural-sounding loose one. Keep each line concise. Return exactly ${lines.length} translations, in order, one per input line.
+  return `Translate the following numbered subtitle lines into ${target}. They are consecutive lines from one video — use the surrounding lines for context, but translate each line separately. The reader is LEARNING the source language: translate literally, preserving the source word choices, grammatical structure, and word order as far as the target language allows — do NOT polish into nice idiomatic prose. A slightly awkward but transparent translation is better than a natural-sounding loose one. Keep each line concise. Return exactly ${lines.length} translations, in order, one per input line. Return ONLY the translated line text — do NOT include the line number or any prefix.
 
 ${numbered}`;
 }
@@ -324,6 +324,17 @@ export function assertTranslationCount(translations: string[], expected: number)
   }
 }
 
+/**
+ * Defensively strip a leaked line-number enumerator the model may have echoed
+ * back. Only strips a leading `${index + 1}.` / `${index + 1})` (the EXACT
+ * expected number for this position) so legitimate text that happens to start
+ * with a different number is left untouched. Exported for testing.
+ */
+export function stripEnumerator(line: string, index: number): string {
+  const re = new RegExp(`^\\s*${index + 1}\\s*[.)]\\s*`);
+  return line.replace(re, "");
+}
+
 // --- proper-noun correction pass for whisper-transcribed JP subs ---
 
 const CORRECT_BATCH_SCHEMA = {
@@ -337,7 +348,7 @@ const CORRECT_BATCH_SCHEMA = {
 export function buildCorrectBatchPrompt(lines: string[], glossary: string[]): string {
   const numbered = lines.map((l, i) => `${i + 1}. ${l.replace(/\n/g, " ")}`).join("\n");
   const gloss = glossary.join("、");
-  return `The following ${lines.length} numbered lines are Japanese subtitles produced by automatic speech recognition (whisper). They may contain MISHEARD or garbled PROPER NOUNS (names of people and places). Using ONLY the glossary of correct proper nouns below, fix any garbled proper noun to its correct form. DO NOT change any other words, grammar, kana, conjugations, or punctuation. If a line contains no glossary proper noun, return it completely unchanged. Return EXACTLY ${lines.length} lines, in the same order, one per input line.
+  return `The following ${lines.length} numbered lines are Japanese subtitles produced by automatic speech recognition (whisper). They may contain MISHEARD or garbled PROPER NOUNS (names of people and places). Using ONLY the glossary of correct proper nouns below, fix any garbled proper noun to its correct form. DO NOT change any other words, grammar, kana, conjugations, or punctuation. If a line contains no glossary proper noun, return it completely unchanged. Return EXACTLY ${lines.length} lines, in the same order, one per input line. Return ONLY the corrected line text — do NOT include the line number or any prefix.
 
 Glossary of correct proper nouns: ${gloss}
 
@@ -412,7 +423,7 @@ export async function correctNames(
       }
       assertTranslationCount(result.corrected, batch.length);
       batch.forEach((c, j) => {
-        const proposed = result.corrected[j]!;
+        const proposed = stripEnumerator(result.corrected[j]!, j);
         const text = acceptCorrection(c.text, proposed) ? proposed : c.text;
         out.push({ start: c.start, end: c.end, text });
       });
@@ -447,7 +458,7 @@ export async function translateCues(
     }
     assertTranslationCount(result.translations, batch.length);
     batch.forEach((c, j) => {
-      out.push({ start: c.start, end: c.end, text: result.translations[j]! });
+      out.push({ start: c.start, end: c.end, text: stripEnumerator(result.translations[j]!, j) });
     });
     onProgress?.(Math.min(i + BATCH_SIZE, cues.length), cues.length);
   }
