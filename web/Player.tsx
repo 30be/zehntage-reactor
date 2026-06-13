@@ -63,8 +63,9 @@ import { useWhisperJob } from "./player/useWhisperJob.ts";
 import { shouldSkipAutopause } from "./player/autopause.ts";
 import { computeCueUnknowns } from "./player/cueUnknowns.ts";
 import { pickResumeTime } from "./player/resume.ts";
-import { findSkipTarget } from "./player/skipGap.ts";
 import { usePlayerHotkeys } from "./player/useHotkeys.ts";
+import { useHudAutohide } from "./player/useHudAutohide.ts";
+import { useSubControls } from "./player/useSubControls.ts";
 import { LookupPanel } from "./player/LookupPanel.tsx";
 import {
   PreStudyPanel,
@@ -163,7 +164,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
 
   // Primary-subtitle timing offset (seconds). Positive = subs appear later.
   // Persisted per media+track; applied client-side when computing active cues.
-  const [subOffset, setSubOffset] = useState(0);
   const subOffsetRef = useRef(0);
   const primaryCuesRef = useRef<Cue[]>([]);
 
@@ -754,6 +754,25 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     whisperCues.length > 0 && (!primaryId || primaryId === "sidecar:gen:ja");
   const displayCues = whisperLive ? whisperCues : primaryCues;
 
+  // Subtitle offset + scale controls + the OP/ED skip-gap pill. subOffsetRef is
+  // owned here (shared infra) and threaded into the hook to stay in sync.
+  const {
+    subOffset,
+    changeOffset,
+    subScale,
+    adjustSubScale,
+    skipTarget,
+    onSkipGap,
+  } = useSubControls({
+    videoRef,
+    subOffsetRef,
+    mediaId: entry.id,
+    primaryId,
+    displayCues,
+    settings,
+    toast,
+  });
+
   // --- smart autopause: per-cue unknown-lexical-token counts (memoized) ---
   // null while not computed (or mode "every") — the autopause branch treats
   // null as "pause" so the legacy behavior is the safe default.
@@ -1030,82 +1049,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       cancelled = true;
     };
   }, [entry.id, secondaryId]);
-
-  // --- subtitle offset: restore per media+track; adjust via [ / ] / \ ---
-  useEffect(() => {
-    let v = 0;
-    try {
-      v =
-        parseFloat(
-          localStorage.getItem(`zr.offset.${entry.id}.${primaryId}`) ?? "0",
-        ) || 0;
-    } catch {
-      /* ignore */
-    }
-    subOffsetRef.current = v;
-    setSubOffset(v);
-  }, [entry.id, primaryId]);
-
-  const changeOffset = useCallback(
-    (delta: number | null) => {
-      const next =
-        delta == null ? 0 : Math.round((subOffsetRef.current + delta) * 10) / 10;
-      subOffsetRef.current = next;
-      setSubOffset(next);
-      try {
-        const key = `zr.offset.${entry.id}.${primaryId}`;
-        if (next === 0) localStorage.removeItem(key);
-        else localStorage.setItem(key, String(next));
-      } catch {
-        /* ignore */
-      }
-      toast(`subs ${next >= 0 ? "+" : ""}${next.toFixed(1)}s`);
-    },
-    [entry.id, primaryId, toast],
-  );
-
-  // --- subtitle scale (Shift+= / Shift+-): multiplies the overlay's clamp()
-  // font sizes via the --sub-scale CSS var; persisted in settings.subScale ---
-  const clampSubScale = (v: number) =>
-    Math.min(2, Math.max(0.6, Math.round(v * 10) / 10));
-  const [subScale, setSubScale] = useState(() => {
-    const v = Number(settings.subScale);
-    return Number.isFinite(v) && v > 0 ? clampSubScale(v) : 1;
-  });
-  // settings load async — adopt the saved value once it arrives, unless the
-  // user already adjusted the scale this session
-  const subScaleTouchedRef = useRef(false);
-  useEffect(() => {
-    if (subScaleTouchedRef.current) return;
-    const v = Number(settings.subScale);
-    if (Number.isFinite(v) && v > 0) setSubScale(clampSubScale(v));
-  }, [settings.subScale]);
-  const subScaleSaveTimer = useRef<number | null>(null);
-  useEffect(
-    () => () => {
-      if (subScaleSaveTimer.current != null)
-        window.clearTimeout(subScaleSaveTimer.current);
-    },
-    [],
-  );
-  const adjustSubScale = useCallback(
-    (delta: number) => {
-      subScaleTouchedRef.current = true;
-      setSubScale((prev) => {
-        const next = clampSubScale(prev + delta);
-        toast(`subs ×${next.toFixed(1)}`);
-        // debounce the autosave (same settings store the Settings page uses)
-        if (subScaleSaveTimer.current != null)
-          window.clearTimeout(subScaleSaveTimer.current);
-        subScaleSaveTimer.current = window.setTimeout(() => {
-          subScaleSaveTimer.current = null;
-          void api.saveSettings({ subScale: next }).catch(() => {});
-        }, 600);
-        return next;
-      });
-    },
-    [toast],
-  );
 
   // --- resume position: save throttled while playing, restore on metadata ---
   // A deep-link start time (#/play/<id>@t) wins over the saved position, once.
@@ -2210,31 +2153,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     }
   }, [entry.id, toast]);
 
-  // --- OP/ED skip heuristic: a >60s hole in the primary cues means no
-  // dialogue (opening/ending/silence). While playback sits inside such a hole
-  // (and past the first 10s of the file) offer a transient "Skip →" pill that
-  // jumps to 1s before the next cue. No auto-skip — the user decides.
-  const [skipTarget, setSkipTarget] = useState<number | null>(null);
-  useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    const cues = displayCues;
-    const upd = () => {
-      const target = findSkipTarget(cues, v.currentTime, subOffset);
-      setSkipTarget((prev) => (prev === target ? prev : target));
-    };
-    v.addEventListener("timeupdate", upd);
-    v.addEventListener("seeked", upd);
-    upd();
-    return () => {
-      v.removeEventListener("timeupdate", upd);
-      v.removeEventListener("seeked", upd);
-    };
-  }, [displayCues, subOffset]);
-  const onSkipGap = useCallback(() => {
-    const v = videoRef.current;
-    if (v && skipTarget != null) v.currentTime = skipTarget;
-  }, [skipTarget]);
 
   // Furigana on unknown kanji (settings toggle, default on). Maturity-based
   // hiding lives in TokenLine (shared by the overlay and the sidebar).
@@ -2247,83 +2165,16 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   const barHoverRef = useRef(false);
   const ccOpenRef = useRef(false);
 
-  // Autohide: fade the bar (and the cursor) after 2.5s without mouse movement
-  // while playing. Reappears on mousemove / pause. The bar OVERLAYS the video,
-  // so the subtitle overlay never shifts when it hides.
-  const [hudHidden, setHudHidden] = useState(false);
-  const hudTimerRef = useRef<number | null>(null);
-  const pokeHud = useCallback(() => {
-    setHudHidden(false);
-    if (hudTimerRef.current != null) window.clearTimeout(hudTimerRef.current);
-    hudTimerRef.current = window.setTimeout(() => {
-      hudTimerRef.current = null;
-      const v = videoRef.current;
-      if (
-        v &&
-        !v.paused &&
-        !scrubbingRef.current &&
-        !barHoverRef.current &&
-        !ccOpenRef.current
-      )
-        setHudHidden(true);
-    }, 2500);
-  }, []);
-  useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    const onPause = () => {
-      if (hudTimerRef.current != null) window.clearTimeout(hudTimerRef.current);
-      hudTimerRef.current = null;
-      setHudHidden(false);
-    };
-    v.addEventListener("pause", onPause);
-    v.addEventListener("play", pokeHud);
-    return () => {
-      v.removeEventListener("pause", onPause);
-      v.removeEventListener("play", pokeHud);
-      if (hudTimerRef.current != null) window.clearTimeout(hudTimerRef.current);
-    };
-  }, [entry.id, pokeHud]);
-
-  // Stage mouse handling: leaving the stage hides the HUD instantly (no 2.5s
-  // wait); in fullscreen, hugging the top/side edges (~8px) also hides it.
-  const hideHudNow = useCallback(() => {
-    if (hudTimerRef.current != null) window.clearTimeout(hudTimerRef.current);
-    hudTimerRef.current = null;
-    const v = videoRef.current;
-    if (
-      v &&
-      !v.paused &&
-      !scrubbingRef.current &&
-      !barHoverRef.current &&
-      !ccOpenRef.current
-    )
-      setHudHidden(true);
-  }, []);
-  const onStageMouseMove = useCallback(
-    (e: React.MouseEvent) => {
-      // Edge-hide applies to the TOP and SIDE edges only. The bottom strip is
-      // exempt: that's where the vbar lives — moving the mouse there is how
-      // the user summons the controls (the hidden bar has pointer-events:
-      // none, so a bottom-edge hide would make it unreachable in fullscreen).
-      // Side edges are also exempt near the bottom corners (the fullscreen
-      // button sits bottom-right).
-      const EDGE = 8;
-      const BAR_ZONE = 80; // px above the bottom reserved for the vbar
-      const aboveBar = e.clientY < window.innerHeight - BAR_ZONE;
-      if (
-        document.fullscreenElement != null &&
-        (e.clientY <= EDGE ||
-          (aboveBar &&
-            (e.clientX <= EDGE || e.clientX >= window.innerWidth - EDGE)))
-      ) {
-        hideHudNow();
-        return;
-      }
-      pokeHud();
-    },
-    [pokeHud, hideHudNow],
-  );
+  // HUD (vbar + cursor) autohide: fade after 2.5s of mouse inactivity while
+  // playing; reappears on mousemove / pause. The interaction refs above stay
+  // owned here and shared with the Vbar.
+  const { hudHidden, onStageMouseMove, hideHudNow } = useHudAutohide({
+    videoRef,
+    scrubbingRef,
+    barHoverRef,
+    ccOpenRef,
+    mediaKey: entry.id,
+  });
 
   const togglePlay = useCallback(() => {
     const v = videoRef.current;
