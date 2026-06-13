@@ -31,6 +31,15 @@ export const GAP_CUES = [
   { start: 80, end: 83, text: "終わります。" },
 ];
 
+// read.mp4: cues with >1.5s gaps between them so buildParagraphs() yields
+// one paragraph per cue (≥3 distinct paragraphs, required by wave17 tests).
+export const READ_CUES = [
+  { start: 2, end: 5, text: "勉強します。" },
+  { start: 10, end: 13, text: "図書館へ行きます。" },
+  { start: 18, end: 21, text: "気になります。" },
+  { start: 26, end: 29, text: "本を読みました。" },
+];
+
 export const JA_CUES = [
   { start: 2, end: 5, text: "勉強します。" },
   { start: 6, end: 9, text: "図書館へ行きます。" },
@@ -83,14 +92,17 @@ export default async function globalSetup(): Promise<void> {
     makeVideo(join(LIB, "clip.mp4"), 30),
     makeVideo(join(LIB, "bare.mp4"), 12),
     makeVideo(join(LIB, "gap.mp4"), 90),
+    makeVideo(join(LIB, "read.mp4"), 35),
   ]);
   await Bun.write(join(LIB, "clip.ja.srt"), srt(JA_CUES));
   await Bun.write(join(LIB, "subs", "clip.ru.srt"), srt(RU_CUES));
   await Bun.write(join(LIB, "gap.ja.srt"), srt(GAP_CUES));
+  await Bun.write(join(LIB, "read.ja.srt"), srt(READ_CUES));
   // Backdate the external sidecar: the server's startup migration moves
   // recently-written <base>.<ja|ru>.srt files into subs/ (treating them as
   // generated). An old mtime keeps it an EXTERNAL track, as intended.
   const old = new Date(Date.now() - 30 * 24 * 3600 * 1000);
   await utimes(join(LIB, "clip.ja.srt"), old, old);
   await utimes(join(LIB, "gap.ja.srt"), old, old);
+  await utimes(join(LIB, "read.ja.srt"), old, old);
 }

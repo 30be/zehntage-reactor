@@ -210,6 +210,23 @@ export interface Overview {
   ankiCumulative: { date: string; total: number }[];
 }
 
+// Comprehension trend (quiz.result aggregation) — mirrors
+// src/lib/telemetry.ts ComprehensionSummary.
+export interface QuizPoint {
+  ts: number;
+  date: string;
+  total: number;
+  correct: number;
+  pct: number;
+}
+export interface ComprehensionSummary {
+  points: QuizPoint[];
+  quizzes: number;
+  avgPct: number;
+  totalQuestions: number;
+  totalCorrect: number;
+}
+
 // --- lemma index queries ---
 
 export interface EncounterCue {
@@ -334,6 +351,8 @@ export const api = {
   statsSummary: () => jget<StatsSummary>("/api/stats/summary"),
   statsEpisodes: () => jget<EpisodeDayRow[]>("/api/stats/episodes"),
   statsOverview: () => jget<Overview>("/api/stats/overview"),
+  statsComprehension: () =>
+    jget<ComprehensionSummary>("/api/stats/comprehension"),
   indexEncounters: (lemma: string, mediaIds?: string[]) =>
     jget<EncounterHit[]>(
       `/api/index/encounters?lemma=${encodeURIComponent(lemma)}${

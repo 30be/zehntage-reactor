@@ -344,6 +344,29 @@ export function ReadRoute({
     [id],
   );
 
+  // When the user presses Enter on a cursor line, click the first token in
+  // that paragraph to open the word popup.
+  const onCursorActivate = useCallback((paraIndex: number) => {
+    const para = document.querySelector<HTMLElement>(
+      `.read-mode [data-para-index="${paraIndex}"]`,
+    );
+    const tok = para?.querySelector<HTMLElement>(".tok");
+    tok?.click();
+  }, []);
+
+  // Best-effort % known from the coverage cache (no strict key validation —
+  // we just want an approximate number for the header display).
+  const knownPct = useMemo<number | null>(() => {
+    try {
+      const raw = localStorage.getItem(`zr.cov.${id}`);
+      if (!raw) return null;
+      const v = JSON.parse(raw) as { pct?: number };
+      return typeof v.pct === "number" ? v.pct : null;
+    } catch {
+      return null;
+    }
+  }, [id]);
+
   // Same front format as the player popup ("word [reading]").
   const popupFront = useMemo(() => {
     if (!popup) return null;
@@ -485,6 +508,8 @@ export function ReadRoute({
         tokenize={tokenize}
         renderTokenLine={renderTokenLine}
         onJump={onJump}
+        onCursorActivate={onCursorActivate}
+        knownPct={knownPct}
       />
       {popup && (
         <div

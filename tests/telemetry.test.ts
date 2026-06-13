@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { summarizeEvents, healthSummary, type TelemetryEvent } from "../src/lib/telemetry.ts";
+import {
+  summarizeEvents,
+  summarizeComprehension,
+  healthSummary,
+  type TelemetryEvent,
+} from "../src/lib/telemetry.ts";
 
 const DAY = new Date(2026, 5, 10, 12, 0, 0).getTime(); // local noon
 
@@ -57,6 +62,64 @@ describe("summarizeEvents", () => {
     const s = summarizeEvents([{ ts: DAY, type: "route_change", route: "stats" }]);
     expect(s.days[0]!.playSec).toBe(0);
     expect(s.media).toEqual([]);
+  });
+});
+
+// --- summarizeComprehension tests ---
+
+const quiz = (ts: number, correct: number, total: number, mediaId?: string): TelemetryEvent => ({
+  ts,
+  type: "quiz.result",
+  correct,
+  total,
+  ...(mediaId ? { mediaId } : {}),
+});
+
+describe("summarizeComprehension", () => {
+  test("empty log → zeroed summary", () => {
+    expect(summarizeComprehension([])).toEqual({
+      points: [],
+      quizzes: 0,
+      avgPct: 0,
+      totalQuestions: 0,
+      totalCorrect: 0,
+    });
+  });
+
+  test("aggregates quiz.result into points, averages, totals", () => {
+    const s = summarizeComprehension([
+      quiz(DAY, 8, 10, "m1"), // 80%
+      quiz(DAY + 1000, 6, 10), // 60%
+    ]);
+    expect(s.quizzes).toBe(2);
+    expect(s.points.map((p) => p.pct)).toEqual([80, 60]);
+    expect(s.avgPct).toBe(70);
+    expect(s.totalQuestions).toBe(20);
+    expect(s.totalCorrect).toBe(14);
+    expect(s.points[0]!.date).toBe("2026-06-10");
+  });
+
+  test("points are chronological regardless of input order", () => {
+    const s = summarizeComprehension([
+      quiz(DAY + 5000, 1, 2),
+      quiz(DAY, 2, 2),
+    ]);
+    expect(s.points.map((p) => p.ts)).toEqual([DAY, DAY + 5000]);
+  });
+
+  test("ignores non-quiz events and zero/negative-total quizzes", () => {
+    const s = summarizeComprehension([
+      { ts: DAY, type: "heartbeat", mediaId: "m1", position: 1 },
+      quiz(DAY, 0, 0), // torn/empty quiz → skipped
+      quiz(DAY + 1, 3, 4),
+    ]);
+    expect(s.quizzes).toBe(1);
+    expect(s.points[0]!.pct).toBe(75);
+  });
+
+  test("rounds comprehension % per quiz", () => {
+    const s = summarizeComprehension([quiz(DAY, 1, 3)]); // 33.33 → 33
+    expect(s.points[0]!.pct).toBe(33);
   });
 });
 

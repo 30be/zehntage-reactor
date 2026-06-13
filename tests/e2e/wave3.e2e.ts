@@ -6,7 +6,7 @@ import { openPlayer, playVideo, seekTo } from "./helpers.ts";
 test("transcript search finds a fixture line and navigates + seeks", async ({ page }) => {
   await page.goto("/#/");
   await page.locator(".search-input").fill("図書館");
-  const hit = page.locator(".search-hit", { hasText: "図書館" });
+  const hit = page.locator(".search-hit", { hasText: "clip · " }).filter({ hasText: "図書館" });
   await expect(hit).toBeVisible();
   await expect(hit.locator("mark")).toHaveText("図書館");
   await expect(hit).toContainText("clip");

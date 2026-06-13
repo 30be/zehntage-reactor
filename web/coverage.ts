@@ -20,6 +20,10 @@ import { isJaLang } from "./lang.ts";
 export interface Coverage {
   pct: number; // 0-100, rounded
   newCount: number; // distinct unknown lemmas
+  // i+1 density: share (0-1) of non-empty cues with EXACTLY one unknown lexical
+  // token — the cues that are instantly minable as clean cards. Drives the
+  // "study next" curriculum ranking (web/curriculum.ts).
+  i1density: number;
 }
 
 const CACHE_PREFIX = "zr.cov.";
@@ -43,14 +47,18 @@ function readCache(
       knownCount: number;
       pct: number;
       newCount: number;
+      i1density?: number;
     };
     if (
       v.trackId !== trackId ||
       v.ankiCount !== ankiCount ||
-      v.knownCount !== knownCount
+      v.knownCount !== knownCount ||
+      // i1density was added later — treat older cache entries lacking it as a
+      // miss so they get recomputed instead of surfacing undefined density.
+      typeof v.i1density !== "number"
     )
       return null;
-    return { pct: v.pct, newCount: v.newCount };
+    return { pct: v.pct, newCount: v.newCount, i1density: v.i1density };
   } catch {
     return null;
   }
@@ -83,21 +91,36 @@ export async function coverageOfCues(
   let lexical = 0;
   let known = 0;
   const unknown = new Set<string>();
+  // i+1 density: count cues with at least one lexical token, and of those how
+  // many carry exactly one unknown lexical token.
+  let cuesWithLex = 0;
+  let i1cues = 0;
   for (const cue of cues) {
+    let cueLex = 0;
+    let cueUnknown = 0;
     for (const t of tok.tokenize(cue.text)) {
       if (!isLexical(t)) continue;
       lexical++;
+      cueLex++;
       const key = wordKey(t);
       const isKnown =
         knownWords.has(key) ||
         matchFront(wordIndex, t.surface_form, t.reading, t.basic_form) != null;
       if (isKnown) known++;
-      else unknown.add(key);
+      else {
+        unknown.add(key);
+        cueUnknown++;
+      }
+    }
+    if (cueLex > 0) {
+      cuesWithLex++;
+      if (cueUnknown === 1) i1cues++;
     }
   }
   return {
     pct: lexical > 0 ? Math.round((known / lexical) * 100) : 100,
     newCount: unknown.size,
+    i1density: cuesWithLex > 0 ? i1cues / cuesWithLex : 0,
   };
 }
 

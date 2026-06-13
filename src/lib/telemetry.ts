@@ -177,6 +177,62 @@ export async function statsSummary(): Promise<StatsSummary> {
   return summarizeEvents(await readEvents());
 }
 
+// --- comprehension trend: quiz.result aggregation --------------------------
+//
+// Each quiz.result event carries { total, correct } from the comprehension
+// quiz (web/player/QuizPanel.tsx). We surface a per-quiz score series (for a
+// sparkline) plus simple aggregates, all derived from the raw event log — no
+// extra storage.
+
+export interface QuizPoint {
+  ts: number; // epoch ms of the quiz
+  date: string; // local "YYYY-MM-DD"
+  total: number;
+  correct: number;
+  pct: number; // 0-100 comprehension score
+}
+
+export interface ComprehensionSummary {
+  points: QuizPoint[]; // chronological
+  quizzes: number; // count of quiz.result events
+  avgPct: number; // mean comprehension %, 0-100 (0 when none)
+  totalQuestions: number;
+  totalCorrect: number;
+}
+
+/** Aggregate quiz.result events into a comprehension trend + averages. */
+export function summarizeComprehension(
+  events: TelemetryEvent[],
+): ComprehensionSummary {
+  const points: QuizPoint[] = [];
+  let totalQuestions = 0;
+  let totalCorrect = 0;
+  let pctSum = 0;
+  for (const e of events) {
+    if (e.type !== "quiz.result") continue;
+    const total = typeof e.total === "number" ? e.total : 0;
+    const correct = typeof e.correct === "number" ? e.correct : 0;
+    if (total <= 0) continue; // skip empty/torn quiz events
+    const pct = Math.round((correct / total) * 100);
+    points.push({ ts: e.ts, date: localDate(e.ts), total, correct, pct });
+    totalQuestions += total;
+    totalCorrect += correct;
+    pctSum += pct;
+  }
+  points.sort((a, b) => a.ts - b.ts);
+  return {
+    points,
+    quizzes: points.length,
+    avgPct: points.length > 0 ? Math.round(pctSum / points.length) : 0,
+    totalQuestions,
+    totalCorrect,
+  };
+}
+
+export async function comprehensionSummary(): Promise<ComprehensionSummary> {
+  return summarizeComprehension(await readEvents());
+}
+
 // --- analytics v2: per-(media, day) series + overview -----------------------
 
 export interface EpisodeDayRow {

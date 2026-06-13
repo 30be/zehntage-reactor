@@ -1047,7 +1047,8 @@ textarea.prompt {
 .ep-coef { flex: 0 0 56px; text-align: right; }
 
 .cpm-chart,
-.cum-chart {
+.cum-chart,
+.comp-chart {
   display: flex;
   align-items: flex-end;
   gap: 2px;
@@ -1056,8 +1057,10 @@ textarea.prompt {
   border-bottom: 1px solid var(--muted-bg);
 }
 .cpm-col,
-.cum-col { flex: 1; background: var(--fg); opacity: 0.7; min-height: 1px; }
+.cum-col,
+.comp-col { flex: 1; background: var(--fg); opacity: 0.7; min-height: 1px; }
 .cum-col { opacity: 0.4; }
+.comp-chart { margin-bottom: 22px; }
 
 .session-summary {
   position: absolute;
@@ -1168,6 +1171,15 @@ textarea.prompt {
 .badge.due { border: 1px solid currentColor; }
 .badge.known-pct { font-weight: 600; }
 .batchbar .sort-toggle { margin-left: 8px; }
+.batchbar .study-toggle { margin-left: 8px; }
+
+/* study-next curriculum hint: a quiet ink-edge marker, no color */
+.card.study-next { border-color: var(--accent); box-shadow: inset 2px 0 0 var(--accent); }
+.badge.study-next-mark {
+  border-color: var(--accent);
+  color: var(--accent-fg);
+  background: var(--accent);
+}
 
 /* ---- feedback batch (appended) ---- */
 
@@ -1764,3 +1776,65 @@ textarea:focus-visible {
 .quiz-end { text-align: center; }
 .quiz-score { font-size: 40px; font-weight: 700; }
 .quiz-sub { color: #a1a1aa; margin: 4px 0 16px; }
+
+/* ---- wave 17: read-mode cursor, progress, resume ---- */
+
+/* laconic cursor highlight — a left border accent, no background fight */
+.read-para.read-cursor {
+  border-left: 2px solid var(--fg);
+  padding-left: calc(0rem);
+  margin-left: -2px;
+}
+
+/* header meta row */
+.read-header-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.read-meta-item { font-variant-numeric: tabular-nums; }
+.read-progress-label { font-weight: 600; color: var(--fg); opacity: 0.7; }
+
+/* toggle button in header */
+.read-toggle-btn {
+  background: none;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  color: inherit;
+  opacity: 0.5;
+  cursor: pointer;
+  font-size: 0.75rem;
+  padding: 0.1rem 0.5rem;
+}
+.read-toggle-btn:hover { opacity: 0.8; }
+
+/* thin progress bar just below the header */
+.read-progress-track {
+  height: 2px;
+  background: var(--border);
+  border-radius: 1px;
+  margin-bottom: 1.5rem;
+  overflow: hidden;
+}
+.read-progress-fill {
+  height: 100%;
+  background: var(--fg);
+  border-radius: 1px;
+  transition: width 0.3s ease;
+}
+
+/* resume affordance — quiet inline pill at top of content area */
+.read-resume {
+  display: inline-block;
+  margin-bottom: 1rem;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 0.75rem;
+  padding: 0.2rem 0.6rem;
+  cursor: pointer;
+}
+.read-resume:hover { border-color: var(--fg); color: var(--fg); }

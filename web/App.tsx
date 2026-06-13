@@ -15,6 +15,7 @@ import { HOTKEYS } from "./commands.ts";
 import { startSync } from "./sync.ts";
 import { readBlacklist } from "./blacklist.ts";
 import { readKnownWords, useCoverage } from "./coverage.ts";
+import { studyNext, type EpisodeSignal } from "./curriculum.ts";
 import { buildWordIndex } from "./progress.ts";
 import { kataToHira } from "./tokenizer.ts";
 import { tmEvent, tmStart } from "./telemetry.ts";
@@ -648,6 +649,19 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
   const [sortBusy, setSortBusy] = useState(false);
   // entryId -> count of due Anki words appearing in the episode (SRS hint)
   const [dueCounts, setDueCounts] = useState<Map<string, number>>(() => new Map());
+  // "study next" curriculum hint: a quiet toggle that marks the single
+  // best-learning-value episode, derived from the coverage already computed in
+  // idle time (web/curriculum.ts ranking — no extra fetch).
+  const [showStudyNext, setShowStudyNext] = useState(false);
+  const studyNextId = useMemo(() => {
+    if (!entries) return null;
+    const signals: EpisodeSignal[] = [];
+    for (const e of entries) {
+      const c = coverage.get(e.id);
+      if (c) signals.push({ id: e.id, pct: c.pct, i1density: c.i1density });
+    }
+    return studyNext(signals);
+  }, [entries, coverage]);
 
   const toggleSort = useCallback(async () => {
     if (sortMode === "known") {
@@ -820,18 +834,40 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
         >
           {sortBusy ? "sort: …" : `sort: ${sortMode === "name" ? "name" : "known%"}`}
         </button>
+        <button
+          className={`btn sm study-toggle${showStudyNext ? " active" : ""}`}
+          title="Highlight the best episode to study next (high i+1 density, comfortable known%)"
+          aria-pressed={showStudyNext}
+          onClick={() => setShowStudyNext((v) => !v)}
+        >
+          study next{showStudyNext && !studyNextId ? ": …" : ""}
+        </button>
       </div>
       <div className="grid">
-        {(sortMode === "known" && knownPct
-          ? entries
-              .slice()
-              .sort(
-                (a, b) =>
-                  (knownPct.get(b.id) ?? -1) - (knownPct.get(a.id) ?? -1),
-              )
-          : entries
-        ).map((e) => (
-          <div key={e.id} className="card" onClick={() => go(`#/play/${e.id}`)}>
+        {(() => {
+          let ordered =
+            sortMode === "known" && knownPct
+              ? entries
+                  .slice()
+                  .sort(
+                    (a, b) =>
+                      (knownPct.get(b.id) ?? -1) - (knownPct.get(a.id) ?? -1),
+                  )
+              : entries;
+          // study-next: float the single recommended episode to the front
+          // without otherwise disturbing the order.
+          if (showStudyNext && studyNextId) {
+            const rest = ordered.filter((e) => e.id !== studyNextId);
+            const top = ordered.find((e) => e.id === studyNextId);
+            ordered = top ? [top, ...rest] : ordered;
+          }
+          return ordered;
+        })().map((e) => (
+          <div
+            key={e.id}
+            className={`card${showStudyNext && e.id === studyNextId ? " study-next" : ""}`}
+            onClick={() => go(`#/play/${e.id}`)}
+          >
             <div className="name">{e.name}</div>
             <div className="meta">
               {e.relPath} · {fmtSize(e.size)}
@@ -856,6 +892,14 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
               })()}
             </div>
             <div className="badges">
+              {showStudyNext && e.id === studyNextId && (
+                <span
+                  className="badge study-next-mark"
+                  title="Best learning value: many i+1 cues at a comfortable comprehension level"
+                >
+                  study next
+                </span>
+              )}
               {e.subLangs.length === 0 && (
                 <>
                   <span className="badge">no subs</span>
@@ -943,11 +987,15 @@ function Stats({ go }: { go: (h: string) => void }) {
 
   const [episodes, setEpisodes] = useState<EpisodeDayRow[] | null>(null);
   const [ov, setOv] = useState<Overview | null>(null);
+  const [comp, setComp] = useState<
+    import("./api.ts").ComprehensionSummary | null
+  >(null);
 
   useEffect(() => {
     void api.statsSummary().then(setSummary).catch(() => {});
     void api.statsEpisodes().then(setEpisodes).catch(() => {});
     void api.statsOverview().then(setOv).catch(() => {});
+    void api.statsComprehension().then(setComp).catch(() => {});
   }, []);
   // Per-episode coverage, computed in idle time (web/coverage.ts hook).
   const coverage = useCoverage(entries, anki);
@@ -1185,6 +1233,36 @@ function Stats({ go }: { go: (h: string) => void }) {
               </div>
             </>
           )}
+        </>
+      )}
+
+      {comp && comp.quizzes > 0 && (
+        <>
+          <h2 className="h2">Comprehension trend</h2>
+          <div className="section-intro muted">
+            Score on each comprehension quiz (q) over time — taller bar means a
+            higher share of questions answered correctly.
+          </div>
+          <div className="stats-totals">
+            <div className="stat">
+              <span className="stat-num">{comp.avgPct}%</span>
+              avg comprehension
+            </div>
+            <div className="stat">
+              <span className="stat-num">{comp.quizzes}</span>
+              quizzes taken
+            </div>
+          </div>
+          <div className="comp-chart">
+            {comp.points.slice(-40).map((p, i) => (
+              <span
+                key={`${p.ts}:${i}`}
+                className="comp-col"
+                title={`${p.date}: ${p.correct}/${p.total} (${p.pct}%)`}
+                style={{ height: `${Math.max(2, p.pct)}%` }}
+              />
+            ))}
+          </div>
         </>
       )}
 
