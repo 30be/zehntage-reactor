@@ -74,3 +74,26 @@ test("health page shown in sidebar nav", async ({ page }) => {
   await healthNav.click();
   await expect(page).toHaveURL(/#\/health/);
 });
+
+test("health page surfaces a visible error state on fetch failure", async ({ page }) => {
+  await page.route("**/api/health/summary", (route) =>
+    route.fulfill({ status: 500, body: "boom" }),
+  );
+  await page.goto("/#/health");
+  const err = page.locator(".state.error[role='alert']");
+  await expect(err).toBeVisible();
+  await expect(err).toContainText(/load/i);
+});
+
+test("health page shows a loading spinner while the summary is in flight", async ({ page }) => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => (release = r));
+  await page.route("**/api/health/summary", async (route) => {
+    await gate;
+    await route.continue();
+  });
+  await page.goto("/#/health");
+  await expect(page.locator(".state[role='status'] .spinner")).toBeVisible();
+  release();
+  await expect(page.locator(".health-table").first()).toBeVisible();
+});

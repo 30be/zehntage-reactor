@@ -11,6 +11,8 @@ const ALLOWLIST = [
   /Failed to load resource.*400/,
   // Cards tab renders fake-anki frame paths ("fake/upload.jpg") that 404
   /Failed to load resource.*404/,
+  // error-state tests deliberately fault a fetch to assert the visible state
+  /Failed to load resource.*500/,
 ];
 
 export const test = base.extend<{ page: Page }>({

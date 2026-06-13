@@ -42,17 +42,35 @@ export function HealthRoute() {
       .catch((e) => setFetchErr(String(e)));
   }, []);
 
-  if (fetchErr) return <div className="health-page"><span className="health-err">error: {fetchErr}</span></div>;
-  if (!data) return <div className="health-page"><span className="health-loading">loading…</span></div>;
+  if (fetchErr)
+    return (
+      <div className="health-page">
+        <h1 className="h1">Health</h1>
+        <div className="state error" role="alert">
+          Couldn’t load health summary.
+          <span className="state-detail">{fetchErr}</span>
+        </div>
+      </div>
+    );
+  if (!data)
+    return (
+      <div className="health-page">
+        <h1 className="h1">Health</h1>
+        <div className="state" role="status">
+          <span className="spinner" aria-hidden /> Loading…
+        </div>
+      </div>
+    );
 
   const maxP95 = Math.max(1, ...data.perfStats.map((s) => s.p95));
 
   return (
     <div className="health-page">
-      <h2 className="health-title">health · last 24h</h2>
+      <h1 className="h1">Health</h1>
+      <div className="section-intro muted">Last 24h.</div>
 
       <section className="health-section">
-        <h3 className="health-section-title">perf stats</h3>
+        <h2 className="h2 health-section-title">perf stats</h2>
         {data.perfStats.length === 0
           ? <div className="health-empty">no data</div>
           : (
@@ -78,7 +96,7 @@ export function HealthRoute() {
       </section>
 
       <section className="health-section">
-        <h3 className="health-section-title">slowest routes</h3>
+        <h2 className="h2 health-section-title">slowest routes</h2>
         {data.slowestRoutes.length === 0
           ? <div className="health-empty">no data</div>
           : (
@@ -99,7 +117,7 @@ export function HealthRoute() {
       </section>
 
       <section className="health-section">
-        <h3 className="health-section-title">anomalies</h3>
+        <h2 className="h2 health-section-title">anomalies</h2>
         {data.anomalyCounts.length === 0
           ? <div className="health-empty">none</div>
           : (
@@ -118,7 +136,7 @@ export function HealthRoute() {
       </section>
 
       <section className="health-section">
-        <h3 className="health-section-title">whisper warnings</h3>
+        <h2 className="h2 health-section-title">whisper warnings</h2>
         {data.whisperWarnings.length === 0
           ? <div className="health-empty">none</div>
           : (

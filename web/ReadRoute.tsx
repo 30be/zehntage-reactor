@@ -457,11 +457,16 @@ export function ReadRoute({
 
   if (notFound)
     return (
-      <div className="empty">
+      <div className="state error" role="alert">
         File not found. <a href="#/">Back to library</a>
       </div>
     );
-  if (!entry || cues == null) return <div className="empty">Loading…</div>;
+  if (!entry || cues == null)
+    return (
+      <div className="state" role="status">
+        <span className="spinner" aria-hidden /> Loading…
+      </div>
+    );
   if (cues.length === 0)
     return (
       <div className="empty">

@@ -27,6 +27,7 @@ import {
 } from "./cardfilter.ts";
 import {
   CardsIcon,
+  HealthIcon,
   HomeIcon,
   LibraryIcon,
   SettingsIcon,
@@ -141,6 +142,8 @@ export function App() {
       className={`side-item${active ? " active" : ""}`}
       disabled={disabled}
       title={label}
+      aria-label={label}
+      aria-current={active ? "page" : undefined}
       onClick={() => go(hash)}
     >
       <span className="side-icon" aria-hidden>{icon}</span>
@@ -168,7 +171,7 @@ export function App() {
           {navItem("Cards", <CardsIcon />, "#/cards", route.name === "cards")}
           {navItem("Stats", <StatsIcon />, "#/stats", route.name === "stats")}
           {navItem("Settings", <SettingsIcon />, "#/settings", route.name === "settings")}
-          {navItem("Health", <span>⬡</span>, "#/health", route.name === "health")}
+          {navItem("Health", <HealthIcon />, "#/health", route.name === "health")}
         </nav>
       </aside>
 
@@ -739,8 +742,28 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
     }
   };
 
-  if (error) return <div className="empty">Failed to load library: {error}</div>;
-  if (!entries) return <div className="empty">Loading library…</div>;
+  if (error)
+    return (
+      <>
+        <h1 className="h1">Library</h1>
+        <div className="state error" role="alert">
+          Failed to load the library.
+          <span className="state-detail">{error}</span>
+          <button className="btn sm retry" onClick={loadEntries}>
+            Retry
+          </button>
+        </div>
+      </>
+    );
+  if (!entries)
+    return (
+      <>
+        <h1 className="h1">Library</h1>
+        <div className="state" role="status">
+          <span className="spinner" aria-hidden /> Loading library…
+        </div>
+      </>
+    );
   if (entries.length === 0)
     return (
       <>
@@ -1169,7 +1192,11 @@ function Stats({ go }: { go: (h: string) => void }) {
       <div className="section-intro muted">
         Share of words in each episode you already know — click a row to watch.
       </div>
-      {entries == null && <div className="empty">Loading…</div>}
+      {entries == null && (
+        <div className="state" role="status">
+          <span className="spinner" aria-hidden /> Loading…
+        </div>
+      )}
       {entries != null && withSubs.length === 0 && (
         <div className="empty">No episodes with subtitles.</div>
       )}
@@ -1239,6 +1266,7 @@ const PAGE_SIZE = 50;
 
 function Cards({ go, toast }: { go: (h: string) => void; toast: (m: string) => void }) {
   const [cards, setCards] = useState<FullCard[] | null>(null);
+  const [cardsErr, setCardsErr] = useState<string | null>(null);
   const [entries, setEntries] = useState<LibraryEntry[]>([]);
   // double-click-to-confirm delete: front of the card in "sure?" state
   const [confirmFront, setConfirmFront] = useState<string | null>(null);
@@ -1252,11 +1280,20 @@ function Cards({ go, toast }: { go: (h: string) => void; toast: (m: string) => v
   const [rarity, setRarity] = useState<Rarity>("all");
   const [visible, setVisible] = useState(PAGE_SIZE);
 
-  useEffect(() => {
+  const loadCards = useCallback(() => {
+    setCardsErr(null);
+    setCards(null);
     void fetch("/api/anki/cards")
       .then((r) => (r.ok ? (r.json() as Promise<FullCard[]>) : Promise.reject(r.status)))
       .then(setCards)
-      .catch(() => setCards([]));
+      .catch((e) => {
+        setCards([]);
+        setCardsErr(`anki/cards → ${e instanceof Error ? e.message : e}`);
+      });
+  }, []);
+
+  useEffect(() => {
+    loadCards();
     void api.library().then(setEntries).catch(() => {});
     void api
       .ankiWords()
@@ -1355,8 +1392,21 @@ function Cards({ go, toast }: { go: (h: string) => void; toast: (m: string) => v
           </span>
         )}
       </div>
-      {cards == null && <div className="empty">Loading…</div>}
-      {cards != null && frameCards.length === 0 && (
+      {cards == null && (
+        <div className="state" role="status">
+          <span className="spinner" aria-hidden /> Loading…
+        </div>
+      )}
+      {cardsErr != null && (
+        <div className="state error" role="alert">
+          Couldn’t load cards.
+          <span className="state-detail">{cardsErr}</span>
+          <button className="btn sm retry" onClick={loadCards}>
+            Retry
+          </button>
+        </div>
+      )}
+      {cards != null && cardsErr == null && frameCards.length === 0 && (
         <div className="empty">No cards with frames yet.</div>
       )}
       {cards != null && frameCards.length > 0 && filtered.length === 0 && (
@@ -1459,7 +1509,12 @@ function PlayerRoute({
         </button>
       </div>
     );
-  if (!entry) return <div className="empty">Loading…</div>;
+  if (!entry)
+    return (
+      <div className="state" role="status">
+        <span className="spinner" aria-hidden /> Loading…
+      </div>
+    );
 
   return (
     <>

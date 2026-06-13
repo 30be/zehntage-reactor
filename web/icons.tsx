@@ -4,6 +4,7 @@
 // consistent, currentColor only).
 
 import {
+  Activity,
   BookOpen,
   Captions,
   ChartNoAxesColumn,
@@ -50,3 +51,4 @@ export const ViewIcon = wrap(MonitorPlay, 17);
 export const CardsIcon = wrap(GalleryVerticalEnd, 17);
 export const StatsIcon = wrap(ChartNoAxesColumn, 17);
 export const SettingsIcon = wrap(Settings, 17);
+export const HealthIcon = wrap(Activity, 17);

@@ -1622,8 +1622,7 @@ textarea.prompt {
 .cheat-what { color: var(--fg); }
 
 /* health debug view */
-.health-page { padding: 1.5rem; max-width: 900px; }
-.health-title { font-size: 1rem; font-weight: 600; margin-bottom: 1rem; letter-spacing: .04em; text-transform: uppercase; }
+.health-page { max-width: 900px; }
 .health-section { margin-bottom: 2rem; }
 .health-section-title { font-size: .75rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; opacity: .55; margin-bottom: .5rem; }
 .health-table { border-collapse: collapse; font-size: .8rem; font-family: monospace; width: 100%; }
@@ -1636,3 +1635,56 @@ textarea.prompt {
 .health-err { color: var(--c-err, #c00); }
 .health-empty { font-size: .75rem; opacity: .4; padding: .3rem .6rem; }
 .health-loading { font-size: .8rem; opacity: .6; }
+
+/* ===== wave 14 — design & UX polish (shared utilities; do not edit above) ===== */
+
+/* Shared async-view states. `.empty` (above) is the laconic base; loading
+   adds a spinner, error gets a subtle, visible (not silent) treatment. */
+.state { padding: 48px 0; text-align: center; color: var(--muted); }
+.state.error { color: #b91c1c; }
+.state .state-detail { display: block; margin-top: 6px; font-size: 12px; opacity: 0.8; word-break: break-word; }
+.state .retry { margin-top: 14px; }
+
+/* Monochrome spinner — 1px ring, accent arc. Respects reduced-motion. */
+.spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  vertical-align: -3px;
+  margin-right: 8px;
+  border: 1.5px solid var(--border);
+  border-top-color: var(--muted);
+  border-radius: 50%;
+  animation: zr-spin 0.7s linear infinite;
+}
+@keyframes zr-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation-duration: 2s; }
+}
+
+/* System-wide focus ring — subtle, monochrome, keyboard-only. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.btn:focus-visible,
+.side-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* Inputs/selects get a border emphasis instead of a detached ring. */
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+/* Never show the ring for mouse clicks. */
+:focus:not(:focus-visible) { outline: none; }
+
+/* Health view: align headings with the .h1/.h2 system while keeping the
+   monospace data tables. */
+.health-page .h1 { margin-bottom: 16px; }
+.health-page .h2 { color: var(--muted); }
