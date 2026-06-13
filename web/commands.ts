@@ -92,7 +92,6 @@ export const HOTKEYS: HotkeyRow[] = [
   { keys: "o", what: "session HUD overlay", scope: "player" },
   { keys: "e", what: "echo dictation mode", scope: "player" },
   { keys: "j", what: "jump to next i+1 cue", scope: "player" },
-  { keys: "z", what: "accept resume affordance", scope: "player" },
   { keys: "j / ↓", what: "next line", scope: "read" },
   { keys: "k / ↑", what: "prev line", scope: "read" },
   { keys: "Enter", what: "open word popup on cursor line", scope: "read" },

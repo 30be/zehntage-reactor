@@ -1,7 +1,9 @@
 // Wave 18 — two loop-closing features:
-//   1. End-of-episode auto-quiz prompt: when an episode ends, the session
-//      summary surfaces a quiet "comprehension check? (q)" affordance; pressing
-//      q starts the quiz over the just-watched cues (no modal auto-opens).
+//   1. End-of-episode auto-quiz: when an episode ends (and "auto-quiz at end of
+//      episode" is on, the default), the comprehension quiz over the just-
+//      watched cues launches directly — no "press q" affordance. Manual `q`
+//      still opens the same quiz.  (Round-3 redesign: the old "comprehension
+//      check? (q)" prompt line was removed in favor of auto-launch.)
 //   2. Home "Today" panel: a quiet summary of today's study from telemetry,
 //      rendered only when there is activity today.
 //
@@ -12,7 +14,7 @@ import { openPlayer, seekTo, waitForTokens } from "./helpers.ts";
 
 // --- 1. end-of-episode auto-quiz affordance --------------------------------
 
-test.describe("end-of-episode comprehension prompt", () => {
+test.describe("end-of-episode comprehension quiz", () => {
   test.beforeEach(async ({ page }) => {
     await openPlayer(page, "clip.mp4");
     // seek into the last cue (22–25s): every cue-start has passed, so all six
@@ -29,45 +31,41 @@ test.describe("end-of-episode comprehension prompt", () => {
     });
   }
 
-  test("ending an episode surfaces a quiet 'comprehension check? (q)' affordance", async ({
+  test("ending an episode auto-launches the comprehension quiz (no '(q)' prompt)", async ({
     page,
   }) => {
     await endEpisode(page);
-    const summary = page.locator(".session-summary");
-    await expect(summary).toBeVisible();
-    await expect(summary.locator(".ss-quiz")).toContainText("comprehension check?");
-    await expect(summary.locator(".ss-quiz")).toContainText("q");
-    // The modal must NOT auto-open — only the affordance is shown.
-    await expect(page.locator(".quiz-card")).toHaveCount(0);
-  });
-
-  test("pressing q starts the quiz over watched cues (and dismisses the prompt)", async ({
-    page,
-  }) => {
-    await endEpisode(page);
-    await expect(page.locator(".session-summary")).toBeVisible();
-
-    await page.keyboard.press("q");
+    // The quiz auto-opens over the watched cues — no "press q" affordance.
     const card = page.locator(".quiz-card");
     await expect(card).toBeVisible();
     await expect(card.locator(".quiz-prompt")).not.toBeEmpty();
-    // the summary/countdown overlay is gone (q started the quiz, not nav)
-    await expect(page.locator(".session-summary")).toHaveCount(0);
+    // The removed affordance line must not exist.
+    await expect(page.locator(".ss-quiz")).toHaveCount(0);
+  });
 
-    // Esc closes the quiz again.
+  test("the auto-launched quiz is the same quiz `q` builds; Esc closes it", async ({
+    page,
+  }) => {
+    await endEpisode(page);
+    const card = page.locator(".quiz-card");
+    await expect(card).toBeVisible();
+    await expect(card.locator(".quiz-prompt")).not.toBeEmpty();
+
+    // First Esc dismisses the end-of-episode session-summary overlay (its
+    // auto-next cancel listener); a second Esc closes the quiz itself.
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".session-summary")).toHaveCount(0);
     await page.keyboard.press("Escape");
     await expect(card).toHaveCount(0);
   });
 
-  test("ignoring the prompt dismisses it without opening the quiz", async ({
+  test("the session summary still renders alongside the auto-quiz", async ({
     page,
   }) => {
     await endEpisode(page);
+    await expect(page.locator(".quiz-card")).toBeVisible();
+    // The end-of-episode summary overlay is still shown behind the quiz.
     await expect(page.locator(".session-summary")).toBeVisible();
-    // any non-q key cancels the auto-next + summary, no quiz appears
-    await page.keyboard.press("ArrowUp");
-    await expect(page.locator(".session-summary")).toHaveCount(0);
-    await expect(page.locator(".quiz-card")).toHaveCount(0);
   });
 });
 

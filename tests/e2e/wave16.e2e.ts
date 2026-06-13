@@ -3,66 +3,11 @@
 //  2. comprehension trend on Stats from quiz.result telemetry
 // Both reuse data we already collect; no Gemini. Uses the clip.mp4 fixture.
 
-import { test, expect, entryId } from "./helpers.ts";
+import { test, expect } from "./helpers.ts";
 
-// --- 1. study-next marker -------------------------------------------------
+// --- study-next marker removed (feature deleted in round-2 redesign) ------
 
-test("the study-next toggle marks the recommended episode", async ({ page }) => {
-  // Pre-seed the coverage cache (web/coverage.ts localStorage contract) with a
-  // strong i+1 signal at a comfortable known% for clip.mp4 — independent of the
-  // tokenizer. The cache key is (trackId, ankiCount, knownCount). ankiCount is
-  // the live fake-deck size (cards accumulate across the run), and we leave
-  // zr.known empty (knownCount 0), so the useCoverage hook reads our seeded
-  // value instead of recomputing.
-  const clipId = await entryId(page, "clip.mp4");
-  const subs = await (await page.request.get(`/api/subs/${clipId}`)).json();
-  const jaTrack = (subs as { id: string; lang: string }[]).find((t) =>
-    t.lang.startsWith("ja"),
-  )!;
-  const deck = await (await page.request.get("/api/anki/words")).json();
-  const ankiCount = (deck as { words: unknown[] }).words.length;
-  await page.addInitScript(
-    ([id, trackId, count]) => {
-      localStorage.setItem(
-        `zr.cov.${id}`,
-        JSON.stringify({
-          trackId,
-          ankiCount: count,
-          knownCount: 0,
-          pct: 80,
-          newCount: 5,
-          i1density: 0.6,
-        }),
-      );
-    },
-    [clipId, jaTrack.id, ankiCount] as const,
-  );
-
-  await page.goto("/#/");
-  await expect(page.locator(".grid .card").first()).toBeVisible();
-
-  const toggle = page.locator(".study-toggle");
-  await expect(toggle).toBeVisible();
-  // off by default — no marker, no active class
-  await expect(page.locator(".card.study-next")).toHaveCount(0);
-
-  await toggle.click();
-  await expect(toggle).toHaveAttribute("aria-pressed", "true");
-
-  // coverage computes in idle time; the recommended card gets the marker.
-  const marked = page.locator(".card.study-next");
-  await expect(marked).toBeVisible({ timeout: 20_000 });
-  await expect(marked.locator(".badge.study-next-mark")).toHaveText("study next");
-  // the recommended card floats to the front of the grid
-  await expect(page.locator(".grid .card").first()).toHaveClass(/study-next/);
-
-  // toggling off removes the marker
-  await toggle.click();
-  await expect(toggle).toHaveAttribute("aria-pressed", "false");
-  await expect(page.locator(".card.study-next")).toHaveCount(0);
-});
-
-// --- 2. comprehension trend ----------------------------------------------
+// --- comprehension trend -------------------------------------------------
 
 test("quiz.result events aggregate into /api/stats/comprehension", async ({ page }) => {
   const now = Date.now();

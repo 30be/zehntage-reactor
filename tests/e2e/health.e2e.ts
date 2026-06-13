@@ -80,7 +80,7 @@ test("health page surfaces a visible error state on fetch failure", async ({ pag
     route.fulfill({ status: 500, body: "boom" }),
   );
   await page.goto("/#/health");
-  const err = page.locator(".state.error[role='alert']");
+  const err = page.locator(".state[role='alert']");
   await expect(err).toBeVisible();
   await expect(err).toContainText(/load/i);
 });

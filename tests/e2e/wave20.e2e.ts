@@ -35,7 +35,8 @@ test.describe("continue watching", () => {
 
     await page.goto("/#/");
 
-    const row = page.locator(".continue-row");
+    // continue affordance now lives inline in the library header (.lib-head)
+    const row = page.locator(".lib-head");
     await expect(row).toBeVisible();
     const card = row.locator(".continue-card", { hasText: "clip" });
     await expect(card).toBeVisible();
@@ -50,7 +51,7 @@ test.describe("continue watching", () => {
   test("no continue row when there is no resume position", async ({ page }) => {
     await page.goto("/#/");
     // (no seed) — the affordance renders nothing
-    await expect(page.locator(".continue-row")).toHaveCount(0);
+    await expect(page.locator(".continue-card")).toHaveCount(0);
   });
 });
 

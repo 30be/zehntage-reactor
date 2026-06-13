@@ -520,6 +520,19 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     });
   }, [buildQuizFromWatched, toast]);
 
+  // Kept in a ref so the `ended` handler (whose effect deps stay minimal) can
+  // auto-launch the same quiz `q` builds without re-subscribing every render.
+  const toggleQuizRef = useRef(toggleQuiz);
+  useEffect(() => {
+    toggleQuizRef.current = toggleQuiz;
+  }, [toggleQuiz]);
+  // Latest auto-quiz setting + a per-episode-end guard against double-firing.
+  const autoQuizRef = useRef(settings.autoQuizPrompt !== false);
+  useEffect(() => {
+    autoQuizRef.current = settings.autoQuizPrompt !== false;
+  }, [settings.autoQuizPrompt]);
+  const autoQuizFiredRef = useRef(false);
+
   const onQuizDone = useCallback(
     (r: QuizResult) => {
       tmEvent("quiz.result", {
@@ -826,30 +839,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     return () => window.clearInterval(id);
   }, [hudOpen]);
 
-  // --- Wave 13.A: smart-resume affordance ("resume at MM:SS? press z") ---
-  const [resumeHint, setResumeHint] = useState<number | null>(null);
-  const resumeHintRef = useRef<number | null>(null);
-  useEffect(() => {
-    resumeHintRef.current = resumeHint;
-  }, [resumeHint]);
-
-  // `z` accepts the resume affordance; it auto-hides after ~8s otherwise.
-  useEffect(() => {
-    if (resumeHint == null) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.code !== "KeyZ" || e.ctrlKey || e.metaKey || e.altKey) return;
-      const v = videoRef.current;
-      const target = resumeHintRef.current;
-      if (v && target != null) v.currentTime = target;
-      setResumeHint(null);
-    };
-    window.addEventListener("keydown", onKey, true);
-    const t = window.setTimeout(() => setResumeHint(null), 8000);
-    return () => {
-      window.removeEventListener("keydown", onKey, true);
-      window.clearTimeout(t);
-    };
-  }, [resumeHint]);
+  // --- Wave 13.A: smart-resume — now AUTO-resumes on load (see onMeta below).
+  // The old "resume at MM:SS? press z" affordance + `z` hotkey were removed.
 
   // --- Wave 13.B: echo dictation mode (`e`) ---
   const echoRef = useRef(false);
@@ -1136,6 +1127,11 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       startAtRef.current = startAt; // metadata not loaded yet — onMeta seeks
     }
   }, [startAt]);
+  // Guard: auto-resume fires at most once per episode load (per onMeta run).
+  const autoResumedRef = useRef(false);
+  useEffect(() => {
+    autoResumedRef.current = false;
+  }, [entry.id]);
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
@@ -1160,6 +1156,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         startAtRef.current = null;
         return;
       }
+      // Auto-resume: no explicit deep-link, so jump to the saved position
+      // once. Skips near-start (<15s) / near-end (within 10s of duration).
+      if (autoResumedRef.current) return;
       try {
         const saved = parseFloat(localStorage.getItem(posKey) ?? "");
         if (
@@ -1168,9 +1167,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           v.duration > 0 &&
           saved < v.duration - 10
         ) {
-          // Smart resume: don't jump silently — offer a transient affordance
-          // ("resume at MM:SS? press z"). `z` jumps; it auto-hides otherwise.
-          setResumeHint(saved);
+          autoResumedRef.current = true;
+          v.currentTime = saved;
         }
       } catch {
         /* ignore */
@@ -1404,9 +1402,16 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
+    autoQuizFiredRef.current = false;
     const onEnded = () => {
       tmEvent("episode_end", { mediaId: entry.id });
       cancelAutoNextRef.current?.();
+      // Auto comprehension quiz: when enabled, launch the same quiz `q` builds
+      // directly (no "press q" prompt). Guarded so it fires once per end.
+      if (autoQuizRef.current && !autoQuizFiredRef.current) {
+        autoQuizFiredRef.current = true;
+        toggleQuizRef.current();
+      }
       // Session summary overlay (any key/click dismisses it along with the
       // countdown; the countdown line is rendered inside the panel).
       setSessionSummary({
@@ -1442,8 +1447,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         const ke = e as KeyboardEvent;
         if (ke.shiftKey && (ke.key === "ArrowRight" || ke.key === "ArrowLeft"))
           return;
-        // `q` starts the comprehension quiz (the auto-quiz affordance) — the
-        // hotkey handler already ran in capture order, so suppress the toast.
+        // `q` manually starts the comprehension quiz — the hotkey handler
+        // already ran in capture order, so suppress the auto-next-cancel toast.
         if (ke.key === "q" || ke.key === "Q") return;
         toast("auto-next canceled");
       };
@@ -2331,10 +2336,30 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     else void stageRef.current?.requestFullscreen?.();
   }, []);
 
-  const sidebarSeek = useCallback((t: number) => {
-    const v = videoRef.current;
-    if (v) v.currentTime = Math.min(v.duration || Infinity, Math.max(0, t));
-  }, []);
+  const sidebarSeek = useCallback(
+    (t: number) => {
+      const v = videoRef.current;
+      if (!v) return;
+      // The sidebar passes a cue's start (already + subOffset). Seeking to the
+      // exact boundary often lands the playhead just before the cue actually
+      // renders (decoder keyframe snap / boundary rounding), so the clicked
+      // subtitle doesn't show. Nudge forward by a small epsilon, clamped to
+      // stay inside the cue, so the clicked cue becomes active immediately.
+      const cues = displayCues;
+      const off = subOffsetRef.current;
+      const idx = activeCueIndex(cues, t - off);
+      let target = t;
+      if (idx >= 0) {
+        const cue = cues[idx]!;
+        const startV = cue.start + off;
+        const endV = cue.end + off;
+        target = Math.min(startV + 0.05, endV - 0.01);
+        if (target < startV) target = startV;
+      }
+      v.currentTime = Math.min(v.duration || Infinity, Math.max(0, target));
+    },
+    [displayCues],
+  );
 
   // --- command palette: expose player actions (web/commands.ts registry).
   // Registered once per episode; closures read the latest callbacks via a ref
@@ -2563,20 +2588,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             Skip →
           </button>
         )}
-        {/* Wave 13.A: smart-resume affordance — quiet, transient, z to accept */}
-        {resumeHint != null && (
-          <button
-            className="resume-hint"
-            onClick={() => {
-              const v = videoRef.current;
-              if (v) v.currentTime = resumeHint;
-              setResumeHint(null);
-            }}
-            title="Resume where you left off"
-          >
-            resume at {fmtTime(resumeHint)}? press z
-          </button>
-        )}
+        {/* Wave 13.A: smart-resume is now automatic — no affordance UI. */}
         {/* Wave 13.A: session HUD (toggle with `o`) */}
         {hudOpen &&
           (() => {
@@ -2652,9 +2664,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
                 streak: {sessionSummary.streak} day
                 {sessionSummary.streak === 1 ? "" : "s"}
               </div>
-            )}
-            {settings.autoQuizPrompt !== false && (
-              <div className="ss-line ss-quiz">comprehension check? (q)</div>
             )}
             <div className="ss-line ss-dim">
               next episode in 5s — any key cancels

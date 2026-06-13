@@ -44,9 +44,8 @@ export function HealthRoute() {
 
   if (fetchErr)
     return (
-      <div className="health-page">
-        <h1 className="h1">Health</h1>
-        <div className="state error" role="alert">
+      <div className="health-page container">
+        <div className="state" role="alert">
           Couldn’t load health summary.
           <span className="state-detail">{fetchErr}</span>
         </div>
@@ -54,8 +53,7 @@ export function HealthRoute() {
     );
   if (!data)
     return (
-      <div className="health-page">
-        <h1 className="h1">Health</h1>
+      <div className="health-page container">
         <div className="state" role="status">
           <span className="spinner" aria-hidden /> Loading…
         </div>
@@ -65,8 +63,7 @@ export function HealthRoute() {
   const maxP95 = Math.max(1, ...data.perfStats.map((s) => s.p95));
 
   return (
-    <div className="health-page">
-      <h1 className="h1">Health</h1>
+    <div className="health-page container">
       <div className="section-intro muted">Last 24h.</div>
 
       <section className="health-section">
@@ -107,7 +104,7 @@ export function HealthRoute() {
                 <tr key={i}>
                   <td className="health-type">{r.path}</td>
                   <td className={r.ms > 1000 ? "health-warn" : ""}>{fmt(r.ms)}</td>
-                  <td className={r.status >= 500 ? "health-err" : ""}>{r.status}</td>
+                  <td className={r.status >= 500 ? "health-warn" : ""}>{r.status}</td>
                   <td>{fmtTs(r.ts)}</td>
                 </tr>
               ))}

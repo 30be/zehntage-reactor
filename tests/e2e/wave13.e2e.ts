@@ -44,7 +44,7 @@ test("HUD cue counter increments after crossing a cue boundary", async ({
   });
 });
 
-test("smart-resume affordance appears (z accepts) instead of auto-jumping", async ({
+test("smart-resume auto-seeks to the saved position on open (no z prompt)", async ({
   page,
 }) => {
   const id = await openPlayer(page, "clip.mp4");
@@ -54,15 +54,8 @@ test("smart-resume affordance appears (z accepts) instead of auto-jumping", asyn
   }, id);
   await page.reload();
   await expect(page.locator("video")).toBeVisible();
-  const hint = page.locator(".resume-hint");
-  await expect(hint).toBeVisible({ timeout: 8000 });
-  // it did NOT silently jump
-  const before = await page.evaluate(
-    () => document.querySelector("video")!.currentTime,
-  );
-  expect(before).toBeLessThan(15);
-  await page.keyboard.press("z");
-  await expect(hint).toHaveCount(0);
+  // AUTO-RESUME: it jumps to the saved position with no affordance / no `z`.
+  await expect(page.locator(".resume-hint")).toHaveCount(0);
   await expect
     .poll(() => page.evaluate(() => document.querySelector("video")!.currentTime))
     .toBeGreaterThan(17);

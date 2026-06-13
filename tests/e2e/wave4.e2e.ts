@@ -56,7 +56,7 @@ test("stats page renders totals and per-episode coverage bars", async ({ page })
   await page.goto("/#/");
   await page.getByRole("button", { name: "Stats" }).click();
   await expect(page).toHaveURL(/#\/stats/);
-  await expect(page.locator("h1")).toHaveText("Stats");
+  await expect(page.locator(".side-item.active")).toHaveAttribute("aria-label", "Stats");
   await expect(page.locator(".stats-totals .stat", { hasText: "known words" })).toBeVisible();
   await expect(page.locator(".stats-totals .stat", { hasText: "cards added" })).toBeVisible();
   // episodes with subs get a row + a coverage bar (computed in idle time)

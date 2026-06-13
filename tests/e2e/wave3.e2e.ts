@@ -5,6 +5,8 @@ import { openPlayer, playVideo, seekTo } from "./helpers.ts";
 
 test("transcript search finds a fixture line and navigates + seeks", async ({ page }) => {
   await page.goto("/#/");
+  // search field is hidden until "/" is pressed (global hotkey)
+  await page.locator("body").press("/");
   await page.locator(".search-input").fill("図書館");
   const hit = page.locator(".search-hit", { hasText: "clip · " }).filter({ hasText: "図書館" });
   await expect(hit).toBeVisible();
@@ -23,6 +25,8 @@ test("transcript search finds a fixture line and navigates + seeks", async ({ pa
 
 test("search clears with Escape", async ({ page }) => {
   await page.goto("/#/");
+  // search field is hidden until "/" is pressed (global hotkey)
+  await page.locator("body").press("/");
   const input = page.locator(".search-input");
   await input.fill("図書館");
   await expect(page.locator(".search-hit").first()).toBeVisible();

@@ -65,7 +65,7 @@ test("stats page renders the activity grid and daily list", async ({ page }) => 
 
 test("home page shows hotkeys and current library root", async ({ page }) => {
   await page.goto("/#/home");
-  await expect(page.locator(".hotkey-grid .hotkey-row").first()).toBeVisible();
+  await expect(page.locator(".hotkey-grid .hotkey").first()).toBeVisible();
   await expect(page.locator(".home-root")).toContainText("fixtures/lib");
   await expect(page.locator(".home-root")).toContainText("entries");
 });

@@ -42,29 +42,35 @@ test("cards tab lists frame cards; rewatch navigates; delete needs confirm", asy
   await page.locator(".side-item", { hasText: "Cards" }).click();
   await expect(page).toHaveURL(/#\/cards$/);
 
-  const row = page.locator(".card-row", { hasText: "図書館" });
+  const row = page.locator(".card-tile", { hasText: "図書館" });
   await expect(row).toHaveCount(1);
-  await expect(row).toContainText("library");
+  // RU translation moved off-screen into the tile's title tooltip.
+  await expect(row).toHaveAttribute("title", /library/);
   await expect(row.locator(".card-frame")).toBeVisible();
   // the frameless card is filtered out
-  await expect(page.locator(".card-row", { hasText: "学校" })).toHaveCount(0);
+  await expect(page.locator(".card-tile", { hasText: "学校" })).toHaveCount(0);
 
   // Rewatch: enabled (episode in library), navigates to #/play/<id>@5.
-  const rewatch = row.locator(".card-rewatch");
+  // The actions overlay is hover-revealed and sits over the frame image, so
+  // hover the tile first (and force past the img's pointer interception).
+  const rewatch = row.locator(".card-play");
   await expect(rewatch).toBeEnabled();
-  await rewatch.click();
+  await row.hover();
+  await rewatch.click({ force: true });
   await expect(page).toHaveURL(new RegExp(`#/play/${id}@5$`));
   await expect(page.locator("video")).toBeVisible();
 
-  // Back to cards: delete needs a second click ("sure?"), then removes.
+  // Back to cards: delete needs a second click (a `.confirm` class is added),
+  // then removes.
   await page.locator(".side-item", { hasText: "Cards" }).click();
   await expect(row).toHaveCount(1);
-  const del = row.locator(".card-delete");
-  await del.click();
-  await expect(del).toHaveText("sure?");
+  const del = row.locator(".card-del");
+  await row.hover();
+  await del.click({ force: true });
+  await expect(del).toHaveClass(/confirm/);
   await expect(row).toHaveCount(1); // first click never deletes
-  await del.click();
-  await expect(page.locator(".card-row", { hasText: "図書館" })).toHaveCount(0);
+  await del.click({ force: true });
+  await expect(page.locator(".card-tile", { hasText: "図書館" })).toHaveCount(0);
 
   // Server-side: the card is actually gone from the fake Anki.
   const words = await (await page.request.get("/api/anki/words")).json();

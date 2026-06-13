@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Play, Trash2 } from "lucide-react";
 import {
   api,
   type AnkiWordsResponse,
@@ -19,7 +20,6 @@ import {
 import { startSync } from "./sync.ts";
 import { readBlacklist } from "./blacklist.ts";
 import { readKnownWords, useCoverage } from "./coverage.ts";
-import { studyNext, type EpisodeSignal } from "./curriculum.ts";
 import { kataToHira } from "./tokenizer.ts";
 import { tmEvent, tmStart } from "./telemetry.ts";
 import { loadFreq } from "./freq.ts";
@@ -150,6 +150,20 @@ export function App() {
     window.location.hash = hash;
   };
 
+  // Current theme + shared setter, reused by the sidebar switcher and the
+  // Settings <select> (both stay in sync via the shared `settings` state).
+  const theme = (settings.theme as string) || "light";
+  const applyTheme = (value: string) => {
+    document.documentElement.dataset.theme = value;
+    try {
+      localStorage.setItem("zr.theme", value);
+    } catch {
+      /* ignore storage errors */
+    }
+    setSettings((s) => ({ ...s, theme: value }));
+    void api.saveSettings({ theme: value }).catch(() => {});
+  };
+
   const navItem = (
     label: string,
     icon: React.ReactNode,
@@ -192,6 +206,38 @@ export function App() {
           {navItem("Settings", <SettingsIcon />, "#/settings", route.name === "settings")}
           {navItem("Health", <HealthIcon />, "#/health", route.name === "health")}
         </nav>
+        <div className="side-theme" role="group" aria-label="Theme">
+          <button
+            className="theme-opt"
+            data-active={theme === "light"}
+            title="Light theme"
+            aria-label="Light theme"
+            aria-pressed={theme === "light"}
+            onClick={() => applyTheme("light")}
+          >
+            日
+          </button>
+          <button
+            className="theme-opt"
+            data-active={theme === "dark"}
+            title="Dark theme"
+            aria-label="Dark theme"
+            aria-pressed={theme === "dark"}
+            onClick={() => applyTheme("dark")}
+          >
+            月
+          </button>
+          <button
+            className="theme-opt"
+            data-active={theme === "system"}
+            title="Follow system theme"
+            aria-label="System theme"
+            aria-pressed={theme === "system"}
+            onClick={() => applyTheme("system")}
+          >
+            ◐
+          </button>
+        </div>
       </aside>
 
       <main className="container">
@@ -321,10 +367,6 @@ function Home({ go }: { go: (h: string) => void }) {
   }, []);
   return (
     <>
-      <h1 className="h1">zehntage-reactor</h1>
-      <p className="home-tagline">
-        The minimalist local player that turns anime into your Anki deck.
-      </p>
       <TodayPanel />
       <h2 className="h2">How it works</h2>
       <ol className="home-steps">
@@ -335,15 +377,25 @@ function Home({ go }: { go: (h: string) => void }) {
       </ol>
       <h2 className="h2">Hotkeys</h2>
       <div className="hotkey-grid">
-        {HOTKEYS.map((h) => (
-          <div key={`${h.scope}:${h.keys}`} className="hotkey-row">
-            <span className="hotkey-key">{h.keys}</span>
-            <span className="hotkey-desc">
-              {h.what}
-              <span className="hotkey-scope"> · {h.scope}</span>
-            </span>
-          </div>
-        ))}
+        {(["player", "read", "global"] as const)
+          .map((scope) => ({
+            scope,
+            rows: HOTKEYS.filter((h) => h.scope === scope),
+          }))
+          .filter((g) => g.rows.length > 0)
+          .map((g) => (
+            <section key={g.scope} className="hotkey-group">
+              <h3 className="hotkey-group-title">{g.scope}</h3>
+              <div className="hotkey-items">
+                {g.rows.map((h) => (
+                  <div key={`${h.scope}:${h.keys}`} className="hotkey">
+                    <kbd className="hotkey-key">{h.keys}</kbd>
+                    <span className="hotkey-desc">{h.what}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ))}
       </div>
       <div className="home-root muted">
         Current library: {root ? `${root.root} · ${root.count} entries` : "…"}
@@ -671,6 +723,29 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
   // --- transcript search (debounced 300ms; Esc clears) ---
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[] | null>(null);
+  // search field hidden until the user presses "/" (global hotkey)
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "/") return;
+      const el = document.activeElement as HTMLElement | null;
+      const typing =
+        el != null &&
+        (el.tagName === "INPUT" ||
+          el.tagName === "TEXTAREA" ||
+          el.isContentEditable);
+      if (typing) return;
+      e.preventDefault();
+      setSearchOpen(true);
+      searchRef.current?.focus();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  useEffect(() => {
+    if (searchOpen) searchRef.current?.focus();
+  }, [searchOpen]);
   useEffect(() => {
     const q = query.trim();
     if (!q) {
@@ -703,24 +778,6 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
   const [dueCounts, setDueCounts] = useState<Map<string, number>>(() => new Map());
   // shared anki word list — fetched once, reused by dueCounts effect and toggleSort
   const [ankiData, setAnkiData] = useState<Awaited<ReturnType<typeof api.ankiWords>> | null>(null);
-  // "study next" curriculum hint: a quiet toggle that marks the single
-  // best-learning-value episode, derived from the coverage already computed in
-  // idle time (web/curriculum.ts ranking — no extra fetch).
-  const [showStudyNext, setShowStudyNext] = useState(false);
-  const studyNextId = useMemo(() => {
-    if (!entries) return null;
-    const signals: EpisodeSignal[] = [];
-    for (const e of entries) {
-      const c = coverage.get(e.id);
-      if (c) signals.push({ id: e.id, pct: c.pct, i1density: c.i1density });
-    }
-    return studyNext(signals);
-  }, [entries, coverage]);
-
-  // true once coverage has data for at least one entry — distinguishes
-  // "still computing" from "genuinely no recommendation"
-  const studyNextReady = coverage.size > 0;
-
   // --- continue watching: most-recent episodes with a resume position ---
   const continueWatching = useMemo(
     () =>
@@ -737,22 +794,14 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
 
   const ordered = useMemo(() => {
     const base = entries ?? [];
-    let o =
-      sortMode === "known" && knownPct
-        ? base
-            .slice()
-            .sort(
-              (a, b) =>
-                (knownPct.get(b.id) ?? -1) - (knownPct.get(a.id) ?? -1),
-            )
-        : base;
-    if (showStudyNext && studyNextId) {
-      const rest = o.filter((e) => e.id !== studyNextId);
-      const top = o.find((e) => e.id === studyNextId);
-      o = top ? [top, ...rest] : o;
-    }
-    return o;
-  }, [entries, sortMode, knownPct, showStudyNext, studyNextId]);
+    return sortMode === "known" && knownPct
+      ? base
+          .slice()
+          .sort(
+            (a, b) => (knownPct.get(b.id) ?? -1) - (knownPct.get(a.id) ?? -1),
+          )
+      : base;
+  }, [entries, sortMode, knownPct]);
 
   const toggleSort = useCallback(async () => {
     if (sortMode === "known") {
@@ -852,7 +901,6 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
   if (error)
     return (
       <>
-        <h1 className="h1">Library</h1>
         <div className="state error" role="alert">
           Failed to load the library.
           <span className="state-detail">{error}</span>
@@ -865,7 +913,6 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
   if (!entries)
     return (
       <>
-        <h1 className="h1">Library</h1>
         <div className="state" role="status">
           <span className="spinner" aria-hidden /> Loading library…
         </div>
@@ -874,7 +921,6 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
   if (entries.length === 0)
     return (
       <>
-        <h1 className="h1">Library</h1>
         <RootChooser toast={toast} onChanged={loadEntries} />
         <div className="empty">No video files found.</div>
       </>
@@ -882,15 +928,14 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
 
   return (
     <>
-      <h1 className="h1">Library</h1>
-      <RootChooser toast={toast} onChanged={loadEntries} />
-      {continueWatching.length > 0 && (
-        <div className="continue-row" aria-label="Continue watching">
-          <span className="continue-label muted">continue</span>
-          {continueWatching.map(({ rec, entry }) => (
+      <div className="lib-head">
+        <RootChooser toast={toast} onChanged={loadEntries} />
+        {continueWatching.length > 0 && (() => {
+          const { rec, entry } = continueWatching[0]!;
+          return (
             <button
-              key={rec.id}
               className="card continue-card"
+              aria-label="Continue watching"
               onClick={() => go(`#/play/${rec.id}@${Math.floor(rec.pos)}`)}
               title={`Resume ${entry.name} at ${fmtCueTime(rec.pos)}`}
             >
@@ -899,18 +944,23 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
               </span>
               <span className="badge">▶ {fmtCueTime(rec.pos)}</span>
             </button>
-          ))}
-        </div>
-      )}
+          );
+        })()}
+      </div>
       <input
+        ref={searchRef}
         className="search-input"
         type="text"
         aria-label="Search library"
-        placeholder="search transcripts…"
+        placeholder="search transcripts…  (press / )"
+        hidden={!searchOpen}
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Escape") setQuery("");
+          if (e.key === "Escape") {
+            setQuery("");
+            setSearchOpen(false);
+          }
         }}
       />
       {hits != null && (
@@ -946,88 +996,69 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
         >
           {sortBusy ? "sort: …" : `sort: ${sortMode === "name" ? "name" : "known%"}`}
         </button>
-        <button
-          className={`btn sm study-toggle${showStudyNext ? " active" : ""}`}
-          title="Highlight the best episode to study next (high i+1 density, comfortable known%)"
-          aria-pressed={showStudyNext}
-          onClick={() => setShowStudyNext((v) => !v)}
-        >
-          study next{showStudyNext ? (studyNextReady ? (studyNextId ? "" : ": —") : ": …") : ""}
-        </button>
       </div>
       <div className="grid">
-        {ordered.map((e) => (
-          <div
-            key={e.id}
-            className={`card${showStudyNext && e.id === studyNextId ? " study-next" : ""}`}
-            onClick={() => go(`#/play/${e.id}`)}
-          >
-            <div className="name">{e.name}</div>
-            <div className="meta">
-              {e.relPath} · {fmtSize(e.size)}
-              {(() => {
-                const p = savedPositions.get(e.id) ?? null;
-                return p != null ? (
-                  <span className="resume-hint" title="resume position">
-                    {" "}· ▶ {fmtCueTime(p)}
+        {ordered.map((e) => {
+          const resume = savedPositions.get(e.id) ?? null;
+          const cov = coverage.get(e.id);
+          return (
+            <div
+              key={e.id}
+              className="card lib-row"
+              onClick={() => go(`#/play/${e.id}`)}
+            >
+              <div className="lib-row-main">
+                <div className="name">{e.name}</div>
+              </div>
+              {resume != null && (
+                <span className="ep-time" title="resume position">
+                  ▶ {fmtCueTime(resume)}
+                </span>
+              )}
+              {cov && (
+                <span
+                  className="ep-known"
+                  title={`${cov.pct}% of words in this episode you already know · ${cov.newCount} new unique words`}
+                >
+                  {cov.pct}%
+                </span>
+              )}
+              <div className="lib-langs">
+                {e.subLangs.length === 0 && (
+                  <>
+                    <span className="badge">no subs</span>
+                    <JimakuFind entry={e} toast={toast} onDownloaded={loadEntries} />
+                  </>
+                )}
+                {e.subLangs.map((l, i) => (
+                  <span key={i} className="badge">
+                    {l}
                   </span>
-                ) : null;
-              })()}
-              {(() => {
-                const c = coverage.get(e.id);
-                return c ? (
+                ))}
+                {(() => {
+                  const b = entryBadge(status, e.id);
+                  return b ? <span className="badge jobstatus">{b}</span> : null;
+                })()}
+                {(() => {
+                  const n = dueCounts.get(e.id) ?? 0;
+                  return n > 0 ? (
+                    <span className="badge due" title="Due Anki words in this episode (approx.)">
+                      {n} due word{n === 1 ? "" : "s"}
+                    </span>
+                  ) : null;
+                })()}
+                {sortMode === "known" && knownPct?.get(e.id) != null && (
                   <span
-                    className="cov-hint"
-                    title={`${c.pct}% of words in this episode you already know · ${c.newCount} new unique words`}
+                    className="badge known-pct"
+                    title="Share of word occurrences in this episode you already know"
                   >
-                    {" "}· {c.pct}% · {c.newCount} new
+                    {Math.round(knownPct.get(e.id)! * 100)}% known
                   </span>
-                ) : null;
-              })()}
+                )}
+              </div>
             </div>
-            <div className="badges">
-              {showStudyNext && e.id === studyNextId && (
-                <span
-                  className="badge study-next-mark"
-                  title="Best learning value: many i+1 cues at a comfortable comprehension level"
-                >
-                  study next
-                </span>
-              )}
-              {e.subLangs.length === 0 && (
-                <>
-                  <span className="badge">no subs</span>
-                  <JimakuFind entry={e} toast={toast} onDownloaded={loadEntries} />
-                </>
-              )}
-              {e.subLangs.map((l, i) => (
-                <span key={i} className="badge">
-                  {l}
-                </span>
-              ))}
-              {(() => {
-                const b = entryBadge(status, e.id);
-                return b ? <span className="badge jobstatus">{b}</span> : null;
-              })()}
-              {(() => {
-                const n = dueCounts.get(e.id) ?? 0;
-                return n > 0 ? (
-                  <span className="badge due" title="Due Anki words in this episode (approx.)">
-                    {n} due word{n === 1 ? "" : "s"}
-                  </span>
-                ) : null;
-              })()}
-              {sortMode === "known" && knownPct?.get(e.id) != null && (
-                <span
-                  className="badge known-pct"
-                  title="Share of word occurrences in this episode you already know"
-                >
-                  {Math.round(knownPct.get(e.id)! * 100)}% known
-                </span>
-              )}
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </>
   );
@@ -1145,7 +1176,6 @@ function Stats({ go }: { go: (h: string) => void }) {
 
   return (
     <>
-      <h1 className="h1">Stats</h1>
       <div className="stats-totals">
         <div className="stat">
           <span className="stat-num">{anki ? mature + localKnown : "…"}</span>
@@ -1280,19 +1310,31 @@ function Stats({ go }: { go: (h: string) => void }) {
                   Math.max(r.wallPlayingSec + r.wallPausedSec, r.contentSec),
                 ),
               );
-              return rows.map((r, i) => {
-                const e = entries?.find((x) => x.id === r.mediaId);
-                const name = (e?.name ?? r.mediaId).replace(/\.[^.]+$/, "");
+              const epName = (id: string) => {
+                const e = entries?.find((x) => x.id === id);
+                return e?.name
+                  ? e.name.replace(/\.[^.]+$/, "")
+                  : `episode ${id.slice(0, 8)}`;
+              };
+              const out: React.ReactNode[] = [];
+              for (let i = 0; i < rows.length; i++) {
+                const r = rows[i]!;
                 const wall = r.wallPlayingSec + r.wallPausedSec;
-                const newGroup = i > 0 && rows[i - 1]!.mediaId !== r.mediaId;
-                return (
-                  <div
-                    key={`${r.mediaId} ${r.date}`}
-                    className={`ep-row${newGroup ? " ep-group-start" : ""}`}
-                  >
-                    <span className="ep-name muted" title={`${name} · ${r.date}`}>
-                      {name} · {r.date}
-                    </span>
+                const isFirst = i === 0 || rows[i - 1]!.mediaId !== r.mediaId;
+                if (isFirst) {
+                  out.push(
+                    <div
+                      key={`hdr ${r.mediaId}`}
+                      className="ep-group-header"
+                      title={epName(r.mediaId)}
+                    >
+                      {epName(r.mediaId)}
+                    </div>,
+                  );
+                }
+                out.push(
+                  <div key={`${r.mediaId} ${r.date}`} className="ep-row">
+                    <span className="ep-name muted">{r.date}</span>
                     <span className="ep-bars">
                       <span
                         className="ep-bar wall"
@@ -1313,9 +1355,10 @@ function Stats({ go }: { go: (h: string) => void }) {
                         ? `×${r.coefficient.toFixed(2)}`
                         : "—"}
                     </span>
-                  </div>
+                  </div>,
                 );
-              });
+              }
+              return out;
             })()}
           </div>
         </>
@@ -1556,6 +1599,11 @@ function Cards({ go, toast }: { go: (h: string) => void; toast: (m: string) => v
     () => filterCards(frameCards, { q, range, stage, rarity, intervals, freq }),
     [frameCards, q, range, stage, rarity, intervals, freq],
   );
+  // O(1) name→entry lookup for the rewatch button (avoids per-card .find()).
+  const entryByName = useMemo(
+    () => new Map(entries.map((e) => [e.name, e])),
+    [entries],
+  );
 
   const onDelete = async (front: string) => {
     if (confirmFront !== front) {
@@ -1590,7 +1638,6 @@ function Cards({ go, toast }: { go: (h: string) => void; toast: (m: string) => v
 
   return (
     <>
-      <h1 className="h1">Cards</h1>
       <div className="cards-filters">
         <input
           className="search-input cards-search"
@@ -1665,41 +1712,56 @@ function Cards({ go, toast }: { go: (h: string) => void; toast: (m: string) => v
       {cards != null && frameCards.length > 0 && filtered.length === 0 && (
         <div className="empty">No cards match the filters.</div>
       )}
-      <div className="cards-list">
+      <div className="cards-grid">
         {filtered.slice(0, visible).map((c) => {
           const img = cardImgSrc(c.context);
           const ref = cardEpisodeRef(c.context);
-          const entry = ref ? entries.find((e) => e.name === ref.name) : undefined;
+          const entry = ref ? entryByName.get(ref.name) : undefined;
+          const m = /^(.*?)\s*\[(.*)\]\s*$/.exec(c.front);
+          const word = m ? m[1] : c.front;
+          const reading = m ? m[2] : "";
           return (
-            <div key={c.front} className="card-row">
+            <div key={c.front} className="card-tile" title={c.back}>
               {img ? (
-                <img className="card-frame" src={img} alt="" loading="lazy" />
+                <img
+                  className="card-frame"
+                  src={img}
+                  alt=""
+                  loading="lazy"
+                  width={144}
+                  height={96}
+                />
               ) : (
                 <span className="card-frame placeholder" />
               )}
-              <span className="card-front">{c.front}</span>
-              <span className="card-back muted">{c.back}</span>
-              <span className="card-actions">
+              <div className="card-word">
+                {word}
+                {reading && ` [${reading}]`}
+              </div>
+              <div className="card-actions">
                 <button
-                  className="btn sm card-rewatch"
+                  className="card-play"
                   disabled={!entry || !ref}
                   title={
                     entry && ref
                       ? `Rewatch ${ref.name} @ ${fmtCueTime(ref.sec)}`
                       : "Source episode not in the library"
                   }
+                  aria-label="rewatch"
                   onClick={() => entry && ref && go(`#/play/${entry.id}@${ref.sec}`)}
                 >
-                  rewatch
+                  <Play size={16} strokeWidth={1.75} aria-hidden />
                 </button>
                 <button
-                  className={`btn sm danger card-delete${confirmFront === c.front ? " confirm" : ""}`}
+                  className={`card-del${confirmFront === c.front ? " confirm" : ""}`}
+                  title={confirmFront === c.front ? "click again to confirm" : "delete"}
+                  aria-label="delete"
                   onClick={() => void onDelete(c.front)}
                   onBlur={() => setConfirmFront((f) => (f === c.front ? null : f))}
                 >
-                  {confirmFront === c.front ? "sure?" : "delete"}
+                  <Trash2 size={16} strokeWidth={1.75} aria-hidden />
                 </button>
-              </span>
+              </div>
             </div>
           );
         })}
@@ -1932,41 +1994,40 @@ function Settings({
 
   return (
     <>
-      <h1 className="h1">Settings</h1>
       <div className="form settings-form">
         <section className="form-group">
           <h2 className="group-title">Languages</h2>
-          <div className="field">
-            <label htmlFor="settings-primaryLang">Primary (target)</label>
-            <input
-              id="settings-primaryLang"
-              type="text"
-              title="Language you're learning — preferred primary subtitle track (e.g. ja)"
-              value={primaryLang}
-              onChange={(e) => {
-                setPrimaryLang(e.target.value);
-                scheduleSave();
-              }}
-              onBlur={onBlurSave}
-              placeholder="ja"
-            />
-            <div className="hint">Preferred primary subtitle track.</div>
-          </div>
-          <div className="field">
-            <label htmlFor="settings-secondaryLang">Secondary (known)</label>
-            <input
-              id="settings-secondaryLang"
-              type="text"
-              title="Language you already know — preferred translation track (e.g. ru)"
-              value={secondaryLang}
-              onChange={(e) => {
-                setSecondaryLang(e.target.value);
-                scheduleSave();
-              }}
-              onBlur={onBlurSave}
-              placeholder="ru"
-            />
-            <div className="hint">Translation track, blurred until hovered.</div>
+          <div className="field-row">
+            <div className="field">
+              <label htmlFor="settings-primaryLang">Primary (target)</label>
+              <input
+                id="settings-primaryLang"
+                type="text"
+                title="Preferred primary subtitle track."
+                value={primaryLang}
+                onChange={(e) => {
+                  setPrimaryLang(e.target.value);
+                  scheduleSave();
+                }}
+                onBlur={onBlurSave}
+                placeholder="ja"
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="settings-secondaryLang">Secondary (known)</label>
+              <input
+                id="settings-secondaryLang"
+                type="text"
+                title="Translation track, blurred until hovered."
+                value={secondaryLang}
+                onChange={(e) => {
+                  setSecondaryLang(e.target.value);
+                  scheduleSave();
+                }}
+                onBlur={onBlurSave}
+                placeholder="ru"
+              />
+            </div>
           </div>
         </section>
 
@@ -2019,7 +2080,7 @@ function Settings({
           </div>
           <div
             className="switch"
-            title="At the end of an episode, surface a quiet 'comprehension check? (q)' prompt — press q to quiz yourself on the cues you just watched"
+            title="Automatically launch the comprehension quiz when an episode reaches its end, covering the cues you just watched"
           >
             <input
               type="checkbox"
@@ -2031,101 +2092,75 @@ function Settings({
               }}
             />
             <label htmlFor="autoQuizPrompt">
-              End-of-episode comprehension prompt
+              Auto-quiz at end of episode
             </label>
           </div>
-          <div className="field">
-            <label htmlFor="prestudyMinutes">Pre-study window</label>
-            <input
-              id="prestudyMinutes"
-              type="number"
-              min={1}
-              max={120}
-              title="How many minutes of upcoming dialogue the pre-study panel (w) scans for unknown words"
-              value={prestudyMinutes}
-              onChange={(e) => {
-                setPrestudyMinutes(e.target.value);
-                scheduleSave();
-              }}
-              onBlur={onBlurSave}
-            />
-            <div className="hint">Minutes the pre-study panel (w) scans ahead.</div>
+          <div className="field-row">
+            <div className="field">
+              <label htmlFor="prestudyMinutes">Pre-study window</label>
+              <input
+                id="prestudyMinutes"
+                type="number"
+                min={1}
+                max={120}
+                title="Minutes the pre-study panel (w) scans ahead."
+                value={prestudyMinutes}
+                onChange={(e) => {
+                  setPrestudyMinutes(e.target.value);
+                  scheduleSave();
+                }}
+                onBlur={onBlurSave}
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="shadowRepeats">Shadowing repeats</label>
+              <input
+                id="shadowRepeats"
+                type="number"
+                min={0}
+                max={99}
+                title="Repeats per s-loop; 0 = infinite."
+                value={shadowRepeats}
+                onChange={(e) => {
+                  setShadowRepeats(e.target.value);
+                  scheduleSave();
+                }}
+                onBlur={onBlurSave}
+              />
+            </div>
           </div>
-          <div className="field">
-            <label htmlFor="shadowRepeats">Shadowing repeats</label>
-            <input
-              id="shadowRepeats"
-              type="number"
-              min={0}
-              max={99}
-              title="How many times the s-loop repeats one line; 0 = endless"
-              value={shadowRepeats}
-              onChange={(e) => {
-                setShadowRepeats(e.target.value);
-                scheduleSave();
-              }}
-              onBlur={onBlurSave}
-            />
-            <div className="hint">Repeats per s-loop; 0 = infinite.</div>
-          </div>
-          <div className="field">
-            <label htmlFor="autopauseMode">Autopause mode</label>
-            <select
-              id="autopauseMode"
-              title="Pause at the end of every subtitle, or only on lines containing unknown words"
-              value={autopauseMode}
-              onChange={(e) => {
-                setAutopauseMode(e.target.value);
-                scheduleSave();
-              }}
-            >
-              <option value="every">every cue</option>
-              <option value="unknown">cues with unknown words</option>
-            </select>
-            <div className="hint">Toggle autopause in the player with u.</div>
-          </div>
-          <div className="field">
-            <label htmlFor="autopauseMinUnknown">Autopause threshold</label>
-            <input
-              id="autopauseMinUnknown"
-              type="number"
-              min={1}
-              max={20}
-              title="In 'unknown' mode, only pause when a line has at least this many unknown words"
-              value={autopauseMinUnknown}
-              onChange={(e) => {
-                setAutopauseMinUnknown(e.target.value);
-                scheduleSave();
-              }}
-              onBlur={onBlurSave}
-            />
-            <div className="hint">Min unknown words per cue (unknown mode).</div>
-          </div>
-          <div className="field">
-            <label htmlFor="theme">Theme</label>
-            <select
-              id="theme"
-              aria-label="Theme"
-              title="App color theme: White, Black, or follow your OS (System)"
-              value={theme}
-              onChange={(e) => {
-                const value = e.target.value;
-                setTheme(value);
-                // apply immediately, mirror to localStorage for no-flash boot
-                document.documentElement.dataset.theme = value;
-                try {
-                  localStorage.setItem("zr.theme", value);
-                } catch {
-                  /* ignore storage errors */
-                }
-                scheduleSave();
-              }}
-            >
-              <option value="light">White</option>
-              <option value="dark">Black</option>
-              <option value="system">System</option>
-            </select>
-            <div className="hint">System follows your OS light/dark setting.</div>
+          <div className="field-row">
+            <div className="field">
+              <label htmlFor="autopauseMode">Autopause mode</label>
+              <select
+                id="autopauseMode"
+                title="Toggle autopause in the player with u."
+                value={autopauseMode}
+                onChange={(e) => {
+                  setAutopauseMode(e.target.value);
+                  scheduleSave();
+                }}
+              >
+                <option value="every">every cue</option>
+                <option value="unknown">cues with unknown words</option>
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="autopauseMinUnknown">Autopause threshold</label>
+              <input
+                id="autopauseMinUnknown"
+                type="number"
+                min={1}
+                max={20}
+                title="Min unknown words per cue (unknown mode)."
+                value={autopauseMinUnknown}
+                onChange={(e) => {
+                  setAutopauseMinUnknown(e.target.value);
+                  scheduleSave();
+                }}
+                onBlur={onBlurSave}
+              />
+            </div>
           </div>
         </section>
 
@@ -2136,7 +2171,7 @@ function Settings({
             <textarea
               className="prompt"
               rows={12}
-              title="Prompt template used for word lookups; changes save automatically"
+              title="Placeholders {word} {context} {source} are substituted at lookup time."
               value={lookupPrompt}
               onChange={(e) => {
                 setLookupPrompt(e.target.value);
@@ -2145,10 +2180,6 @@ function Settings({
               onBlur={onBlurSave}
               placeholder={promptDefault}
             />
-            <div className="hint">
-              Placeholders <code>{"{word}"}</code> <code>{"{context}"}</code>{" "}
-              <code>{"{source}"}</code> are substituted at lookup time.
-            </div>
             <div>
               <button
                 type="button"
@@ -2168,7 +2199,7 @@ function Settings({
             <textarea
               className="prompt"
               rows={10}
-              title="Prompt template used for sentence-structure explanations; changes save automatically"
+              title="Placeholders {sentence} {context} {secondary} {source} are substituted at explain time."
               value={explainPrompt}
               onChange={(e) => {
                 setExplainPrompt(e.target.value);
@@ -2177,11 +2208,6 @@ function Settings({
               onBlur={onBlurSave}
               placeholder={explainDefault}
             />
-            <div className="hint">
-              Placeholders <code>{"{sentence}"}</code> <code>{"{context}"}</code>{" "}
-              <code>{"{secondary}"}</code> <code>{"{source}"}</code> are
-              substituted at explain time.
-            </div>
             <div>
               <button
                 type="button"
