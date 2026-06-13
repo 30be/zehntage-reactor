@@ -433,9 +433,14 @@ interface BrowseResult {
 function RootChooser({
   toast,
   onChanged,
+  newWords,
 }: {
   toast: (m: string) => void;
   onChanged: () => void;
+  // Library-wide count of new (unknown) words still to learn. Sum of the
+  // per-episode newCount across entries whose coverage is computed; undefined
+  // while coverage is still being computed in idle time.
+  newWords?: number;
 }) {
   const [info, setInfo] = useState<{ root: string; count: number } | null>(null);
   const [open, setOpen] = useState(false);
@@ -502,6 +507,12 @@ function RootChooser({
         }}
       >
         {info ? `${info.root} · ${info.count} entries` : "…"}
+        {info && newWords != null && newWords > 0 ? (
+          <span className="root-newwords" title="New (unknown) words to learn across the library">
+            {" · "}
+            {newWords.toLocaleString()} new words
+          </span>
+        ) : null}
       </div>
       {open && (
         <div className="root-panel">
@@ -769,6 +780,22 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
   const [status, setStatus] = useState<BatchStatus | null>(null);
   // entryId -> coverage ("82% · 47 new"); null = computed but no ja track
   const coverage = useCoverage(entries);
+  // Library-wide new-word total: sum of per-episode newCount across all entries
+  // whose coverage has been computed. This is an aggregate sum, not a true
+  // cross-episode unique union (the coverage cache stores only counts, not the
+  // lemma sets, so a real union would need re-tokenizing every episode). Cheap:
+  // just folds the already-computed coverage map.
+  const newWordsTotal = useMemo(() => {
+    let sum = 0;
+    let any = false;
+    for (const cov of coverage.values()) {
+      if (cov) {
+        sum += cov.newCount;
+        any = true;
+      }
+    }
+    return any ? sum : undefined;
+  }, [coverage]);
   // comprehensibility sort: "name" (default) | "known" (server pctKnown desc)
   const [sortMode, setSortMode] = useState<"name" | "known">("name");
   const [knownPct, setKnownPct] = useState<Map<string, number | null> | null>(
@@ -930,7 +957,7 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
   return (
     <>
       <div className="lib-head">
-        <RootChooser toast={toast} onChanged={loadEntries} />
+        <RootChooser toast={toast} onChanged={loadEntries} newWords={newWordsTotal} />
         {continueWatching.length > 0 && (() => {
           const { rec, entry } = continueWatching[0]!;
           return (

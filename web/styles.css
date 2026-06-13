@@ -1157,6 +1157,8 @@ textarea.prompt {
 .root-line.editing { display: block; cursor: default; }
 .root-line .root-current { cursor: pointer; }
 .root-line .root-current:hover { color: var(--fg); }
+.root-line .root-newwords { color: var(--muted); }
+.root-line .root-current:hover .root-newwords { color: var(--muted); }
 .root-panel {
   margin-top: 6px;
   max-width: 480px;
