@@ -59,9 +59,9 @@ import {
   type QaItem,
 } from "./player/shared.ts";
 import { useWhisperJob } from "./player/useWhisperJob.ts";
-import { shouldSkipAutopause } from "./player/autopause.ts";
 import { computeCueUnknowns } from "./player/cueUnknowns.ts";
 import { useResume } from "./player/useResume.ts";
+import { useActiveCues } from "./player/useActiveCues.ts";
 import { useSession } from "./player/useSession.ts";
 import { useAutoNext } from "./player/useAutoNext.ts";
 import { usePlayerHotkeys } from "./player/useHotkeys.ts";
@@ -103,8 +103,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   const [secondaryId, setSecondaryId] = useState<string>("");
   const [primaryCues, setPrimaryCues] = useState<Cue[]>([]);
   const [secondaryCues, setSecondaryCues] = useState<Cue[]>([]);
-  const [activeP, setActiveP] = useState(-1);
-  const [activeS, setActiveS] = useState(-1);
   // Translation tooltip (the dim "?" at the JP line's right edge) is open
   // because the cursor rests on the hint.
   const [secShow, setSecShow] = useState(false);
@@ -134,10 +132,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       return next;
     });
   }, [toast]);
-  const prevActiveP = useRef(-1);
-  // Autopause loop-guard: index of the cue we already autopaused on. We don't
-  // pause again for that cue until playback naturally enters the next one.
-  const lastAutopausedIdx = useRef(-1);
   // True while WE are performing the autopause seek-back, so the user-seek
   // detector below doesn't treat it as a manual seek.
   const internalSeekRef = useRef(false);
@@ -163,6 +157,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   // Persisted per media+track; applied client-side when computing active cues.
   const subOffsetRef = useRef(0);
   const primaryCuesRef = useRef<Cue[]>([]);
+  const secondaryCuesRef = useRef<Cue[]>([]);
 
   const [tokens, setTokens] = useState<KToken[] | null>(null);
   const tracksLoaded = useRef(false);
@@ -944,143 +939,42 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   // saved position, once — see the three-flag handshake inside the hook. ---
   useResume({ videoRef, mediaId: entry.id, startAt });
 
-  // --- active cue tracking via timeupdate (+ autopause at each cue end) ---
-  useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    // This effect re-runs when subOffset or the cue arrays change (e.g. [/]
-    // nudges, streaming whisper cues shifting indices) — NOT just on playback.
-    // Resync the previous-active index to the CURRENT position and skip the
-    // autopause branch on the first onTime call so re-setup can't spuriously
-    // pause the video.
-    prevActiveP.current = activeCueIndex(displayCues, v.currentTime - subOffset);
-    let firstRun = true;
-    const onTime = () => {
-      const wasFirst = firstRun;
-      firstRun = false;
-      // Track-time for the PRIMARY track: subtract the user's sync offset.
-      const t = v.currentTime - subOffset;
-      const idx = activeCueIndex(displayCues, t);
-      // Shadowing loop: on reaching the looped cue's end, seek back to its
-      // start and keep playing. Takes precedence over autopause (the early
-      // return below skips the autopause branch entirely while looping).
-      const loop = loopRef.current;
-      if (loop && !wasFirst && !v.seeking && !v.paused) {
-        const cue = displayCues[loop.idx];
-        if (!cue) {
-          loopRef.current = null; // cue list changed under us — release
-        } else if (t >= cue.end) {
-          if (loop.remaining !== Infinity && --loop.remaining <= 0) {
-            loopRef.current = null; // count exhausted → release and continue
-            toast("loop done");
-          } else {
-            internalSeekRef.current = true;
-            v.currentTime = Math.max(0, cue.start + subOffset);
-            prevActiveP.current = loop.idx;
-            setActiveP(loop.idx);
-            setActiveS(activeCueIndex(secondaryCues, v.currentTime));
-            return;
-          }
-        }
-      }
-      // Autopause: pause exactly at the END of the cue the user just heard.
-      // By the time `idx` changes the next subtitle would already be shown, so
-      // we seek back to just before the finished cue's end — it stays rendered
-      // while paused. lastAutopausedIdx prevents re-triggering in a loop.
-      const prev = prevActiveP.current;
-      // Echo mode forces a pause at EVERY cue end (regardless of autopause),
-      // except cues too short to dictate; otherwise normal (smart) autopause.
-      const echo = echoRef.current;
-      if ((autopauseRef.current || echo) && !wasFirst && !v.seeking && !v.paused) {
-        const prevCue = prev >= 0 ? displayCues[prev] : undefined;
-        const leftCue =
-          prevCue != null && (idx !== prev || t >= prevCue.end);
-        if (leftCue && lastAutopausedIdx.current !== prev) {
-          // Smart mode: only pause when the finished cue had >= N unknown
-          // lexical tokens. No data for THIS cue (counts not computed yet,
-          // or a streaming whisper cue appended after the last compute) →
-          // pause, the same safe default as a missing counts array.
-          const cueCount = cueUnknownsRef.current?.[prev];
-          const skip = shouldSkipAutopause({
-            echo,
-            mode: apModeRef.current,
-            min: apMinRef.current,
-            cueText: prevCue!.text,
-            unknownCount: cueCount ?? null,
-          });
-          if (skip) {
-            lastAutopausedIdx.current = prev; // don't re-check this cue
-          } else {
-          lastAutopausedIdx.current = prev;
-          v.pause();
-          internalSeekRef.current = true;
-          v.currentTime = Math.max(prevCue!.start, prevCue!.end - 0.08) + subOffset;
-          // keep the finished cue active/rendered
-          prevActiveP.current = prev;
-          setActiveP(prev);
-          setActiveS(activeCueIndex(secondaryCues, v.currentTime));
-          if (echo) {
-            // open the dictation input over the (hidden) line, focus it
-            setEchoCue({ idx: prev, text: prevCue!.text });
-            setEchoInput("");
-            setEchoResult(null);
-            setTimeout(() => echoInputRef.current?.focus(), 0);
-          }
-          return;
-          }
-        }
-      }
-      // Once playback naturally moves into a NEW cue, allow autopausing again.
-      if (idx >= 0 && idx !== prev && idx !== lastAutopausedIdx.current) {
-        lastAutopausedIdx.current = -1;
-      }
-      if (idx >= 0 && idx !== prev) {
-        sessCuesRef.current += 1;
-        // Telemetry: one event per distinct cue entered during playback (not
-        // on seeks — onSeeking resets prevActiveP). Low-frequency by nature
-        // (fires only on cue change); feeds the Home "today" cues-watched tile.
-        if (!v.paused) tmEvent("cue_active", { mediaId: entry.id, idx });
-        // HUD comprehension + unique-unknown tracking on each cue we pass
-        const counts = cueUnknownsRef.current;
-        if (counts && prev >= 0 && prev < counts.length) {
-          sessPassedRef.current += 1;
-          if (counts[prev] === 0) sessClearRef.current += 1;
-        }
-        const lemmas = cueUnknownLemmasRef.current?.[prev];
-        if (lemmas) for (const w of lemmas) sessUnknownSetRef.current.add(w);
-        if (hudOpenRef.current) setHudTick((tk) => tk + 1);
-      }
-      prevActiveP.current = idx;
-      setActiveP(idx);
-      setActiveS(activeCueIndex(secondaryCues, v.currentTime));
-    };
-    // Manual seeks reset the autopause guard and must not trigger a pause.
-    const onSeeking = () => {
-      if (internalSeekRef.current) {
-        internalSeekRef.current = false;
-        return;
-      }
-      lastAutopausedIdx.current = -1;
-      loopRef.current = null; // manual seek releases the shadowing loop
-      prevActiveP.current = activeCueIndex(displayCues, v.currentTime - subOffset);
-    };
-    v.addEventListener("timeupdate", onTime);
-    v.addEventListener("seeking", onSeeking);
-    onTime();
-    return () => {
-      v.removeEventListener("timeupdate", onTime);
-      v.removeEventListener("seeking", onSeeking);
-    };
-  }, [displayCues, secondaryCues, subOffset, toast]);
-
-  // keep refs in sync for the (deps-stable) hotkey handler
-  useEffect(() => {
-    primaryCuesRef.current = displayCues;
-  }, [displayCues]);
-  const secondaryCuesRef = useRef<Cue[]>([]);
-  useEffect(() => {
-    secondaryCuesRef.current = secondaryCues;
-  }, [secondaryCues]);
+  // --- active cue tracking via timeupdate (+ autopause at each cue end)
+  // (extracted to useActiveCues). Derives the active primary/secondary cue
+  // indices from currentTime; the same loop also drives the entangled
+  // loop/autopause/echo/session-telemetry behaviors gated on the cue
+  // transition. All of their state is owned elsewhere and passed in as the
+  // SAME instances. ---
+  const { activeP, activeS } = useActiveCues({
+    videoRef,
+    mediaId: entry.id,
+    displayCues,
+    secondaryCues,
+    subOffset,
+    subOffsetRef,
+    primaryCuesRef,
+    secondaryCuesRef,
+    loopRef,
+    internalSeekRef,
+    autopauseRef,
+    echoRef,
+    apModeRef,
+    apMinRef,
+    cueUnknownsRef,
+    cueUnknownLemmasRef,
+    hudOpenRef,
+    setHudTick,
+    sessCuesRef,
+    sessPassedRef,
+    sessClearRef,
+    sessUnknownSetRef,
+    setEchoCue,
+    setEchoInput,
+    setEchoResult,
+    echoInputRef,
+    tmEvent,
+    toast,
+  });
 
   // popup-open flag for the hotkey handler (Escape closes the lookup panel)
   const popupOpenRef = useRef(false);
