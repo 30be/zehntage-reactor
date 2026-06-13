@@ -63,6 +63,7 @@ import { shouldSkipAutopause } from "./player/autopause.ts";
 import { computeCueUnknowns } from "./player/cueUnknowns.ts";
 import { useResume } from "./player/useResume.ts";
 import { useSession } from "./player/useSession.ts";
+import { useAutoNext } from "./player/useAutoNext.ts";
 import { usePlayerHotkeys } from "./player/useHotkeys.ts";
 import { useHudAutohide } from "./player/useHudAutohide.ts";
 import { useSubControls } from "./player/useSubControls.ts";
@@ -530,12 +531,12 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   useEffect(() => {
     toggleQuizRef.current = toggleQuiz;
   }, [toggleQuiz]);
-  // Latest auto-quiz setting + a per-episode-end guard against double-firing.
+  // Latest auto-quiz setting; the per-episode-end double-fire guard now lives
+  // in useAutoNext (autoQuizFiredRef).
   const autoQuizRef = useRef(settings.autoQuizPrompt !== false);
   useEffect(() => {
     autoQuizRef.current = settings.autoQuizPrompt !== false;
   }, [settings.autoQuizPrompt]);
-  const autoQuizFiredRef = useRef(false);
 
   const onQuizDone = useCallback(
     (r: QuizResult) => {
@@ -1158,81 +1159,25 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     [entry.id, tracks, primaryId, secondaryId, toast],
   );
 
-  // Auto-next: on `ended`, count down 5s (any keypress/click cancels), then go.
-  // gotoEpisode is reached through a ref so this effect never re-runs when
-  // tracks/track-ids change — a re-run would silently kill a live countdown.
-  const gotoEpisodeRef = useRef(gotoEpisode);
-  useEffect(() => {
-    gotoEpisodeRef.current = gotoEpisode;
-  }, [gotoEpisode]);
-  const cancelAutoNextRef = useRef<(() => void) | null>(null);
-  useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    autoQuizFiredRef.current = false;
-    const onEnded = () => {
-      tmEvent("episode_end", { mediaId: entry.id });
-      cancelAutoNextRef.current?.();
-      // Auto comprehension quiz: when enabled, launch the same quiz `q` builds
-      // directly (no "press q" prompt). Guarded so it fires once per end.
-      if (autoQuizRef.current && !autoQuizFiredRef.current) {
-        autoQuizFiredRef.current = true;
-        toggleQuizRef.current();
-      }
-      // Session summary overlay (any key/click dismisses it along with the
-      // countdown; the countdown line is rendered inside the panel).
-      setSessionSummary({
-        min: Math.max(1, Math.round((Date.now() - sessionStartRef.current) / 60000)),
-        cues: sessCuesRef.current,
-        lookups: sessLookupsRef.current,
-        cards: sessCardsRef.current,
-        known: sessKnownRef.current,
-        echo: { ...sessEchoRef.current },
-        streak: null,
-      });
-      // streak line — use the server-computed streak (same source as the Home
-      // "today" panel) so the two surfaces never disagree; best-effort async
-      void api
-        .statsToday()
-        .then((t) => {
-          setSessionSummary((s) => (s ? { ...s, streak: t.streak } : s));
-        })
-        .catch(() => {});
-      toast("Next episode in 5s…");
-      const cleanup = () => {
-        window.clearTimeout(timer);
-        window.removeEventListener("keydown", cancel, true);
-        window.removeEventListener("pointerdown", cancel, true);
-        cancelAutoNextRef.current = null;
-      };
-      const cancel = (e: Event) => {
-        cleanup();
-        setSessionSummary(null);
-        // Shift+arrows navigate anyway (the hotkey handler runs first in
-        // capture order) — only the timer needs killing, the toast would
-        // mislead.
-        const ke = e as KeyboardEvent;
-        if (ke.shiftKey && (ke.key === "ArrowRight" || ke.key === "ArrowLeft"))
-          return;
-        // `q` manually starts the comprehension quiz — the hotkey handler
-        // already ran in capture order, so suppress the auto-next-cancel toast.
-        if (ke.key === "q" || ke.key === "Q") return;
-        toast("auto-next canceled");
-      };
-      const timer = window.setTimeout(() => {
-        cleanup();
-        void gotoEpisodeRef.current(1);
-      }, 5000);
-      window.addEventListener("keydown", cancel, true);
-      window.addEventListener("pointerdown", cancel, true);
-      cancelAutoNextRef.current = cleanup;
-    };
-    v.addEventListener("ended", onEnded);
-    return () => {
-      v.removeEventListener("ended", onEnded);
-      cancelAutoNextRef.current?.();
-    };
-  }, [entry.id, toast]);
+  // Auto-next: end-of-episode auto-advance + session summary (extracted to
+  // useAutoNext). Owns gotoEpisodeRef/cancelAutoNextRef/autoQuizFiredRef; the
+  // session refs + autoQuizRef/toggleQuizRef/setSessionSummary are passed IN as
+  // the SAME instances so nothing forks. Deps stay minimal ([entry.id, toast]).
+  useAutoNext({
+    videoRef,
+    mediaId: entry.id,
+    gotoEpisode,
+    autoQuizRef,
+    toggleQuizRef,
+    sessionStartRef,
+    sessCuesRef,
+    sessLookupsRef,
+    sessCardsRef,
+    sessKnownRef,
+    sessEchoRef,
+    setSessionSummary,
+    toast,
+  });
 
   const primaryText = activeP >= 0 && activeP < displayCues.length ? displayCues[activeP]!.text : "";
   // Bounds-checked: activeS can be stale for one render after the secondary
