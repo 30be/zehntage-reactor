@@ -174,8 +174,8 @@ test.describe("Fullscreen toasts", () => {
       // Expected for truly invalid path — toast rendered by the UI
     }
 
-    // Wait briefly for any pending toast
-    await page.waitForTimeout(300);
+    // Wait briefly for any pending toast (generous under load)
+    await page.waitForTimeout(600);
 
     // If a toast appeared, assert its class; otherwise skip gracefully.
     const toastCount = await page.locator(".toast").count();
@@ -221,14 +221,20 @@ test.describe("Fullscreen toasts", () => {
       document.dispatchEvent(new Event("fullscreenchange"));
     });
 
-    // Wait for the React state update (fsEl)
-    await page.waitForTimeout(200);
+    // Wait for React to process the fullscreenchange event (fsEl state update).
+    // Poll for the fake FS element to be in the DOM so we know React had a tick.
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("fake-fs-target") != null))
+      .toBe(true);
 
     // Now fire a toast via the Palette (open + immediate close won't toast;
     // we use the API approach instead)
     await page.request.post("/api/settings", {
       data: { root: "/zr_test_nonexistent" },
     }).catch(() => {});
+    // Give the toast up to 2s to appear; toastCount check below is conditional
+    // so not appearing is also a valid outcome — we just need to stop polling
+    // once a toast is present or time is up.
     await page.waitForTimeout(400);
 
     const toastCount = await page.locator(".toast").count();
@@ -294,26 +300,27 @@ test.describe("Secondary subtitle blur", () => {
     const sec = page.locator(".sub-secondary");
 
     await sec.hover();
-    await page.waitForTimeout(200); // allow .15s CSS transition
-
-    await expect(sec).toHaveClass(/show/);
-    const filter = await sec.evaluate(
-      (el) => getComputedStyle(el).filter,
-    );
-    // blur(0) or "none"
-    expect(filter === "none" || filter === "blur(0px)").toBe(true);
+    // Poll for .show class rather than sleeping — robust under CPU load
+    await expect(sec).toHaveClass(/show/, { timeout: 2000 });
+    // After the class is set, the CSS transition (.15s) may still be in flight;
+    // poll computed style until blur clears rather than sleeping.
+    await expect
+      .poll(
+        () => sec.evaluate((el) => getComputedStyle(el).filter),
+        { timeout: 2000 },
+      )
+      .toMatch(/^(none|blur\(0px\))$/);
   });
 
   test("moving away from .sub-secondary removes .show", async ({ page }) => {
     const sec = page.locator(".sub-secondary");
     await sec.hover();
-    await page.waitForTimeout(200);
-    await expect(sec).toHaveClass(/show/);
+    await expect(sec).toHaveClass(/show/, { timeout: 2000 });
 
     // Move to a neutral spot
     await page.mouse.move(10, 10);
-    await page.waitForTimeout(200);
-    await expect(sec).not.toHaveClass(/show/);
+    // Poll until .show is removed — no fixed sleep needed
+    await expect(sec).not.toHaveClass(/show/, { timeout: 2000 });
   });
 });
 

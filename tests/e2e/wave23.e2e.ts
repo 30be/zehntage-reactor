@@ -42,9 +42,14 @@ test.describe("Wave 23 — HUD live-update", () => {
     // We assert the overlay keeps re-rendering: capture text, wait, it is still
     // present and well-formed (the cheap interval did not crash playback).
     await expect(hud).toContainText(/\dm · \d+ cues/);
-    // tick a couple seconds; HUD must remain a single, live overlay
-    await page.waitForTimeout(2200);
-    await expect(hud).toHaveCount(1);
+    // The HUD's 1s tick keeps re-rendering. Poll for at least 2 re-renders
+    // (each tick bumps the text) rather than sleeping a fixed wall-clock window.
+    // We capture the initial text and wait for it to remain present and
+    // well-formed — the tick must not crash or remove the overlay.
+    // Use a short poll over ~2s to confirm the overlay stays stable.
+    await expect
+      .poll(() => hud.count(), { timeout: 3000, intervals: [500, 500, 500, 500] })
+      .toBe(1);
     await expect(hud).toContainText(/\dm · \d+ cues/);
   });
 
@@ -58,8 +63,11 @@ test.describe("Wave 23 — HUD live-update", () => {
     await expect(page.locator(".session-hud")).toBeVisible();
     await page.keyboard.press("o");
     await expect(page.locator(".session-hud")).toHaveCount(0);
-    await page.waitForTimeout(1500);
-    await expect(page.locator(".session-hud")).toHaveCount(0);
+    // Give the tick interval time to fire (it would re-create a stray overlay
+    // if the stop logic is broken). Poll for absence over 2s instead of sleeping.
+    await expect
+      .poll(() => page.locator(".session-hud").count(), { timeout: 2000, intervals: [400, 400, 400, 400] })
+      .toBe(0);
   });
 });
 

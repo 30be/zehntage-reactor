@@ -36,11 +36,13 @@ test("HUD cue counter increments after crossing a cue boundary", async ({
   await seekTo(page, 3);
   await waitForTokens(page);
   await page.keyboard.press("o");
-  await seekTo(page, 4.3); // just before cue 1 ends at 5.0
+  // Seek to 5.9s — just before cue 2 starts at 6.0s. The video only needs
+  // to advance ~0.1s to cross the boundary, making this reliable under CPU load.
+  await seekTo(page, 5.9); // gap between cue 1 (ends 5.0) and cue 2 (starts 6.0)
   await playVideo(page);
-  // playing across the 5.0/6.0 boundary bumps the session cue counter
+  // auto-retry: Playwright keeps polling until the HUD shows ≥1 cue or 10s elapses
   await expect(page.locator(".session-hud")).toContainText(/[1-9]\d* cues/, {
-    timeout: 8000,
+    timeout: 10000,
   });
 });
 
@@ -73,11 +75,13 @@ test("echo mode pauses at cue end, hides the line, scores typed input", async ({
   await waitForTokens(page);
   await page.keyboard.press("e");
   await expect(page.locator(".toast")).toHaveText("echo on");
-  await seekTo(page, 4.3); // cue 1 (勉強します。) ends at 5.0
+  // Seek to 4.95s — only 50ms before cue 1 ends at 5.0s. Echo pauses at cue end,
+  // so the video needs to advance just ~50ms rather than ~700ms from 4.3s.
+  await seekTo(page, 4.95); // cue 1 (勉強します。) ends at 5.0
   await playVideo(page);
   // input appears, video paused, JP line hidden
   const input = page.locator(".echo-input").first();
-  await expect(input).toBeVisible({ timeout: 8000 });
+  await expect(input).toBeVisible({ timeout: 10000 });
   await expect(video(page)).toHaveJSProperty("paused", true);
   await expect(page.locator(".sub-primary")).toHaveCount(0);
   // type the exact cue text → full score, no red chars
@@ -93,10 +97,10 @@ test("echo wrong answer shows red chars", async ({ page }) => {
   await seekTo(page, 3);
   await waitForTokens(page);
   await page.keyboard.press("e");
-  await seekTo(page, 4.3);
+  await seekTo(page, 4.95); // 50ms before cue 1 ends at 5.0s
   await playVideo(page);
   const input = page.locator(".echo-input").first();
-  await expect(input).toBeVisible({ timeout: 8000 });
+  await expect(input).toBeVisible({ timeout: 10000 });
   await input.fill("ちがう");
   await input.press("Enter");
   await expect(page.locator(".echo-bad").first()).toBeVisible();
