@@ -65,6 +65,26 @@ test("place + person proper nouns do NOT merge", () => {
   expect(merged.map((t) => t.surface_form)).toEqual(["東京", "折木"]);
 });
 
+test("conditional ば attaches to its verb, lemma preserved", () => {
+  const merged = mergeTokens([
+    { surface_form: "いえ", reading: "イエ", pos: "動詞", pos_detail_1: "自立", pos_detail_2: "*", basic_form: "いう" },
+    { surface_form: "ば", reading: "バ", pos: "助詞", pos_detail_1: "接続助詞", pos_detail_2: "*" },
+  ]);
+  expect(merged.map((t) => t.surface_form)).toEqual(["いえば"]);
+  const v = merged[0]!;
+  expect(v.surface_form).toBe("いえば");
+  expect(v.reading).toBe("イエバ");
+  expect(v.basic_form).toBe("いう");
+});
+
+test("standalone ば not after a verb/adjective does NOT merge", () => {
+  const merged = mergeTokens([
+    { surface_form: "は", reading: "ハ", pos: "助詞", pos_detail_1: "係助詞", pos_detail_2: "*" },
+    { surface_form: "ば", reading: "バ", pos: "助詞", pos_detail_1: "接続助詞", pos_detail_2: "*" },
+  ]);
+  expect(merged.map((t) => t.surface_form)).toEqual(["は", "ば"]);
+});
+
 test("merged name with a missing-reading part drops the partial reading", () => {
   const merged = mergeTokens([
     { surface_form: "折木", reading: "オレキ", pos: "名詞", pos_detail_1: "固有名詞", pos_detail_2: "人名" },

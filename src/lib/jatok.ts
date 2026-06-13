@@ -75,14 +75,22 @@ export function mergeTokens(raw: KToken[]): KToken[] {
       ALL_HIRAGANA.test(prev.surface_form);
     const gluePersonName =
       prev != null && isPersonName(prev) && isPersonName(t);
-    if (glueKanji || attachDependent || gluePersonName) {
+    const attachConditionalBa =
+      prev != null &&
+      t.pos === "助詞" &&
+      t.pos_detail_1 === "接続助詞" &&
+      t.surface_form === "ば" &&
+      (prev.pos === "動詞" || prev.pos === "形容詞");
+    if (glueKanji || attachDependent || gluePersonName || attachConditionalBa) {
       prev!.surface_form += t.surface_form;
       if (prev!.reading == null || t.reading == null) {
         prev!.reading = undefined;
       } else {
         prev!.reading = prev!.reading + t.reading;
       }
-      prev!.basic_form = prev!.surface_form;
+      // Keep the verb/adjective lemma when gluing a conditional ば; otherwise
+      // the surface (いえば) would clobber basic_form (いう) and break matching.
+      if (!attachConditionalBa) prev!.basic_form = prev!.surface_form;
       if (isNoun(t)) prev!.pos = "名詞";
       if (gluePersonName) {
         prev!.pos_detail_1 = "固有名詞";
