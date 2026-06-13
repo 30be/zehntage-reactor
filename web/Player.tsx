@@ -1111,6 +1111,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       lastSave = now;
       try {
         localStorage.setItem(posKey, String(v.currentTime));
+        // recency stamp powers the Home "continue watching" affordance
+        localStorage.setItem(`zr.posAt.${entry.id}`, String(now));
       } catch {
         /* ignore */
       }
@@ -1376,16 +1378,12 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         echo: { ...sessEchoRef.current },
         streak: null,
       });
-      // streak line (cheap aggregate) — fill in async, best-effort
+      // streak line — use the server-computed streak (same source as the Home
+      // "today" panel) so the two surfaces never disagree; best-effort async
       void api
-        .statsOverview()
-        .then((ov) => {
-          let streak = 0;
-          for (let i = ov.last30Days.length - 1; i >= 0; i--) {
-            if (ov.last30Days[i]!.wallPlayingSec > 0) streak++;
-            else break;
-          }
-          setSessionSummary((s) => (s ? { ...s, streak } : s));
+        .statsToday()
+        .then((t) => {
+          setSessionSummary((s) => (s ? { ...s, streak: t.streak } : s));
         })
         .catch(() => {});
       toast("Next episode in 5s…");

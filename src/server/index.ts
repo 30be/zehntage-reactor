@@ -1569,10 +1569,12 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
 
   // Try preferred port, fall back to an ephemeral one.
   let server: ReturnType<typeof Bun.serve>;
+  // cap request bodies (8 MiB) so POST /api/import can't be used to OOM the server
+  const MAX_BODY = 8 * 1024 * 1024;
   try {
-    server = Bun.serve({ port: preferredPort, idleTimeout: 0, fetch: fetchHandler });
+    server = Bun.serve({ port: preferredPort, idleTimeout: 0, maxRequestBodySize: MAX_BODY, fetch: fetchHandler });
   } catch {
-    server = Bun.serve({ port: 0, idleTimeout: 0, fetch: fetchHandler });
+    server = Bun.serve({ port: 0, idleTimeout: 0, maxRequestBodySize: MAX_BODY, fetch: fetchHandler });
   }
 
   return {

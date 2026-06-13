@@ -48,11 +48,10 @@ async function packageVersion(): Promise<string> {
 
 /** Build the export bundle from the current config dir / events log. */
 export async function buildExportBundle(now: Date = new Date()): Promise<ExportBundle> {
-  const [settings, state, allEvents, appVersion] = await Promise.all([
+  const [settings, state, allEvents] = await Promise.all([
     readSettings(),
     readState(),
     readEvents(),
-    packageVersion(),
   ]);
   const eventsTruncated = allEvents.length > MAX_EVENTS;
   const events = eventsTruncated ? allEvents.slice(-MAX_EVENTS) : allEvents;
@@ -127,20 +126,38 @@ export async function importBundle(
 ): Promise<ImportResult> {
   const bundle = validateBundle(raw);
 
+  // Write settings, but keep a snapshot so we can roll back if the subsequent
+  // state merge fails — otherwise a disk error leaves settings half-applied.
   let settingsImported = false;
+  let settingsSnapshot: Settings | null = null;
   if (bundle.settings && Object.keys(bundle.settings).length > 0) {
+    settingsSnapshot = await readSettings();
     await writeSettings(bundle.settings as Partial<Settings>);
     settingsImported = true;
   }
 
   // Route through the SAME merge logic /api/state POST uses (sanitize + LWW).
-  const merged = await mergeIntoFile(sanitize(bundle.state));
+  let merged: ZrState;
+  try {
+    merged = await mergeIntoFile(sanitize(bundle.state));
+  } catch (err) {
+    // best-effort rollback; never let a second fault mask the original error
+    if (settingsSnapshot) {
+      try {
+        await writeSettings(settingsSnapshot);
+      } catch {
+        /* ignore — surface the original failure below */
+      }
+    }
+    throw err;
+  }
 
   let eventsImported = 0;
   if (opts.importEvents && bundle.events.length > 0) {
-    const valid = bundle.events.filter(
-      (e) => e && typeof e.type === "string" && typeof e.ts === "number",
-    );
+    // cap count (same ceiling as export) so a hostile bundle can't bloat the log
+    const valid = bundle.events
+      .filter((e) => e && typeof e.type === "string" && typeof e.ts === "number")
+      .slice(-MAX_EVENTS);
     await logEvents(valid);
     eventsImported = valid.length;
   }

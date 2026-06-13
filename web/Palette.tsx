@@ -262,7 +262,7 @@ export function Palette({ go, toast, settings, setSettings }: Props) {
           >
             <div className="cheat-title">hotkeys</div>
             <div className="cheat-cols">
-              {(["player", "global"] as const).map((scope) => (
+              {(["player", "read", "global"] as const).map((scope) => (
                 <div key={scope} className="cheat-col">
                   <div className="cheat-scope">{scope}</div>
                   {HOTKEYS.filter((h) => h.scope === scope).map((h) => (

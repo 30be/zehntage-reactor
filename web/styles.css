@@ -366,6 +366,35 @@ textarea.prompt {
   white-space: nowrap;
 }
 
+/* ---- continue watching (Home/library top row) ---- */
+.continue-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 4px 0 14px;
+}
+.continue-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.continue-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  max-width: 360px;
+}
+.continue-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ---- pinned lookup panel (click-to-pin; appended) ---- */
 .lookup.pinned { border-color: #a1a1aa; }
 
@@ -847,6 +876,12 @@ textarea.prompt {
   color: var(--fg);
 }
 .hotkey-desc { color: var(--muted); }
+.hotkey-scope {
+  font-size: 11px;
+  opacity: 0.55;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
 .home-root { font-size: 13px; }
 
 /* ---- library root chooser (dim line above the cards) ---- */

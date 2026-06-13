@@ -46,7 +46,10 @@ Subtitle generation needs `ffmpeg` and `whisper-cli`. Other CLI modes:
 ## Hotkeys
 
 Bindings match physical keys (`e.code`), so they work on any layout.
-`?` in the app shows the full cheatsheet.
+`?` in the app shows the full cheatsheet, grouped by scope
+(player / read / global) so dual-scope keys like `j` and `k` stay unambiguous.
+
+Player scope:
 
 | keys | action |
 | --- | --- |
@@ -69,6 +72,19 @@ Bindings match physical keys (`e.code`), so they work on any layout.
 | e | echo dictation mode |
 | j | jump to next i+1 cue |
 | z | accept resume affordance |
+
+Read scope:
+
+| keys | action |
+| --- | --- |
+| j / ↓ | next line |
+| k / ↑ | prev line |
+| Enter | open word popup on cursor line |
+
+Global scope:
+
+| keys | action |
+| --- | --- |
 | Ctrl+K / ? / Esc | palette / cheatsheet / close |
 
 ## Architecture

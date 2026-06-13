@@ -12,6 +12,10 @@ import { ReadRoute } from "./ReadRoute.tsx";
 import { HealthRoute } from "./HealthRoute.tsx";
 import { Palette } from "./Palette.tsx";
 import { HOTKEYS } from "./commands.ts";
+import {
+  pickContinueWatching,
+  readResumeRecords,
+} from "./continueWatching.ts";
 import { startSync } from "./sync.ts";
 import { readBlacklist } from "./blacklist.ts";
 import { readKnownWords, useCoverage } from "./coverage.ts";
@@ -317,9 +321,12 @@ function Home({ go }: { go: (h: string) => void }) {
       <h2 className="h2">Hotkeys</h2>
       <div className="hotkey-grid">
         {HOTKEYS.map((h) => (
-          <div key={h.keys} className="hotkey-row">
+          <div key={`${h.scope}:${h.keys}`} className="hotkey-row">
             <span className="hotkey-key">{h.keys}</span>
-            <span className="hotkey-desc">{h.what}</span>
+            <span className="hotkey-desc">
+              {h.what}
+              <span className="hotkey-scope"> · {h.scope}</span>
+            </span>
           </div>
         ))}
       </div>
@@ -817,10 +824,35 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
       </>
     );
 
+  // --- continue watching: most-recent episodes with a resume position ---
+  const continueWatching = pickContinueWatching(
+    readResumeRecords(entries.map((e) => e.id)),
+  )
+    .map((r) => ({ rec: r, entry: entries.find((e) => e.id === r.id) }))
+    .filter((x): x is { rec: typeof x.rec; entry: LibraryEntry } => !!x.entry);
+
   return (
     <>
       <h1 className="h1">Library</h1>
       <RootChooser toast={toast} onChanged={loadEntries} />
+      {continueWatching.length > 0 && (
+        <div className="continue-row" aria-label="Continue watching">
+          <span className="continue-label muted">continue</span>
+          {continueWatching.map(({ rec, entry }) => (
+            <button
+              key={rec.id}
+              className="card continue-card"
+              onClick={() => go(`#/play/${rec.id}@${Math.floor(rec.pos)}`)}
+              title={`Resume ${entry.name} at ${fmtCueTime(rec.pos)}`}
+            >
+              <span className="continue-name">
+                {entry.name.replace(/\.[^.]+$/, "")}
+              </span>
+              <span className="badge">▶ {fmtCueTime(rec.pos)}</span>
+            </button>
+          ))}
+        </div>
+      )}
       <input
         className="search-input"
         type="text"

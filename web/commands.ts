@@ -60,7 +60,10 @@ export function filterCommands(cmds: Command[], query: string): Command[] {
 export interface HotkeyRow {
   keys: string;
   what: string;
-  scope: "player" | "global";
+  /** Which input mode owns the key. `player` and `read` can reuse the same
+   *  physical key (e.g. j / k) with different meanings — the scope is what
+   *  disambiguates them in the cheatsheet. */
+  scope: "player" | "read" | "global";
 }
 
 export const HOTKEYS: HotkeyRow[] = [
@@ -90,9 +93,9 @@ export const HOTKEYS: HotkeyRow[] = [
   { keys: "e", what: "echo dictation mode", scope: "player" },
   { keys: "j", what: "jump to next i+1 cue", scope: "player" },
   { keys: "z", what: "accept resume affordance", scope: "player" },
-  { keys: "j / ↓", what: "next line (read mode)", scope: "global" },
-  { keys: "k / ↑", what: "prev line (read mode)", scope: "global" },
-  { keys: "Enter", what: "open word popup on cursor line", scope: "global" },
+  { keys: "j / ↓", what: "next line", scope: "read" },
+  { keys: "k / ↑", what: "prev line", scope: "read" },
+  { keys: "Enter", what: "open word popup on cursor line", scope: "read" },
   { keys: "Esc", what: "close popups / panels", scope: "global" },
   { keys: "Ctrl+K", what: "command palette", scope: "global" },
   { keys: "?", what: "hotkey cheatsheet", scope: "global" },

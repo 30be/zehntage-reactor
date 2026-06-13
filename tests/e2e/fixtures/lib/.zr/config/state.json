@@ -5,10 +5,42 @@
   },
   "zr.tracks.2328ae29a728": {
     "v": "{\"primary\":\"sidecar:ja.srt\",\"secondary\":\"sidecar:gen:ru\"}",
-    "ts": 1781347178499
+    "ts": 1781349520816
   },
   "zr.known": {
     "v": " zr-deleted",
-    "ts": 1783347180523
+    "ts": 1783349488042
+  },
+  "zr.pos.2328ae29a728": {
+    "v": "4.3",
+    "ts": 1781349493265
+  },
+  "zr.posAt.2328ae29a728": {
+    "v": "1781349493265",
+    "ts": 1781349493265
+  },
+  "zr.test.export": {
+    "v": "1",
+    "ts": 1781349546236
+  },
+  "zr.test.import": {
+    "v": "imported",
+    "ts": 1781349546304
+  },
+  "zr.tracks.c4c16ec0b0a1": {
+    "v": "{\"primary\":\"sidecar:ja.srt\",\"secondary\":\"\"}",
+    "ts": 1781349557390
+  },
+  "zr.pos.c4c16ec0b0a1": {
+    "v": "7",
+    "ts": 1781349557443
+  },
+  "zr.posAt.c4c16ec0b0a1": {
+    "v": "1781349557443",
+    "ts": 1781349557443
+  },
+  "zr.e2e.1781349566135": {
+    "v": "hello",
+    "ts": 1781349566135
   }
 }

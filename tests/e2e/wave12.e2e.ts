@@ -99,6 +99,12 @@ test("Shift+= / Shift+- scale the subtitle overlay and persist", async ({ page }
 });
 
 test("Ctrl+K palette: navigate and run player actions", async ({ page }) => {
+  // pin autopause OFF (it's a synced zr.* key — another test's `p` press can
+  // bleed it ON via shared server state, flipping the toggle's expected toast)
+  await page.addInitScript(() => {
+    localStorage.setItem("zr.autopause", "0");
+    localStorage.setItem("zr.sync.ts", JSON.stringify({ "zr.autopause": Date.now() + 1e9 }));
+  });
   await page.goto("/#/");
   await expect(page.locator(".grid .card").first()).toBeVisible();
   await page.keyboard.press("Control+k");
