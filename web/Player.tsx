@@ -2,7 +2,6 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -13,19 +12,12 @@ import {
   type Cue,
   type LibraryEntry,
   type SubTrackInfo,
-  type WordLookup,
   type ExplainResult,
   type EncounterHit,
 } from "./api.ts";
 import { activeCueIndex, contextAround } from "./cues.ts";
 import { getTokenizer, isLexical, kataToHira, type KToken } from "./tokenizer.ts";
-import {
-  buildWordIndex,
-  matchFront,
-  withFront,
-  withoutFront,
-  type WordIndex,
-} from "./progress.ts";
+import { matchFront } from "./progress.ts";
 import { wordKey } from "./TokenLine.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 import { loadAccents } from "./accent.ts";
@@ -37,7 +29,7 @@ import {
   ChevronRightIcon,
   BookOpenIcon,
 } from "./icons.tsx";
-import { refreshAnkiWords, useAnkiWordsLive } from "./ankicache.ts";
+import { useWordState } from "./player/useWordState.ts";
 import { registerCommands } from "./commands.ts";
 import { rankPreStudy } from "./prestudy.ts";
 import { nextIPlusOne } from "./iplusone.ts";
@@ -46,7 +38,6 @@ import { readKnownWords } from "./coverage.ts";
 import {
   cueTokensGet,
   cueTokensPut,
-  deckCardToLookup,
   fmtTime,
   HOVER_CLOSE_MS,
   HOVER_OPEN_MS,
@@ -175,59 +166,17 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     void getTokenizer().catch(() => {});
   }, []);
 
-  const [wordIndex, setWordIndex] = useState<WordIndex>(() =>
-    buildWordIndex([], {}),
-  );
-  const [knownFronts, setKnownFronts] = useState<Set<string>>(new Set());
-  const wordIndexRef = useRef<WordIndex>(buildWordIndex([], {}));
-  useEffect(() => {
-    wordIndexRef.current = wordIndex;
-  }, [wordIndex]);
-  // front -> full card, so a popup for a word already in the deck can be
-  // filled from the existing card instead of calling Gemini.
-  const deckCardsRef = useRef<Map<string, { front: string; back: string; notes: string }>>(
-    new Map(),
-  );
-
-  // Live deck (web/ankicache.ts): background ETag revalidations and optimistic
-  // add/delete write-throughs re-render the known-word underlines without an
-  // explicit refreshAnki() roundtrip.
-  const liveAnki = useAnkiWordsLive();
-  // Optimistic fronts not yet confirmed by the server cache: merged into every
-  // liveAnki snapshot so a background revalidation that raced an add can't
-  // un-mark a freshly-added word. Confirmed fronts drop out of the set.
-  const pendingFrontsRef = useRef<Set<string>>(new Set());
-  // Instant feedback: the optimistic front goes into the WORD INDEX too, so
-  // TokenLine recolors the word in the same render — not seconds later when
-  // the server roundtrip + cache refresh lands.
-  const markFrontOptimistic = useCallback((front: string) => {
-    pendingFrontsRef.current.add(front);
-    setKnownFronts((prev) => new Set(prev).add(front));
-    setWordIndex((prev) => withFront(prev, front));
-  }, []);
-  const unmarkFrontOptimistic = useCallback((front: string) => {
-    pendingFrontsRef.current.delete(front);
-    setKnownFronts((prev) => {
-      const next = new Set(prev);
-      next.delete(front);
-      return next;
-    });
-    setWordIndex((prev) => withoutFront(prev, front));
-  }, []);
-  useEffect(() => {
-    if (!liveAnki) return;
-    const fronts = new Set(liveAnki.words.map((w) => w.front));
-    for (const f of pendingFrontsRef.current) {
-      if (fronts.has(f)) pendingFrontsRef.current.delete(f); // confirmed
-      else fronts.add(f); // still pending — keep the optimistic mark
-    }
-    // pending (not-yet-confirmed) optimistic fronts survive the rebuild
-    let idx = buildWordIndex(liveAnki.words, liveAnki.progress);
-    for (const f of pendingFrontsRef.current) idx = withFront(idx, f);
-    setWordIndex(idx);
-    setKnownFronts(fronts);
-    deckCardsRef.current = new Map(liveAnki.words.map((w) => [w.front, w]));
-  }, [liveAnki]);
+  // Deck / known-word state machine (deck cards + known fronts + optimistic
+  // marks + live Anki revalidation) — see web/player/useWordState.ts.
+  const {
+    wordIndex,
+    wordIndexRef,
+    knownFronts,
+    deckCardsRef,
+    markFrontOptimistic,
+    unmarkFrontOptimistic,
+    refreshAnki,
+  } = useWordState();
 
   // --- frequency ranks (lazy-loaded /freq.json) for the popup tag + pre-study ---
   const [freqMap, setFreqMap] = useState<Map<string, number> | null>(null);
@@ -1108,12 +1057,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       cancelled = true;
     };
   }, [primaryText]);
-
-  const refreshAnki = useCallback(async () => {
-    // Force a fresh fetch; the result lands via the useAnkiWordsLive channel
-    // (single source of truth — no direct setState here).
-    await refreshAnkiWords().catch(() => {});
-  }, []);
 
   // Pre-study bulk add: text-only lookup then a LIGHT Anki add (no mediaId /
   // timestamp → server skips frame + audio capture), sequentially per word.
