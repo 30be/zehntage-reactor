@@ -9,6 +9,12 @@ export interface Settings {
   knownLang: string;
   blurSecondary: boolean;
   /**
+   * Show a quiet "comprehension check? (q)" affordance at the end of an
+   * episode (in the session-summary overlay). Default true; press q to start
+   * a quiz over the just-watched cues, or ignore/Esc to dismiss.
+   */
+  autoQuizPrompt: boolean;
+  /**
    * Override template for the word-lookup prompt. Placeholders {word}
    * {context} {source} are substituted. Empty string means "use the
    * built-in default" (see gemini.ts DEFAULT_LOOKUP_PROMPT).
@@ -27,6 +33,7 @@ const DEFAULTS: Settings = {
   targetLang: "ja",
   knownLang: "ru",
   blurSecondary: true,
+  autoQuizPrompt: true,
   lookupPrompt: "",
   explainPrompt: "",
 };

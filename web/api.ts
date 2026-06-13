@@ -227,6 +227,19 @@ export interface ComprehensionSummary {
   totalCorrect: number;
 }
 
+// Today's activity tiles + daily streak — mirrors src/lib/telemetry.ts
+// TodayStats.
+export interface TodayStats {
+  date: string;
+  cuesWatched: number;
+  wordsMined: number;
+  lookups: number;
+  quizzes: number;
+  minutes: number;
+  streak: number;
+  active: boolean;
+}
+
 // --- lemma index queries ---
 
 export interface EncounterCue {
@@ -353,6 +366,7 @@ export const api = {
   statsOverview: () => jget<Overview>("/api/stats/overview"),
   statsComprehension: () =>
     jget<ComprehensionSummary>("/api/stats/comprehension"),
+  statsToday: () => jget<TodayStats>("/api/stats/today"),
   indexEncounters: (lemma: string, mediaIds?: string[]) =>
     jget<EncounterHit[]>(
       `/api/index/encounters?lemma=${encodeURIComponent(lemma)}${

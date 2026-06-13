@@ -250,6 +250,136 @@ export function collapseRepeatedCues(cues: Cue[], minRun = 4, spanSec = 20): Cue
   return out;
 }
 
+/**
+ * Detect and drop repeating multi-cue CYCLES (period > 1) that
+ * `collapseRepeatedCues` misses: whisper sometimes loops a whole N-line passage
+ * several times (e.g. a letter read once but transcribed 3×). For each position
+ * we look for the longest period `p` (1..maxPeriod) whose block of `p` cues is
+ * immediately followed by `>= minReps-1` near-identical copies, and keep only
+ * the FIRST block, dropping the rest. Kept cues retain their original
+ * timestamps; the dropped repeats simply leave a gap (no fabricated timings).
+ *
+ * Guards against eating legitimate repeated dialogue:
+ *  - period 1 (a single cue repeating) is left to collapseRepeatedCues, which
+ *    has the run-length / span heuristics; here we only act on period 1 when the
+ *    cycle is long (>= singleMinReps) so we don't clip a genuine はい／はい.
+ *  - period >= 2 needs only minReps repetitions, since a whole multi-cue block
+ *    repeating verbatim is virtually always a hallucination loop.
+ */
+export function dropRepeatingCycles(
+  cues: Cue[],
+  maxPeriod = 8,
+  minReps = 2,
+  singleMinReps = 4,
+): Cue[] {
+  const norm = cues.map((c) => repeatNorm(c.text));
+  const keep = new Array<boolean>(cues.length).fill(true);
+
+  let i = 0;
+  while (i < cues.length) {
+    if (!keep[i]) {
+      i++;
+      continue;
+    }
+    let bestPeriod = 0;
+    let bestEnd = i; // exclusive index past the last repeated block
+    // Prefer the LONGEST period that still repeats, so a 4-line cycle is
+    // detected as period 4 rather than collapsing on a coincidental sub-period.
+    for (let p = Math.min(maxPeriod, cues.length - i); p >= 1; p--) {
+      if (i + 2 * p > cues.length) continue;
+      let reps = 1;
+      let base = i;
+      while (base + p + p <= cues.length && blocksMatch(norm, base, base + p, p)) {
+        reps++;
+        base += p;
+      }
+      if (reps < minReps) continue;
+      const required = p === 1 ? singleMinReps : minReps;
+      if (reps < required) continue;
+      bestPeriod = p;
+      bestEnd = base + p; // base points at last matching block's start
+      break;
+    }
+    if (bestPeriod > 0) {
+      // Extend over a PARTIAL trailing repeat: after the last full block, keep
+      // consuming cues that still match the cycle position-for-position (a loop
+      // often drifts mid-way through its final pass, e.g. cue 14 in Hyouka 02).
+      let tail = bestEnd;
+      while (tail < cues.length && repeatNear(norm[tail]!, norm[i + ((tail - i) % bestPeriod)]!)) {
+        tail++;
+      }
+      // Keep the first block [i, i+bestPeriod); drop the rest of the cycle.
+      for (let k = i + bestPeriod; k < tail; k++) keep[k] = false;
+      // Drop a LEADING preamble: whisper sometimes emits a degraded preview of
+      // the looped passage just before the real loop. Scan backward over kept,
+      // contiguous cues and drop any that are a drifted echo of the matching
+      // position in the confirmed first block. Stop at the first non-echo so we
+      // never eat unrelated dialogue that happens to sit before the loop.
+      // The preamble is often a short, mis-phased partial pass of the same
+      // passage (A B A vs the real A B C D), so we match each head cue against
+      // ANY line of the confirmed first block rather than a fixed phase. Bounded
+      // to the contiguous head and broken on the first non-echo, this stays safe.
+      for (let k = i - 1; k >= 0 && keep[k]; k--) {
+        let echo = false;
+        for (let j = i; j < i + bestPeriod; j++) {
+          if (prefixSimilar(norm[k]!, norm[j]!)) {
+            echo = true;
+            break;
+          }
+        }
+        if (echo) keep[k] = false;
+        else break;
+      }
+      i = tail;
+    } else {
+      i++;
+    }
+  }
+  return cues.filter((_, idx) => keep[idx]);
+}
+
+/**
+ * Looser near-match used ONLY for the leading-preamble scan: whisper often emits
+ * a degraded *preview* of the first looped line before the real loop starts
+ * (Hyouka 02: "おれきほうたろお殿" previews the letter's real opener
+ * "おれきほうたろうどの"). These share a long common prefix but diverge at the
+ * tail (name/honorific drift), so substring matching misses them. We require a
+ * substantial shared prefix relative to the shorter string. This is deliberately
+ * NOT used for cycle equality (where it would risk eating distinct dialogue) —
+ * only to recognise preamble echoes of an already-confirmed downstream cycle.
+ */
+function prefixSimilar(a: string, b: string): boolean {
+  if (a === "" || b === "") return false;
+  if (repeatNear(a, b)) return true;
+  const shorter = Math.min(a.length, b.length);
+  if (shorter < 4) return false;
+  let common = 0;
+  while (common < shorter && a[common] === b[common]) common++;
+  // ≥5 shared chars AND ≥45% of the shorter line — enough to flag a drifted
+  // echo (incl. long lines that diverge only at the very end, e.g.
+  // "全略私は今を…" vs "全略私は今ヴェナレス…"), strict enough that genuinely
+  // different lines (which rarely share a 5-char run-in) are left alone.
+  return common >= 5 && common / shorter >= 0.45;
+}
+
+/** Two blocks of `p` cues starting at a and b are a near-match (per-cue
+ * repeatNear over normalized text). Empty-normalized cues must match exactly. */
+function blocksMatch(norm: string[], a: number, b: number, p: number): boolean {
+  for (let k = 0; k < p; k++) {
+    if (!repeatNear(norm[a + k]!, norm[b + k]!)) return false;
+  }
+  return true;
+}
+
+/**
+ * Full anti-hallucination post-processing pipeline used for both freshly
+ * transcribed cues and re-cleaning existing sidecars: first collapse
+ * consecutive single-cue runs, then drop periodic multi-cue cycles. Idempotent.
+ */
+export function cleanCues(cues: Cue[]): Cue[] {
+  return dropRepeatingCycles(collapseRepeatedCues(cues));
+}
+
 export interface CoverageHole {
   start: number;
   end: number;

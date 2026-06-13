@@ -16,9 +16,13 @@ The minimalist local player that turns anime into your Anki deck.
   from blue to ambient as the SRS interval grows; furigana on unknown kanji
 - Pre-study mode: bulk-add the unknown words of the upcoming minutes
 - Shadowing loops, per-cue replay, smart autopause on lines with unknown words
+- Comprehension quiz (`q`) over the cues you just watched; at the end of an
+  episode a quiet "comprehension check? (q)" prompt appears (toggle in
+  Settings → Player behavior → "End-of-episode comprehension prompt")
 - Difficulty heat strip on the seek bar
 - Read mode: full transcripts with the same lookups and hotkeys
 - Stats: activity grid, watch time, mining pace, per-episode coverage
+- Home "Today" panel: words mined, cues watched, minutes, quizzes, daily streak
 - jimaku.cc subtitle search
 - Deep links: `#/play/<id>@<seconds>` jumps straight into an episode
 

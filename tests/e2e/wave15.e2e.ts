@@ -74,15 +74,18 @@ test("answering all MC correctly scores full marks and emits quiz.result", async
 
   await expect(card.locator(".quiz-score")).toHaveText(new RegExp(`^${correct} / ${total}$`));
 
-  // the score was reported to telemetry as quiz.result
-  await page.waitForTimeout(50);
+  // the score was reported to telemetry as quiz.result — assert the
+  // comprehension aggregation actually counts at least this quiz
   await expect
-    .poll(async () => {
-      const res = await page.request.get("/api/stats/summary");
-      const sum = await res.json();
-      return JSON.stringify(sum);
-    })
-    .toBeTruthy();
+    .poll(
+      async () => {
+        const res = await page.request.get("/api/stats/comprehension");
+        const comp = await res.json();
+        return comp.quizzes ?? 0;
+      },
+      { timeout: 13_000 }, // client telemetry flushes every 10s
+    )
+    .toBeGreaterThanOrEqual(1);
 });
 
 test("Esc closes the quiz overlay", async ({ page }) => {

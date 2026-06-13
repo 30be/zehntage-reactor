@@ -233,6 +233,111 @@ export async function comprehensionSummary(): Promise<ComprehensionSummary> {
   return summarizeComprehension(await readEvents());
 }
 
+// --- "today" panel: a single day's activity + daily streak -----------------
+//
+// The Home page surfaces a quiet summary of TODAY's study, derived live from
+// the raw event log. All math is pure (testable) — only `now` is injected.
+
+export interface TodayStats {
+  date: string; // local "YYYY-MM-DD" for `now`
+  cuesWatched: number; // distinct primary cues activated (cue_active events)
+  wordsMined: number; // anki_add events today
+  lookups: number; // lookup events today
+  quizzes: number; // quiz.result events today
+  minutes: number; // rounded minutes of PLAYING wall time today
+  streak: number; // consecutive days (ending today) with any activity
+  active: boolean; // any activity at all today
+}
+
+/**
+ * Consecutive-day streak ending on `now`'s local date. A day "counts" when it
+ * appears in `activeDates` (a set of local "YYYY-MM-DD" strings with activity).
+ * The streak walks backwards one calendar day at a time; the first gap stops it.
+ * If today itself has no activity the streak is 0 (the streak is "broken" until
+ * you study again today).
+ */
+export function currentStreak(activeDates: Set<string>, now = Date.now()): number {
+  const start = new Date(now);
+  let streak = 0;
+  for (let i = 0; ; i++) {
+    const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() - i);
+    if (activeDates.has(localDate(d.getTime()))) streak++;
+    else break;
+  }
+  return streak;
+}
+
+/** What counts as "activity" for the streak: any of these event types. */
+function isActivityEvent(e: TelemetryEvent): boolean {
+  return (
+    e.type === "heartbeat" ||
+    e.type === "anki_add" ||
+    e.type === "lookup" ||
+    e.type === "quiz.result" ||
+    e.type === "cue_active"
+  );
+}
+
+/** Today's activity tiles + the current daily streak, from the raw log. */
+export function todayStats(events: TelemetryEvent[], now = Date.now()): TodayStats {
+  const today = localDate(now);
+  const activeDates = new Set<string>();
+  let cueSet = new Set<string>();
+  let wordsMined = 0;
+  let lookups = 0;
+  let quizzes = 0;
+  let playSec = 0;
+
+  for (const e of events) {
+    if (!isActivityEvent(e)) continue;
+    const date = localDate(e.ts);
+    activeDates.add(date);
+    if (date !== today) continue;
+    switch (e.type) {
+      case "heartbeat":
+        if (e.paused !== true) playSec += HEARTBEAT_SEC;
+        break;
+      case "anki_add":
+        wordsMined += 1;
+        break;
+      case "lookup":
+        lookups += 1;
+        break;
+      case "quiz.result":
+        quizzes += 1;
+        break;
+      case "cue_active": {
+        // dedupe by (mediaId, cue index) so a replayed line isn't double-counted
+        const id = typeof e.mediaId === "string" ? e.mediaId : "?";
+        const idx = typeof e.idx === "number" ? e.idx : String(e.idx ?? "");
+        cueSet.add(`${id}#${idx}`);
+        break;
+      }
+    }
+  }
+
+  return {
+    date: today,
+    cuesWatched: cueSet.size,
+    wordsMined,
+    lookups,
+    quizzes,
+    minutes: Math.round(playSec / 60),
+    streak: currentStreak(activeDates, now),
+    active:
+      activeDates.has(today) &&
+      (cueSet.size > 0 ||
+        wordsMined > 0 ||
+        lookups > 0 ||
+        quizzes > 0 ||
+        playSec > 0),
+  };
+}
+
+export async function todaySummary(now = Date.now()): Promise<TodayStats> {
+  return todayStats(await readEvents(), now);
+}
+
 // --- analytics v2: per-(media, day) series + overview -----------------------
 
 export interface EpisodeDayRow {

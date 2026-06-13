@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import type { Cue } from "./subs.ts";
-import { collapseRepeatedCues, cuesToSrt, findCoverageHoles, parseTimestamp } from "./subs.ts";
+import { cleanCues, cuesToSrt, findCoverageHoles, parseTimestamp } from "./subs.ts";
 
 const MODEL_PATH = join(homedir(), "models", "ggml-medium.bin");
 const THREADS = 12;
@@ -43,6 +43,37 @@ export function parseWhisperLine(line: string): Cue | null {
   const text = m[3]!.trim();
   if (Number.isNaN(start) || Number.isNaN(end) || !text) return null;
   return { start, end, text };
+}
+
+/**
+ * Post-process a hole-repair whisper pass before merging it back.
+ *
+ * A repair runs with `-mc 0` to break loops, but it can still loop on its own —
+ * and because each repair only sees a short window, a loop here re-emits the
+ * SAME cycle of cues we were trying to escape. So we:
+ *   1. clip to the hole window (with the repair's ±pad already applied upstream);
+ *   2. dedup with the cycle-aware `cleanCues` so a looped repair can't emit
+ *      duplicate cycles of its own;
+ *   3. cap to roughly the hole's duration: if the deduped content still spans
+ *      more than `loopFactor`× the hole length it is still looping, so keep only
+ *      the first hole-length worth of cues. We never fabricate timings — kept
+ *      cues retain their original timestamps and we just drop the overflow.
+ */
+export function repairHole(
+  repair: Cue[],
+  hole: { start: number; end: number },
+  loopFactor = 1.5,
+): Cue[] {
+  const clipped = cleanCues(repair).filter((c) => c.end > hole.start && c.start < hole.end);
+  if (clipped.length === 0) return clipped;
+  const holeLen = hole.end - hole.start;
+  const span = clipped[clipped.length - 1]!.end - clipped[0]!.start;
+  if (holeLen <= 0 || span <= holeLen * loopFactor) return clipped;
+  // Still looping: keep cues until we've covered one hole-length from the first
+  // kept cue, then stop. This discards the duplicated overflow tail.
+  const cutoff = clipped[0]!.start + holeLen;
+  const capped = clipped.filter((c) => c.start < cutoff);
+  return capped.length > 0 ? capped : [clipped[0]!];
 }
 
 class WhisperQueue {
@@ -157,7 +188,7 @@ class WhisperQueue {
       job.cues.push(cue);
       this.emit(job, { type: "cue", cue });
     }
-    await Bun.write(job.outPath, cuesToSrt(collapseRepeatedCues(job.cues)));
+    await Bun.write(job.outPath, cuesToSrt(cleanCues(job.cues)));
     this.setStatus(job, "done");
   }
 
@@ -190,7 +221,7 @@ class WhisperQueue {
       // cue of a loop, so a loop that ate minutes of audio now shows up as a
       // coverage hole — re-run whisper on just those ranges with context
       // conditioning disabled (-mc 0), which is what breaks repeat loops.
-      let cues = collapseRepeatedCues(job.cues);
+      let cues = cleanCues(job.cues);
       const durationSec = await wavDurationSec(wavPath);
       const holes = findCoverageHoles(cues, durationSec);
       for (const hole of holes.slice(0, 4)) {
@@ -204,9 +235,7 @@ class WhisperQueue {
           "-mc", "0", // no past-text conditioning: the anti-loop knob
         ]);
         if (job.canceled) return;
-        const fixed = collapseRepeatedCues(repair).filter(
-          (c) => c.end > hole.start && c.start < hole.end,
-        );
+        const fixed = repairHole(repair, hole);
         cues = [...cues, ...fixed].sort((a, b) => a.start - b.start);
       }
 

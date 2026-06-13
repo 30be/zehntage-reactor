@@ -16,7 +16,6 @@ import { startSync } from "./sync.ts";
 import { readBlacklist } from "./blacklist.ts";
 import { readKnownWords, useCoverage } from "./coverage.ts";
 import { studyNext, type EpisodeSignal } from "./curriculum.ts";
-import { buildWordIndex } from "./progress.ts";
 import { kataToHira } from "./tokenizer.ts";
 import { tmEvent, tmStart } from "./telemetry.ts";
 import { loadFreq } from "./freq.ts";
@@ -266,6 +265,36 @@ function highlightMatch(text: string, q: string): React.ReactNode {
 // --- Home / onboarding ---
 // (hotkey data lives in web/commands.ts — shared with the `?` overlay)
 
+// Quiet summary of TODAY's study, from telemetry. Renders nothing until data
+// arrives and nothing at all on a day with no activity (no empty shell).
+function TodayPanel() {
+  const [today, setToday] = useState<import("./api.ts").TodayStats | null>(null);
+  useEffect(() => {
+    void api.statsToday().then(setToday).catch(() => {});
+  }, []);
+  if (!today || !today.active) return null;
+  const tiles: { label: string; value: number }[] = [
+    { label: "words mined", value: today.wordsMined },
+    { label: "cues watched", value: today.cuesWatched },
+    { label: "minutes", value: today.minutes },
+    { label: "quizzes", value: today.quizzes },
+    { label: "day streak", value: today.streak },
+  ].filter((t, i) => i < 4 || t.value > 0); // hide a 0-day streak tile
+  return (
+    <section className="today-panel card">
+      <h2 className="h2">Today</h2>
+      <div className="today-tiles">
+        {tiles.map((t) => (
+          <div key={t.label} className="stat">
+            <span className="stat-num">{t.value}</span>
+            {t.label}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function Home({ go }: { go: (h: string) => void }) {
   const [root, setRoot] = useState<{ root: string; count: number } | null>(null);
   useEffect(() => {
@@ -277,6 +306,7 @@ function Home({ go }: { go: (h: string) => void }) {
       <p className="home-tagline">
         The minimalist local player that turns anime into your Anki deck.
       </p>
+      <TodayPanel />
       <h2 className="h2">How it works</h2>
       <ol className="home-steps">
         <li>Pick an episode in the <a href="#/" onClick={() => go("#/")}>Library</a></li>
@@ -1627,6 +1657,9 @@ function Settings({
   );
   const [furigana, setFurigana] = useState(settings.furigana !== false);
   const [pitchAccent, setPitchAccent] = useState(settings.pitchAccent !== false);
+  const [autoQuizPrompt, setAutoQuizPrompt] = useState(
+    settings.autoQuizPrompt !== false,
+  );
   const [prestudyMinutes, setPrestudyMinutes] = useState(
     String(Number(settings.prestudyMinutes) || 10),
   );
@@ -1654,6 +1687,7 @@ function Settings({
     setAutoWhisper(Boolean(settings.whisperAutoGenerate));
     setFurigana(settings.furigana !== false);
     setPitchAccent(settings.pitchAccent !== false);
+    setAutoQuizPrompt(settings.autoQuizPrompt !== false);
     setPrestudyMinutes(String(Number(settings.prestudyMinutes) || 10));
     setShadowRepeats(String(Math.max(0, Math.round(Number(settings.shadowRepeats)) || 0)));
     setAutopauseMode(settings.autopauseMode === "unknown" ? "unknown" : "every");
@@ -1674,6 +1708,7 @@ function Settings({
     autoWhisper,
     furigana,
     pitchAccent,
+    autoQuizPrompt,
     prestudyMinutes,
     shadowRepeats,
     autopauseMode,
@@ -1687,6 +1722,7 @@ function Settings({
     autoWhisper,
     furigana,
     pitchAccent,
+    autoQuizPrompt,
     prestudyMinutes,
     shadowRepeats,
     autopauseMode,
@@ -1708,6 +1744,7 @@ function Settings({
         whisperAutoGenerate: s.autoWhisper,
         furigana: s.furigana,
         pitchAccent: s.pitchAccent,
+        autoQuizPrompt: s.autoQuizPrompt,
         prestudyMinutes: Math.max(
           1,
           Math.min(120, Math.round(Number(s.prestudyMinutes)) || 10),
@@ -1827,6 +1864,23 @@ function Settings({
               }}
             />
             <label htmlFor="pitchAccent">Pitch accent marks</label>
+          </div>
+          <div
+            className="switch"
+            title="At the end of an episode, surface a quiet 'comprehension check? (q)' prompt — press q to quiz yourself on the cues you just watched"
+          >
+            <input
+              type="checkbox"
+              id="autoQuizPrompt"
+              checked={autoQuizPrompt}
+              onChange={(e) => {
+                setAutoQuizPrompt(e.target.checked);
+                scheduleSave();
+              }}
+            />
+            <label htmlFor="autoQuizPrompt">
+              End-of-episode comprehension prompt
+            </label>
           </div>
           <div className="field">
             <label htmlFor="prestudyMinutes">Pre-study window</label>

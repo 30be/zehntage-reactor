@@ -3,6 +3,8 @@ import {
   summarizeEvents,
   summarizeComprehension,
   healthSummary,
+  todayStats,
+  currentStreak,
   type TelemetryEvent,
 } from "../src/lib/telemetry.ts";
 
@@ -190,5 +192,123 @@ describe("healthSummary", () => {
     ];
     const s = healthSummary(events, NOW);
     expect(s.whisperWarnings[0]!.message).toBe("coverage hole: 45s–60s");
+  });
+});
+
+// --- currentStreak tests ---
+
+const DAY_MS = 24 * 3600 * 1000;
+// local noon anchors so day-boundary math is unambiguous
+const d = (y: number, m: number, day: number) => new Date(y, m, day, 12).getTime();
+const ds = (ts: number) => {
+  const x = new Date(ts);
+  const mm = String(x.getMonth() + 1).padStart(2, "0");
+  const dd = String(x.getDate()).padStart(2, "0");
+  return `${x.getFullYear()}-${mm}-${dd}`;
+};
+
+describe("currentStreak", () => {
+  const NOW2 = d(2026, 5, 13); // 2026-06-13
+
+  test("no activity → 0", () => {
+    expect(currentStreak(new Set(), NOW2)).toBe(0);
+  });
+
+  test("activity today but not yesterday → 1", () => {
+    expect(currentStreak(new Set([ds(NOW2)]), NOW2)).toBe(1);
+  });
+
+  test("three consecutive days ending today → 3", () => {
+    const set = new Set([
+      ds(NOW2),
+      ds(NOW2 - DAY_MS),
+      ds(NOW2 - 2 * DAY_MS),
+    ]);
+    expect(currentStreak(set, NOW2)).toBe(3);
+  });
+
+  test("a gap breaks the streak", () => {
+    const set = new Set([
+      ds(NOW2),
+      ds(NOW2 - DAY_MS),
+      // skip 2 days back
+      ds(NOW2 - 4 * DAY_MS),
+    ]);
+    expect(currentStreak(set, NOW2)).toBe(2);
+  });
+
+  test("no activity today → 0 even with a past run", () => {
+    const set = new Set([ds(NOW2 - DAY_MS), ds(NOW2 - 2 * DAY_MS)]);
+    expect(currentStreak(set, NOW2)).toBe(0);
+  });
+});
+
+// --- todayStats tests ---
+
+describe("todayStats", () => {
+  const NOW3 = d(2026, 5, 13); // today = 2026-06-13
+  const T = NOW3; // an event timestamp "today"
+  const YEST = NOW3 - DAY_MS;
+
+  test("empty log → inactive zeros, today's date", () => {
+    const s = todayStats([], NOW3);
+    expect(s.active).toBe(false);
+    expect(s.date).toBe("2026-06-13");
+    expect(s).toMatchObject({
+      cuesWatched: 0,
+      wordsMined: 0,
+      lookups: 0,
+      quizzes: 0,
+      minutes: 0,
+      streak: 0,
+    });
+  });
+
+  test("counts today's events only; minutes from playing heartbeats", () => {
+    const ev: TelemetryEvent[] = [
+      { ts: T, type: "anki_add", mediaId: "m1" },
+      { ts: T + 1, type: "anki_add", mediaId: "m1" },
+      { ts: T + 2, type: "lookup", mediaId: "m1" },
+      { ts: T + 3, type: "quiz.result", correct: 4, total: 6, mediaId: "m1" },
+      { ts: T + 4, type: "heartbeat", mediaId: "m1", position: 5, paused: false },
+      { ts: T + 5, type: "heartbeat", mediaId: "m1", position: 20, paused: false },
+      { ts: T + 6, type: "heartbeat", mediaId: "m1", position: 20, paused: true }, // not counted
+      // yesterday's events must not leak into today's tiles
+      { ts: YEST, type: "anki_add", mediaId: "m1" },
+      { ts: YEST, type: "lookup", mediaId: "m1" },
+    ];
+    const s = todayStats(ev, NOW3);
+    expect(s.wordsMined).toBe(2);
+    expect(s.lookups).toBe(1);
+    expect(s.quizzes).toBe(1);
+    // 2 playing heartbeats × 15s = 30s → rounds to 1 minute
+    expect(s.minutes).toBe(1);
+    expect(s.active).toBe(true);
+    // streak: today + yesterday both active → 2
+    expect(s.streak).toBe(2);
+  });
+
+  test("distinct cue_active events counted, replays deduped", () => {
+    const ev: TelemetryEvent[] = [
+      { ts: T, type: "cue_active", mediaId: "m1", idx: 0 },
+      { ts: T + 1, type: "cue_active", mediaId: "m1", idx: 1 },
+      { ts: T + 2, type: "cue_active", mediaId: "m1", idx: 0 }, // replay → not new
+      { ts: T + 3, type: "cue_active", mediaId: "m2", idx: 0 }, // different media
+    ];
+    const s = todayStats(ev, NOW3);
+    expect(s.cuesWatched).toBe(3);
+    expect(s.active).toBe(true);
+  });
+
+  test("minutes round from playing wall time", () => {
+    // 8 playing heartbeats × 15s = 120s = 2 min
+    const ev: TelemetryEvent[] = Array.from({ length: 8 }, (_, i) => ({
+      ts: T + i,
+      type: "heartbeat",
+      mediaId: "m1",
+      position: i,
+      paused: false,
+    }));
+    expect(todayStats(ev, NOW3).minutes).toBe(2);
   });
 });

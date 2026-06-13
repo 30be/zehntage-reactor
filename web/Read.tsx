@@ -232,13 +232,16 @@ export function Read({
 
   const handleResume = useCallback(() => {
     setResumeDismissed(true);
-    setCursor(furthest);
-    setTimeout(() => scrollToCursor(furthest), 0);
-  }, [furthest, scrollToCursor]);
+    // clamp: a saved position can exceed the paragraph count if the transcript
+    // shrank since last session (otherwise progress would read >100%).
+    const target = Math.min(furthest, paragraphs.length - 1);
+    setCursor(target);
+    setTimeout(() => scrollToCursor(target), 0);
+  }, [furthest, paragraphs.length, scrollToCursor]);
 
   // --- progress ---
   const progress = calcProgress(
-    Math.max(furthest, cursor),
+    Math.min(Math.max(furthest, cursor), paragraphs.length - 1),
     paragraphs.length,
   );
 

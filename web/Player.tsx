@@ -490,10 +490,19 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     return buildQuiz(quizCues, { deck, known: knownWordsRef.current, count: 6 });
   }, []);
 
+  const quizBuildingRef = useRef(false);
   const toggleQuiz = useCallback(() => {
     setQuiz((prev) => {
-      if (prev) return null;
+      if (prev) {
+        quizBuildingRef.current = false;
+        return null;
+      }
+      // guard against a second `q` press during the async build window spawning
+      // a concurrent build that could clobber the first
+      if (quizBuildingRef.current) return prev;
+      quizBuildingRef.current = true;
       void buildQuizFromWatched().then((items) => {
+        quizBuildingRef.current = false;
         if (!mountedRef.current) return;
         if (items.length === 0) {
           toast("not enough watched cues for a quiz");
@@ -1229,6 +1238,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       }
       if (idx >= 0 && idx !== prev) {
         sessCuesRef.current += 1;
+        // Telemetry: one event per distinct cue entered during playback (not
+        // on seeks — onSeeking resets prevActiveP). Low-frequency by nature
+        // (fires only on cue change); feeds the Home "today" cues-watched tile.
+        if (!v.paused) tmEvent("cue_active", { mediaId: entry.id, idx });
         // HUD comprehension + unique-unknown tracking on each cue we pass
         const counts = cueUnknownsRef.current;
         if (counts && prev >= 0 && prev < counts.length) {
@@ -1391,6 +1404,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         const ke = e as KeyboardEvent;
         if (ke.shiftKey && (ke.key === "ArrowRight" || ke.key === "ArrowLeft"))
           return;
+        // `q` starts the comprehension quiz (the auto-quiz affordance) — the
+        // hotkey handler already ran in capture order, so suppress the toast.
+        if (ke.key === "q" || ke.key === "Q") return;
         toast("auto-next canceled");
       };
       const timer = window.setTimeout(() => {
@@ -2595,6 +2611,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
                 streak: {sessionSummary.streak} day
                 {sessionSummary.streak === 1 ? "" : "s"}
               </div>
+            )}
+            {settings.autoQuizPrompt !== false && (
+              <div className="ss-line ss-quiz">comprehension check? (q)</div>
             )}
             <div className="ss-line ss-dim">
               next episode in 5s — any key cancels

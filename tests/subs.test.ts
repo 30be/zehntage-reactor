@@ -10,9 +10,12 @@ import {
   trackLabel,
   parseSidecarTrackId,
   collapseRepeatedCues,
+  dropRepeatingCycles,
+  cleanCues,
   findCoverageHoles,
   type SubTrack,
 } from "../src/lib/subs.ts";
+import { repairHole } from "../src/lib/whisper.ts";
 
 describe("languageName", () => {
   test("known codes (both 2- and 3-letter)", () => {
@@ -258,6 +261,200 @@ describe("collapseRepeatedCues hallucination handling", () => {
     const out = collapseRepeatedCues(cues);
     expect(out).toHaveLength(1);
     expect(out[0]!.end).toBeLessThanOrEqual(10);
+  });
+});
+
+describe("dropRepeatingCycles", () => {
+  const c = (start: number, end: number, text: string) => ({ start, end, text });
+  const texts = (cues: { text: string }[]) => cues.map((x) => x.text);
+
+  test("empty input", () => {
+    expect(dropRepeatingCycles([])).toEqual([]);
+    expect(cleanCues([])).toEqual([]);
+  });
+
+  test("period-1 cycle below singleMinReps is left for collapseRepeatedCues", () => {
+    // Two consecutive identical cues — dropRepeatingCycles must NOT touch it.
+    const cues = [c(0, 1, "はい"), c(1, 2, "はい"), c(2, 3, "いいえ")];
+    expect(dropRepeatingCycles(cues)).toEqual(cues);
+  });
+
+  test("period-1 cycle collapses via the full cleanCues pipeline", () => {
+    // A single line looping is handled by collapseRepeatedCues (run length /
+    // span heuristics); cleanCues chains it before the cycle pass.
+    const cues = [
+      c(0, 1, "ループ"),
+      c(1, 2, "ループ"),
+      c(2, 3, "ループ"),
+      c(3, 4, "ループ"),
+      c(4, 5, "ループ"),
+      c(5, 6, "本物"),
+    ];
+    expect(texts(cleanCues(cues))).toEqual(["ループ", "本物"]);
+  });
+
+  test("period-2 cycle: keep first block, drop the repeat", () => {
+    const cues = [
+      c(0, 2, "A1"),
+      c(2, 4, "B1"),
+      c(4, 6, "A1"),
+      c(6, 8, "B1"),
+      c(8, 10, "次"),
+    ];
+    expect(texts(dropRepeatingCycles(cues))).toEqual(["A1", "B1", "次"]);
+    // timestamps of kept cues preserved (no fabricated timings)
+    const out = dropRepeatingCycles(cues);
+    expect(out[0]).toEqual(c(0, 2, "A1"));
+    expect(out[1]).toEqual(c(2, 4, "B1"));
+    expect(out[2]).toEqual(c(8, 10, "次"));
+  });
+
+  test("period-3 cycle repeating twice collapses to one block", () => {
+    const block = ["甲", "乙", "丙"];
+    const cues = [...block, ...block].map((t, i) => c(i, i + 1, t));
+    cues.push(c(99, 100, "終"));
+    expect(texts(dropRepeatingCycles(cues))).toEqual(["甲", "乙", "丙", "終"]);
+  });
+
+  test("period-4 cycle prefers the long period over a coincidental sub-period", () => {
+    const block = ["a", "b", "c", "d"];
+    const cues = [...block, ...block, ...block].map((t, i) => c(i, i + 1, t));
+    expect(texts(dropRepeatingCycles(cues))).toEqual(block);
+  });
+
+  test("partial trailing repeat is dropped, real divergence kept", () => {
+    const block = ["一行目", "二行目", "三行目"];
+    const cues = [
+      ...block, // first (kept)
+      ...block, // full repeat (dropped)
+      "一行目", // partial trailing repeat (dropped)
+      "二行目", // partial trailing repeat (dropped)
+      "本物の続き", // divergence at this cycle position -> kept
+    ].map((t, i) => c(i, i + 1, t));
+    expect(texts(dropRepeatingCycles(cues))).toEqual(["一行目", "二行目", "三行目", "本物の続き"]);
+  });
+
+  test("LEGIT two-cue exchange occurring once is preserved", () => {
+    const cues = [c(0, 1, "おはよう"), c(1, 2, "おはようございます"), c(2, 3, "いってきます")];
+    expect(dropRepeatingCycles(cues)).toEqual(cues);
+  });
+
+  test("LEGIT genuine repeat (はい/はい once) preserved", () => {
+    const cues = [c(0, 1, "はい"), c(1, 2, "はい")];
+    expect(dropRepeatingCycles(cues)).toEqual(cues);
+  });
+
+  test("ep02 hole-repair loop: only the real letter (once) + continuation survive", () => {
+    const cues = [
+      // leading single-line hallucination preamble
+      c(0.0, 2.0, "おれきほうたろお殿"),
+      c(2.6, 5.58, "全略 私は今を見つけます"),
+      c(5.6, 7.6, "おれきほうたろお殿"),
+      // real letter, first reading (KEEP)
+      c(7.6, 9.6, "おれきほうたろうどの。"),
+      c(9.6, 11.6, "全略。私は今、ヴェナレスにいます。"),
+      c(11.6, 13.6, "ちょっと遅れたけど、合格おめでとう。"),
+      c(13.6, 15.6, "結局、神山高校だったんですよ。"),
+      // full repeat (DROP)
+      c(15.6, 17.6, "おれきほうたろうどの。"),
+      c(17.6, 19.6, "全略。私は今、ヴェナレスにいます。"),
+      c(19.6, 21.6, "ちょっと遅れたけど、合格おめでとう。"),
+      c(21.6, 23.6, "結局、神山高校だったんですよ。"),
+      // partial 3rd repeat (DROP)
+      c(23.6, 25.6, "おれきほうたろうどの。"),
+      c(25.6, 27.6, "全略。私は今、ヴェナレスにいます。"),
+      // real continuation diverges here (KEEP)
+      c(27.6, 29.6, "結局上山高校だってね"),
+    ];
+    const out = cleanCues(cues);
+    expect(texts(out)).toEqual([
+      "おれきほうたろうどの。",
+      "全略。私は今、ヴェナレスにいます。",
+      "ちょっと遅れたけど、合格おめでとう。",
+      "結局、神山高校だったんですよ。",
+      "結局上山高校だってね",
+    ]);
+    // kept cues keep their original timestamps
+    expect(out[0]!.start).toBeCloseTo(7.6);
+    expect(out[4]!).toEqual(c(27.6, 29.6, "結局上山高校だってね"));
+  });
+
+  test("cleanCues is idempotent on the ep02 pattern", () => {
+    const cues = [
+      c(0, 2, "おれきほうたろお殿"),
+      c(2, 4, "全略 私は今を見つけます"),
+      c(4, 6, "おれきほうたろお殿"),
+      c(6, 8, "おれきほうたろうどの。"),
+      c(8, 10, "全略。私は今、ヴェナレスにいます。"),
+      c(10, 12, "ちょっと遅れたけど、合格おめでとう。"),
+      c(12, 14, "結局、神山高校だったんですよ。"),
+      c(14, 16, "おれきほうたろうどの。"),
+      c(16, 18, "全略。私は今、ヴェナレスにいます。"),
+      c(18, 20, "ちょっと遅れたけど、合格おめでとう。"),
+      c(20, 22, "結局、神山高校だったんですよ。"),
+      c(22, 24, "結局上山高校だってね"),
+    ];
+    const once = cleanCues(cues);
+    expect(cleanCues(once)).toEqual(once);
+  });
+
+  test("no leading-preamble false positive: distinct line before a loop is kept", () => {
+    const cues = [
+      c(0, 2, "全然違う台詞です"), // unrelated, must survive
+      c(2, 4, "letterA"),
+      c(4, 6, "letterB"),
+      c(6, 8, "letterA"),
+      c(8, 10, "letterB"),
+      c(10, 12, "次へ"),
+    ];
+    expect(texts(dropRepeatingCycles(cues))).toEqual(["全然違う台詞です", "letterA", "letterB", "次へ"]);
+  });
+});
+
+describe("repairHole", () => {
+  const c = (start: number, end: number, text: string) => ({ start, end, text });
+  const texts = (cues: { text: string }[]) => cues.map((x) => x.text);
+
+  test("clips repair to the hole window", () => {
+    const repair = [c(0, 5, "前の残響"), c(48, 52, "穴の中身"), c(120, 125, "後ろの残響")];
+    const out = repairHole(repair, { start: 50, end: 100 });
+    expect(texts(out)).toEqual(["穴の中身"]);
+  });
+
+  test("dedups a looping repair so it cannot emit duplicate cycles", () => {
+    // Repair itself loops a 2-line block; window comfortably fits one pass.
+    const repair = [
+      c(50, 53, "甲の台詞"),
+      c(53, 56, "乙の台詞"),
+      c(56, 59, "甲の台詞"),
+      c(59, 62, "乙の台詞"),
+    ];
+    const out = repairHole(repair, { start: 50, end: 100 });
+    expect(texts(out)).toEqual(["甲の台詞", "乙の台詞"]);
+  });
+
+  test("caps a runaway loop to ~hole length, dropping the overflow tail", () => {
+    // 10s hole; repair loops far past 1.5× (15s) with distinct-enough drifting
+    // lines that survive dedup. Should keep only the first hole-length worth.
+    const repair = Array.from({ length: 30 }, (_, i) =>
+      c(50 + i, 51 + i, `セリフ番号${i}`),
+    );
+    const out = repairHole(repair, { start: 50, end: 60 });
+    const span = out[out.length - 1]!.end - out[0]!.start;
+    expect(span).toBeLessThanOrEqual(10 * 1.5);
+    // kept cues retain original timestamps (no fabrication)
+    expect(out[0]!.start).toBe(50);
+    expect(out.every((x) => repair.some((r) => r.start === x.start && r.end === x.end))).toBe(true);
+  });
+
+  test("content within ~hole length is returned untouched", () => {
+    const repair = [c(50, 52, "一"), c(52, 54, "二"), c(54, 56, "三")];
+    const out = repairHole(repair, { start: 50, end: 60 });
+    expect(texts(out)).toEqual(["一", "二", "三"]);
+  });
+
+  test("empty repair returns empty", () => {
+    expect(repairHole([], { start: 0, end: 50 })).toEqual([]);
   });
 });
 

@@ -63,6 +63,7 @@ import {
   episodeSeries,
   overview,
   toCsv,
+  todaySummary,
   healthSummaryFromFile,
   type TelemetryEvent,
 } from "../lib/telemetry.ts";
@@ -1288,6 +1289,9 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       }
       if (req.method === "GET" && path === "/api/stats/comprehension") {
         return json(await comprehensionSummary());
+      }
+      if (req.method === "GET" && path === "/api/stats/today") {
+        return json(await todaySummary());
       }
 
       // --- lemma index queries (lazy per-entry indexes, ja track) ---
