@@ -84,16 +84,32 @@ export interface JimakuClientOptions {
   baseUrl?: string;
 }
 
+/** Backoff delays (ms) for retries when no Retry-After header is present. */
+const BACKOFF_MS = [2_000, 5_000, 15_000] as const;
+const MAX_RETRY_AFTER_MS = 60_000;
+
+function isRetryable(status: number): boolean {
+  return status === 429 || (status >= 500 && status <= 599);
+}
+
 async function apiGet(path: string, opts: JimakuClientOptions = {}): Promise<unknown> {
   const apiKey = opts.apiKey ?? (await loadJimakuApiKey());
   if (!apiKey) {
     throw new JimakuError("JIMAKU_API_KEY not set (env or ~/.env)", 401);
   }
-  const res = await fetch((opts.baseUrl ?? BASE_URL) + path, {
-    headers: { Authorization: apiKey, Accept: "application/json" },
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!res.ok) {
+
+  let lastError: JimakuError | undefined;
+
+  for (let attempt = 0; attempt <= BACKOFF_MS.length; attempt++) {
+    const res = await fetch((opts.baseUrl ?? BASE_URL) + path, {
+      headers: { Authorization: apiKey, Accept: "application/json" },
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    if (res.ok) {
+      return res.json();
+    }
+
     let message = `jimaku ${path} failed: HTTP ${res.status}`;
     let code: number | undefined;
     try {
@@ -104,14 +120,32 @@ async function apiGet(path: string, opts: JimakuClientOptions = {}): Promise<unk
       // non-JSON error body — keep the HTTP status message
     }
     const resetAfter = Number(res.headers.get("x-ratelimit-reset-after"));
-    throw new JimakuError(
-      message,
-      res.status,
-      code,
-      res.status === 429 && Number.isFinite(resetAfter) ? resetAfter : undefined,
-    );
+    const retryAfterSec =
+      res.status === 429 && Number.isFinite(resetAfter) ? resetAfter : undefined;
+
+    lastError = new JimakuError(message, res.status, code, retryAfterSec);
+
+    // Non-retryable 4xx (e.g. 401, 403, 404) — fail fast, no retry.
+    if (!isRetryable(res.status)) {
+      throw lastError;
+    }
+
+    // Exhausted retries — throw to let caller fall back to whisper.
+    if (attempt === BACKOFF_MS.length) {
+      throw lastError;
+    }
+
+    // Wait before next attempt: honour Retry-After (capped), else use backoff table.
+    const waitMs =
+      retryAfterSec !== undefined
+        ? Math.min(retryAfterSec * 1_000, MAX_RETRY_AFTER_MS)
+        : BACKOFF_MS[attempt]!;
+
+    await new Promise((r) => setTimeout(r, waitMs));
   }
-  return res.json();
+
+  // Unreachable, but TypeScript needs a return path.
+  throw lastError!;
 }
 
 export interface SearchOptions {

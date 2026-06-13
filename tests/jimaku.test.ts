@@ -103,14 +103,16 @@ describe("searchEntries", () => {
     }
   });
 
-  test("429 carries retryAfterSec from rate-limit headers", async () => {
+  test("429 carries retryAfterSec from rate-limit headers (retries exhaust)", async () => {
+    // Returns 429 on every attempt — retries should exhaust then throw.
     mockFetch(
       () =>
         new Response(JSON.stringify({ error: "rate limited", code: 0 }), {
           status: 429,
           headers: {
             "content-type": "application/json",
-            "x-ratelimit-reset-after": "0.98",
+            // Use 0 so the test doesn't actually sleep 3 × 980 ms.
+            "x-ratelimit-reset-after": "0",
           },
         }),
     );
@@ -119,7 +121,48 @@ describe("searchEntries", () => {
       throw new Error("should have thrown");
     } catch (e) {
       expect((e as JimakuError).status).toBe(429);
-      expect((e as JimakuError).retryAfterSec).toBeCloseTo(0.98);
+      // retryAfterSec is 0 (finite, from header)
+      expect((e as JimakuError).retryAfterSec).toBe(0);
+      // Should have been called 4 times: 1 initial + 3 retries
+      expect(calls).toHaveLength(4);
+    }
+  });
+
+  test("429-then-200 retries and succeeds", async () => {
+    let attempt = 0;
+    mockFetch(() => {
+      attempt++;
+      if (attempt === 1) {
+        return new Response(JSON.stringify({ error: "rate limited", code: 0 }), {
+          status: 429,
+          headers: {
+            "content-type": "application/json",
+            "x-ratelimit-reset-after": "0",
+          },
+        });
+      }
+      return Response.json([ENTRY]);
+    });
+    const entries = await searchEntries("hyouka");
+    expect(entries).toEqual([ENTRY]);
+    // 1 failed attempt + 1 successful retry
+    expect(calls).toHaveLength(2);
+  });
+
+  test("401 is not retried — fails fast", async () => {
+    mockFetch(() =>
+      new Response(JSON.stringify({ error: "unauthorized", code: 1 }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    try {
+      await searchEntries("x");
+      throw new Error("should have thrown");
+    } catch (e) {
+      expect((e as JimakuError).status).toBe(401);
+      // Only one fetch call — no retry on 4xx
+      expect(calls).toHaveLength(1);
     }
   });
 });

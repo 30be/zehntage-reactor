@@ -392,6 +392,14 @@ async function pumpTranslateBatch(library: Library): Promise<void> {
       } catch (e) {
         item.status = "error";
         item.error = e instanceof Error ? e.message : String(e);
+        // Surface translate failures so a bulk run doesn't silently leave
+        // missing ru sidecars — also countable via /api/batch/status.
+        void logEvent("anomaly.translate_error", {
+          mediaId: item.entryId,
+          name: library.get(item.entryId)?.name ?? null,
+          lang: item.targetLang,
+          reason: item.error,
+        });
       }
     }
   } finally {
@@ -465,11 +473,24 @@ function subPassesQuality(
 
 /** Attempt a confident, quality human JA sub from jimaku. Returns true if one
  *  was downloaded + accepted (external sidecar written + library refreshed). */
+// Space out jimaku API hits across episodes during a bulk run so the
+// back-to-back search+list+download bursts don't trip rate limits. Whisper is
+// already serialized and translation runs through its own pump — neither is
+// affected by this gate.
+const JIMAKU_MIN_GAP_MS = 750;
+let jimakuLastCallAt = 0;
+async function jimakuThrottle(): Promise<void> {
+  const wait = jimakuLastCallAt + JIMAKU_MIN_GAP_MS - Date.now();
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  jimakuLastCallAt = Date.now();
+}
+
 async function tryJimakuJa(library: Library, entry: LibraryEntry): Promise<boolean> {
   // Soft-skip if no API key (searchEntries throws JimakuError 401) — caller's
   // try/catch turns that into a whisper fallback.
   const query = jimakuQueryFromName(entry.name);
   if (!query) return false;
+  await jimakuThrottle();
   const entries = await searchEntries(query);
   const match = pickConfidentEntry(query, entries);
   if (!match) {

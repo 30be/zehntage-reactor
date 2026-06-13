@@ -59,6 +59,43 @@ export interface GeminiImage {
   mimeType: string;
 }
 
+// --- retry / backoff for transient Gemini failures (bulk runs) ---
+
+const RETRY_BACKOFF_MS = [2_000, 5_000, 15_000, 40_000]; // 4 retries, 5 attempts
+const MAX_RETRY_DELAY_MS = 60_000;
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Transient HTTP status: 429 (rate limit) or any 5xx → retryable. */
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || (status >= 500 && status < 600);
+}
+
+/**
+ * Parse a Retry-After header (delta-seconds or HTTP-date) into ms, or look for
+ * a `retryDelay` (e.g. "12s") in the Gemini error body. Returns undefined if no
+ * usable hint. Capped by the caller at MAX_RETRY_DELAY_MS.
+ */
+function parseRetryAfter(headerVal: string | null, body: string): number | undefined {
+  if (headerVal) {
+    const secs = Number(headerVal);
+    if (Number.isFinite(secs)) return Math.max(0, secs * 1000);
+    const when = Date.parse(headerVal);
+    if (Number.isFinite(when)) return Math.max(0, when - Date.now());
+  }
+  // Gemini RetryInfo: "retryDelay": "12s" (or "12.5s")
+  const m = body.match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/);
+  if (m) return Math.max(0, Math.round(Number(m[1]) * 1000));
+  return undefined;
+}
+
+// Marker so the retry loop knows a thrown error came from a retryable HTTP code.
+class RetryableHttpError extends Error {
+  constructor(message: string, readonly retryAfterMs?: number) {
+    super(message);
+  }
+}
+
 async function callGemini(
   prompt: string,
   schema: unknown,
@@ -76,33 +113,67 @@ async function callGemini(
       },
     });
   }
-
-  const resp = await fetch(GEMINI_URL, {
-    method: "POST",
-    signal: AbortSignal.timeout(60_000),
-    headers: {
-      "Content-Type": "application/json",
-      "x-goog-api-key": geminiApiKey,
+  const body = JSON.stringify({
+    contents: [{ parts }],
+    generationConfig: {
+      temperature: 0.2,
+      responseMimeType: "application/json",
+      responseSchema: schema,
     },
-    body: JSON.stringify({
-      contents: [{ parts }],
-      generationConfig: {
-        temperature: 0.2,
-        responseMimeType: "application/json",
-        responseSchema: schema,
-      },
-    }),
   });
-  if (!resp.ok) {
-    throw new Error(`Gemini API error ${resp.status}: ${await resp.text()}`);
-  }
-  const data = (await resp.json()) as {
-    candidates?: { content: { parts: { text?: string }[] } }[];
+
+  const attempt = async (): Promise<unknown> => {
+    const resp = await fetch(GEMINI_URL, {
+      method: "POST",
+      signal: AbortSignal.timeout(60_000),
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": geminiApiKey,
+      },
+      body,
+    });
+    if (!resp.ok) {
+      const errText = await resp.text();
+      const msg = `Gemini API error ${resp.status}: ${errText}`;
+      if (isRetryableStatus(resp.status)) {
+        const hint = parseRetryAfter(resp.headers.get("retry-after"), errText);
+        throw new RetryableHttpError(msg, hint);
+      }
+      // 4xx (other than 429) is fatal — fail fast, no retry.
+      throw new Error(msg);
+    }
+    const data = (await resp.json()) as {
+      candidates?: { content: { parts: { text?: string }[] } }[];
+    };
+    const text = data.candidates?.[0]?.content?.parts[0]?.text;
+    if (!text) throw new Error("Unexpected Gemini response");
+    const cleaned = text.replace(/^```json\s*/, "").replace(/```\s*$/, "").trim();
+    return JSON.parse(cleaned);
   };
-  const text = data.candidates?.[0]?.content?.parts[0]?.text;
-  if (!text) throw new Error("Unexpected Gemini response");
-  const cleaned = text.replace(/^```json\s*/, "").replace(/```\s*$/, "").trim();
-  return JSON.parse(cleaned);
+
+  for (let i = 0; ; i++) {
+    try {
+      return await attempt();
+    } catch (err) {
+      const last = i >= RETRY_BACKOFF_MS.length;
+      // Retry on retryable HTTP codes and on network/timeout errors (TypeError
+      // / AbortError / DOMException from fetch). Do NOT retry the explicit
+      // fatal-4xx Error thrown above, nor JSON.parse / shape errors.
+      const retryable =
+        err instanceof RetryableHttpError ||
+        (err instanceof Error &&
+          (err.name === "AbortError" ||
+            err.name === "TimeoutError" ||
+            err instanceof TypeError));
+      if (last || !retryable) throw err;
+      let delay = RETRY_BACKOFF_MS[i]!;
+      if (err instanceof RetryableHttpError && err.retryAfterMs !== undefined) {
+        delay = Math.min(err.retryAfterMs, MAX_RETRY_DELAY_MS);
+      }
+      delay += Math.floor(Math.random() * 500); // jitter
+      await sleep(delay);
+    }
+  }
 }
 
 /**
