@@ -2,7 +2,25 @@
 
 The minimalist local player that turns anime into your Anki deck.
 
-![screenshot placeholder](docs/screenshot.png)
+A local, hotkey-first "Language-Reactor for anime": play raw episodes, generate
+Japanese subtitles with whisper, look up words and sentences inline, and mine
+SRS cards (with video frame + sentence audio) straight into Anki — all behind a
+calm, monochrome Japanese-zen interface, in light or dark.
+
+## Screenshots
+
+| | |
+| --- | --- |
+| ![Library](docs/screenshots/library-light.png) | ![Cards](docs/screenshots/cards.png) |
+| Library — your episodes at a glance | Mined cards with frame + furigana |
+| ![Stats](docs/screenshots/stats.png) | ![Hotkeys](docs/screenshots/home-hotkeys.png) |
+| Stats — activity, pace, coverage | Home — hotkey-first cheatsheet |
+
+Dark theme:
+
+| | |
+| --- | --- |
+| ![Library (dark)](docs/screenshots/library-dark.png) | ![Cards (dark)](docs/screenshots/cards-dark.png) |
 
 ## Features
 
