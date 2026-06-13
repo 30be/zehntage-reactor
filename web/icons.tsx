@@ -17,6 +17,7 @@ import {
   MonitorPlay,
   Pause,
   Play,
+  Repeat,
   Settings,
   Volume2,
   VolumeX,
@@ -49,6 +50,7 @@ export const HomeIcon = wrap(House, 17);
 export const LibraryIcon = wrap(LayoutGrid, 17);
 export const ViewIcon = wrap(MonitorPlay, 17);
 export const CardsIcon = wrap(GalleryVerticalEnd, 17);
+export const ReviewIcon = wrap(Repeat, 17);
 export const StatsIcon = wrap(ChartNoAxesColumn, 17);
 export const SettingsIcon = wrap(Settings, 17);
 export const HealthIcon = wrap(Activity, 17);

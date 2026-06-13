@@ -98,5 +98,6 @@ export const HOTKEYS: HotkeyRow[] = [
   { keys: "t", what: "toggle translation lines", scope: "read" },
   { keys: "Esc", what: "close popups / panels", scope: "global" },
   { keys: "Ctrl+K", what: "command palette", scope: "global" },
+  { keys: "Enter / Space", what: "review: check answer / next card", scope: "global" },
   { keys: "?", what: "hotkey cheatsheet", scope: "global" },
 ];

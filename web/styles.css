@@ -2353,3 +2353,66 @@ textarea:focus-visible {
 /* --- Health view: align to C, keep the monospace data tables --- */
 .health-page .h1 { font-weight: 800; }
 .health-section-title { font-weight: 700; opacity: 0.6; }
+
+/* --- Review / Cram mode (#/review): focused single-cloze study screen --- */
+.review { max-width: 640px; margin: 0 auto; }
+.review-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.review-count { font-weight: 800; font-variant-numeric: tabular-nums; }
+.review-src { font-size: 12px; }
+.review-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 28px 24px;
+}
+.review-card.ok { border-color: var(--fg); }
+.review-card.bad { border-color: var(--tok-unk); }
+.review-prompt {
+  font-size: 24px;
+  line-height: 1.6;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+.review-hint {
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+.review-input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 18px;
+  background: transparent;
+  color: var(--fg);
+}
+.review-input:focus { outline: none; border-color: var(--accent); }
+.review-result {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 18px;
+}
+.review-correct { font-weight: 800; color: var(--fg); }
+.review-wrong { font-weight: 800; color: var(--tok-unk); }
+.review-answer { font-weight: 700; }
+.review-front { font-weight: 400; font-size: 14px; }
+.review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 20px;
+  align-items: center;
+}
+.review-watch { margin-left: auto; }
+.review-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.review-empty-sub { font-size: 13px; }

@@ -11,6 +11,7 @@ import { Cards } from "./CardsRoute.tsx";
 import { Home } from "./HomeRoute.tsx";
 import { Library } from "./LibraryRoute.tsx";
 import { Stats } from "./StatsRoute.tsx";
+import { Review } from "./ReviewRoute.tsx";
 import { Settings } from "./SettingsRoute.tsx";
 import { Palette } from "./Palette.tsx";
 import { startSync } from "./sync.ts";
@@ -22,6 +23,7 @@ import {
   LibraryIcon,
   SettingsIcon,
   StatsIcon,
+  ReviewIcon,
   ViewIcon,
 } from "./icons.tsx";
 
@@ -32,6 +34,7 @@ type Route =
   | { name: "settings" }
   | { name: "stats" }
   | { name: "cards" }
+  | { name: "review" }
   | { name: "home" }
   | { name: "health" };
 
@@ -49,6 +52,7 @@ function parseHash(): Route {
   if (h === "settings") return { name: "settings" };
   if (h === "stats") return { name: "stats" };
   if (h === "cards") return { name: "cards" };
+  if (h === "review") return { name: "review" };
   if (h === "home") return { name: "home" };
   if (h === "health") return { name: "health" };
   return { name: "library" };
@@ -191,6 +195,7 @@ export function App() {
             !lastMedia,
           )}
           {navItem("Cards", <CardsIcon />, "#/cards", route.name === "cards")}
+          {navItem("Review", <ReviewIcon />, "#/review", route.name === "review")}
           {navItem("Stats", <StatsIcon />, "#/stats", route.name === "stats")}
           {navItem("Settings", <SettingsIcon />, "#/settings", route.name === "settings")}
           {navItem("Health", <HealthIcon />, "#/health", route.name === "health")}
@@ -234,6 +239,7 @@ export function App() {
         {route.name === "library" && <Library go={go} toast={toast} />}
         {route.name === "stats" && <Stats go={go} />}
         {route.name === "cards" && <Cards go={go} toast={toast} />}
+        {route.name === "review" && <Review go={go} />}
         {route.name === "health" && <HealthRoute />}
         {route.name === "settings" && (
           <Settings settings={settings} setSettings={setSettings} toast={toast} />

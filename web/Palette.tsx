@@ -98,6 +98,7 @@ export function Palette({ go, toast, settings, setSettings }: Props) {
         run: () => go(`#/play/${last}`),
       },
       { id: "nav.cards", title: "go: cards", run: () => go("#/cards") },
+      { id: "nav.review", title: "go: review due words", run: () => go("#/review") },
       { id: "nav.stats", title: "go: stats", run: () => go("#/stats") },
       { id: "nav.settings", title: "go: settings", run: () => go("#/settings") },
       {
