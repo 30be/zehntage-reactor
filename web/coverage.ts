@@ -169,8 +169,9 @@ function idle(signal: AbortSignal): Promise<void> {
     // Resolve immediately when aborted — a never-settling promise would leave
     // the caller's async loop suspended forever. Callers re-check the signal.
     if (signal.aborted) return resolve();
-    if (typeof requestIdleCallback === "function")
-      requestIdleCallback(() => resolve(), { timeout: 2000 });
+    const ric = (globalThis as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => void })
+      .requestIdleCallback;
+    if (typeof ric === "function") ric(() => resolve(), { timeout: 2000 });
     else setTimeout(resolve, 200);
   });
 }

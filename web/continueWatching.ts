@@ -20,11 +20,11 @@ export const MIN_RESUME_SEC = 5;
  * Pick the most-recently-played episodes that have a meaningful resume
  * position. Records with pos <= MIN_RESUME_SEC are dropped. Results are sorted
  * newest-first by `at` (records without a timestamp sort last but are still
- * eligible), and capped at `limit`.
+ * eligible), and capped at `limit` (default 1 — a single "continue" item).
  */
 export function pickContinueWatching(
   records: readonly ResumeRecord[],
-  limit = 3,
+  limit = 1,
 ): ResumeRecord[] {
   return records
     .filter((r) => Number.isFinite(r.pos) && r.pos > MIN_RESUME_SEC)

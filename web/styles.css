@@ -1823,6 +1823,7 @@ textarea:focus-visible {
 .quiz-end { text-align: center; }
 .quiz-score { font-size: 40px; font-weight: 700; }
 .quiz-sub { color: #a1a1aa; margin: 4px 0 16px; }
+.quiz-end-actions { display: flex; gap: 8px; justify-content: center; }
 
 /* ---- wave 17: read-mode cursor, progress, resume ---- */
 
@@ -1885,3 +1886,10 @@ textarea:focus-visible {
   cursor: pointer;
 }
 .read-resume:hover { border-color: var(--fg); color: var(--fg); }
+
+/* ---- wave 24: read-mode tokenizer-loading affordance ---- */
+.read-tokenizing {
+  margin: 1.5rem 0;
+  opacity: 0.6;
+  font-size: 0.85rem;
+}

@@ -126,4 +126,15 @@ describe("buildQuiz", () => {
     const items = buildQuiz(CUES.slice(0, 2), { seed: 1, count: 10 });
     expect(items.length).toBeLessThanOrEqual(2);
   });
+
+  // QuizPanel "Retry" rebuilds over the same watched cues. Different seeds must
+  // be able to yield a different run (otherwise Retry would just replay the same
+  // quiz); production omits `seed`, so it's randomized per build.
+  test("a fresh build with a different seed can differ (Retry semantics)", () => {
+    const a = buildQuiz(CUES, { seed: 1, count: 4 });
+    const variants = [2, 3, 5, 8, 13, 21].map((s) =>
+      JSON.stringify(buildQuiz(CUES, { seed: s, count: 4 })),
+    );
+    expect(variants.some((v) => v !== JSON.stringify(a))).toBe(true);
+  });
 });

@@ -42,6 +42,7 @@ import {
   writeFurthest,
   calcProgress,
 } from "./readProgress.ts";
+import { clampPopupPos } from "./readlayout.ts";
 
 export interface ReadCue {
   start: number;
@@ -78,6 +79,28 @@ export interface ReadProps {
 }
 
 const PARAGRAPH_GAP_S = 1.5;
+
+// Secondary-translation visibility, persisted via the zr.* state pattern (the
+// startSync() monkey-patch round-trips zr.* keys to the server like other UI
+// prefs). A single global pref — not per-document — so the choice sticks.
+const SECONDARY_KEY = "zr.read.secondary";
+
+function readShowSecondary(fallback: boolean): boolean {
+  try {
+    const v = localStorage.getItem(SECONDARY_KEY);
+    return v == null ? fallback : v === "1";
+  } catch {
+    return fallback;
+  }
+}
+
+function writeShowSecondary(on: boolean): void {
+  try {
+    localStorage.setItem(SECONDARY_KEY, on ? "1" : "0");
+  } catch {
+    /* quota / SSR — ignore */
+  }
+}
 
 export interface Paragraph {
   start: number;
@@ -120,6 +143,8 @@ export function buildParagraphs(
   return out;
 }
 
+// clampPopupPos lives in ./readlayout.ts (DOM-free, unit-tested there).
+
 export function fmtTime(t: number): string {
   const s = Math.max(0, Math.floor(t));
   const h = Math.floor(s / 3600);
@@ -141,9 +166,16 @@ export function Read({
   knownPct,
   settings,
 }: ReadProps) {
-  const [showSecondary, setShowSecondary] = useState(
-    settings?.showSecondary ?? true,
+  const [showSecondary, setShowSecondary] = useState(() =>
+    readShowSecondary(settings?.showSecondary ?? true),
   );
+  const toggleSecondary = useCallback(() => {
+    setShowSecondary((v) => {
+      const next = !v;
+      writeShowSecondary(next);
+      return next;
+    });
+  }, []);
 
   const paragraphs = useMemo(
     () => buildParagraphs(cues, secondaryCues),
@@ -213,11 +245,14 @@ export function Read({
       } else if (e.key === "Enter" && cursorRef.current >= 0) {
         e.preventDefault();
         onCursorActivate?.(cursorRef.current);
+      } else if (e.code === "KeyT") {
+        e.preventDefault();
+        toggleSecondary();
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [moveCursor, onCursorActivate]);
+  }, [moveCursor, onCursorActivate, toggleSecondary]);
 
   // --- resume affordance ---
   const [furthest, setFurthest] = useState<number>(() => readFurthest(mediaId));
@@ -286,8 +321,8 @@ export function Read({
           {secondaryCues?.length ? (
             <button
               type="button"
-              onClick={() => setShowSecondary((v) => !v)}
-              title="toggle translation lines"
+              onClick={toggleSecondary}
+              title="toggle translation lines (t)"
               className="read-toggle-btn"
             >
               {showSecondary ? "ru on" : "ru off"}
@@ -306,6 +341,13 @@ export function Read({
         </div>
       )}
 
+      {/* ---- tokenizer loading affordance ---- */}
+      {!tokenize && paragraphs.length > 0 && (
+        <div className="state read-tokenizing" role="status">
+          <span className="spinner" aria-hidden /> Preparing text…
+        </div>
+      )}
+
       {/* ---- resume affordance ---- */}
       {showResume && (
         <button
@@ -318,7 +360,7 @@ export function Read({
         </button>
       )}
 
-      {paragraphs.map((p, i) => (
+      {tokenize && paragraphs.map((p, i) => (
         <div
           key={`${p.start}-${i}`}
           ref={(el) => { paraRefs.current[i] = el; }}

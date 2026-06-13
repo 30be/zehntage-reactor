@@ -491,6 +491,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   }, []);
 
   const quizBuildingRef = useRef(false);
+  // Bumped on every successful quiz build so the panel remounts with a clean
+  // slate (idx/correct/reported) — used as QuizPanel's React key. Needed for
+  // Retry: setQuiz(newItems) alone keeps the same instance and stale state.
+  const quizRunRef = useRef(0);
   const toggleQuiz = useCallback(() => {
     setQuiz((prev) => {
       if (prev) {
@@ -509,6 +513,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           setQuiz(null);
           return;
         }
+        quizRunRef.current += 1;
         setQuiz(items);
       });
       return prev; // open only once items are ready (avoids an empty flash)
@@ -525,6 +530,25 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     },
     [entry.id],
   );
+
+  // Retry from the quiz done-screen: rebuild a fresh quiz over the same watched
+  // cues. Reuses the same async build + double-fire guard as toggleQuiz so a
+  // concurrent build can't clobber. QuizPanel remounts on the new items array.
+  const onQuizRetry = useCallback(() => {
+    if (quizBuildingRef.current) return;
+    quizBuildingRef.current = true;
+    void buildQuizFromWatched().then((items) => {
+      quizBuildingRef.current = false;
+      if (!mountedRef.current) return;
+      if (items.length === 0) {
+        toast("not enough watched cues for a quiz");
+        setQuiz(null);
+        return;
+      }
+      quizRunRef.current += 1;
+      setQuiz(items);
+    });
+  }, [buildQuizFromWatched, toast]);
 
   // --- shadowing loop (`s`): kept in refs to avoid re-renders on every cue ---
   // idx = primary-cue index being looped; remaining = repeats left.
@@ -788,6 +812,17 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       return next;
     });
   }, []);
+
+  // The HUD counters live in refs (mined/cards/unique-unknowns) and only the
+  // cue-cross path bumps hudTick. Lookups, card saves and elapsed-time tick
+  // outside that path, so an open HUD would show stale numbers until the next
+  // cue. While the HUD is open, a 1s tick keeps every value live; it's gated on
+  // hudOpen so a closed HUD costs nothing (no timer, no per-cue setState churn).
+  useEffect(() => {
+    if (!hudOpen) return;
+    const id = window.setInterval(() => setHudTick((t) => t + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [hudOpen]);
 
   // --- Wave 13.A: smart-resume affordance ("resume at MM:SS? press z") ---
   const [resumeHint, setResumeHint] = useState<number | null>(null);
@@ -2672,9 +2707,11 @@ export function Player({ entry, startAt, toast, settings }: Props) {
 
       {quiz && (
         <QuizPanel
+          key={quizRunRef.current}
           items={quiz}
           onClose={() => setQuiz(null)}
           onDone={onQuizDone}
+          onRetry={onQuizRetry}
         />
       )}
 

@@ -6,6 +6,7 @@
 // Keys:
 //   MC      1-4 / ↑↓ + Enter select; after answering Enter advances
 //   cloze   type then Enter to check; Enter again advances
+//   done    Enter closes; R retries a fresh quiz over the same watched cues
 //   Esc     close (handled by the parent hotkey path AND a local listener)
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -20,10 +21,13 @@ export function QuizPanel({
   items,
   onClose,
   onDone,
+  onRetry,
 }: {
   items: QuizItem[];
   onClose: () => void;
   onDone: (r: QuizResult) => void;
+  // optional: re-run a fresh quiz over the same watched cues (done-screen only)
+  onRetry?: () => void;
 }) {
   const [idx, setIdx] = useState(0);
   const [correct, setCorrect] = useState(0);
@@ -96,6 +100,10 @@ export function QuizPanel({
           e.preventDefault();
           e.stopPropagation();
           onClose();
+        } else if (onRetry && (e.key === "r" || e.key === "R")) {
+          e.preventDefault();
+          e.stopPropagation();
+          onRetry();
         }
         return;
       }
@@ -132,7 +140,7 @@ export function QuizPanel({
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [done, answered, item, choice, answerMc, answerCloze, next, onClose]);
+  }, [done, answered, item, choice, answerMc, answerCloze, next, onClose, onRetry]);
 
   return (
     <div className="quiz-overlay" role="dialog" aria-label="comprehension quiz">
@@ -143,9 +151,16 @@ export function QuizPanel({
               {correct} / {items.length}
             </div>
             <div className="quiz-sub">comprehension</div>
-            <button className="btn" onClick={onClose}>
-              Close
-            </button>
+            <div className="quiz-end-actions">
+              {onRetry && (
+                <button className="btn" onClick={onRetry}>
+                  Retry (R)
+                </button>
+              )}
+              <button className="btn" onClick={onClose}>
+                Close (⏎)
+              </button>
+            </div>
           </div>
         ) : item ? (
           <>

@@ -73,6 +73,10 @@ describe("tokenindex (real kuromoji dict)", () => {
 const stubTokenize = (text: string) =>
   text.split(/\s+/).filter(Boolean).map((w) => ({ surface_form: w, pos: "名詞" }));
 
+/** Stub that marks tokens as 記号 (punctuation) so isLexical rejects them. */
+const punctTokenize = (text: string) =>
+  text.split(/\s+/).filter(Boolean).map((w) => ({ surface_form: w, pos: "記号" }));
+
 async function stubIndex(id: string, lines: string[]): Promise<EntryIndex> {
   return buildEntryIndex({ id }, lines.map((l, i) => cue(i * 5, l)), stubTokenize);
 }
@@ -134,6 +138,101 @@ describe("tokenindex queries (stub tokenizer)", () => {
     const i3 = await getIndex(entry, provider, stubTokenize);
     expect(calls).toBe(2);
     expect(i3).not.toBe(i1);
+  });
+
+  test("buildEntryIndex: empty cue list produces zero counts", async () => {
+    const ix = await buildEntryIndex({ id: "empty" }, [], stubTokenize);
+    expect(ix.totalLexical).toBe(0);
+    expect(ix.lemmas.size).toBe(0);
+    expect(ix.mediaId).toBe("empty");
+  });
+
+  test("buildEntryIndex: punctuation-only cues (記号) are not indexed", async () => {
+    const ix = await buildEntryIndex(
+      { id: "punct" },
+      [cue(0, "。 ！ ？")],
+      punctTokenize,
+    );
+    expect(ix.totalLexical).toBe(0);
+    expect(ix.lemmas.size).toBe(0);
+  });
+
+  test("buildEntryIndex: empty-string cue contributes nothing", async () => {
+    const ix = await buildEntryIndex(
+      { id: "blank" },
+      [cue(0, ""), cue(5, "猫")],
+      stubTokenize,
+    );
+    // only the 猫 token
+    expect(ix.totalLexical).toBe(1);
+    expect(ix.lemmas.has("猫")).toBe(true);
+  });
+
+  test("comprehensibility: all lemmas known → pctKnown = 1", async () => {
+    const ix = await stubIndex("a", ["猫 犬"]);
+    const c = comprehensibility(ix, new Set(["猫", "犬"]));
+    expect(c.pctKnown).toBe(1);
+    expect(c.unknownLemmas).toHaveLength(0);
+  });
+
+  test("comprehensibility: topN caps the unknownLemmas list", async () => {
+    // 5 distinct unknowns, ask for top 3
+    const ix = await stubIndex("a", ["猫 犬 鳥 魚 虎"]);
+    const c = comprehensibility(ix, new Set(), 3);
+    expect(c.unknownLemmas).toHaveLength(3);
+  });
+
+  test("comprehensibility: tie-break by localeCompare when counts equal", async () => {
+    // each word appears once — tie; alphabetical order should be stable
+    const ix = await stubIndex("a", ["猫 犬"]);
+    const c = comprehensibility(ix, new Set());
+    const lemmas = c.unknownLemmas.map((u) => u.lemma);
+    expect([...lemmas].sort((a, b) => a.localeCompare(b))).toEqual(lemmas);
+  });
+
+  test("dueIntersection: empty due set returns count 0", async () => {
+    const ix = await stubIndex("a", ["猫 犬"]);
+    const di = dueIntersection(ix, new Set());
+    expect(di.count).toBe(0);
+    expect(di.lemmas).toHaveLength(0);
+  });
+
+  test("dueIntersection: due lemma not in entry is ignored", async () => {
+    const ix = await stubIndex("a", ["猫"]);
+    const di = dueIntersection(ix, new Set(["象"]));
+    expect(di.count).toBe(0);
+  });
+
+  test("encounters: no indexes returns empty array", () => {
+    expect(encounters("猫", [])).toEqual([]);
+  });
+
+  test("getIndex: concurrent callers do not double-build (stampede guard)", async () => {
+    clearIndexCache();
+    const dir = await mkdtemp(join(tmpdir(), "zr-tokidx-stamp-"));
+    const abs = join(dir, "ep.mkv");
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(abs, "v1");
+    const entry = {
+      id: "stamp",
+      relPath: "ep.mkv",
+      absPath: abs,
+      name: "ep.mkv",
+      size: 2,
+      sidecarSubs: [],
+    } satisfies LibraryEntry;
+    let calls = 0;
+    const provider = async () => {
+      calls++;
+      return [cue(0, "猫")];
+    };
+    // Fire two concurrent getIndex calls
+    const [i1, i2] = await Promise.all([
+      getIndex(entry, provider, stubTokenize),
+      getIndex(entry, provider, stubTokenize),
+    ]);
+    expect(calls).toBe(1);
+    expect(i1).toBe(i2);
   });
 
   test("getIndex invalidates when a sidecar sub changes (media untouched)", async () => {

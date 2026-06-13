@@ -23,6 +23,7 @@ import { studyNext, type EpisodeSignal } from "./curriculum.ts";
 import { kataToHira } from "./tokenizer.ts";
 import { tmEvent, tmStart } from "./telemetry.ts";
 import { loadFreq } from "./freq.ts";
+import { activityShade, fmtMin, localDateStr } from "./statsfmt.ts";
 import {
   filterCards,
   type DateRange,
@@ -1004,14 +1005,11 @@ function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) =>
 // Maturity threshold for "known" in Anki terms (interval >= 21 days).
 const MATURE_INTERVAL = 21;
 
-function localDateStr(d: Date): string {
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${d.getFullYear()}-${m}-${day}`;
-}
+// Stats pure helpers live in ./statsfmt.ts (DOM-free, unit-tested there).
 
 /** GitHub-style activity grid: last ~20 weeks of daily playing minutes. */
 function ActivityGrid({ byDate }: { byDate: Map<string, number> }) {
+  if (byDate.size === 0) return null;
   // End on today; start 139 days earlier, aligned back to Monday.
   const days: { date: string; min: number }[] = [];
   const start = new Date();
@@ -1023,41 +1021,78 @@ function ActivityGrid({ byDate }: { byDate: Map<string, number> }) {
     days.push({ date: key, min: Math.round((byDate.get(key) ?? 0) / 60) });
     if (key === today) break;
   }
-  const shade = (min: number) =>
-    min <= 0 ? 0 : min < 10 ? 1 : min < 30 ? 2 : min < 60 ? 3 : 4;
   return (
-    <div className="activity-grid" data-days={days.length}>
+    <div className="activity-grid" role="img" aria-label="Activity heatmap" data-days={days.length}>
       {days.map((d) => (
         <span
           key={d.date}
-          className={`activity-cell s${shade(d.min)}`}
+          className={`activity-cell s${activityShade(d.min)}`}
           title={`${d.date}: ${d.min} min`}
+          aria-label={d.min > 0 ? `${d.date}: ${d.min} min` : undefined}
         />
       ))}
     </div>
   );
 }
 
-function fmtMin(sec: number): string {
-  return `${Math.round(sec / 60)} min`;
+type LoadState = "loading" | "error" | "ok";
+
+function SectionLoad({
+  state,
+  label,
+}: {
+  state: LoadState;
+  label: string;
+}) {
+  if (state === "loading")
+    return (
+      <div className="state" role="status" aria-label={`Loading ${label}`}>
+        <span className="spinner" aria-hidden /> Loading…
+      </div>
+    );
+  if (state === "error")
+    return (
+      <div className="state error" role="alert">
+        Failed to load {label}.
+      </div>
+    );
+  return null;
 }
 
 function Stats({ go }: { go: (h: string) => void }) {
   const [entries, setEntries] = useState<LibraryEntry[] | null>(null);
   const [anki, setAnki] = useState<AnkiWordsResponse | null>(null);
   const [summary, setSummary] = useState<import("./api.ts").StatsSummary | null>(null);
+  const [summaryState, setSummaryState] = useState<LoadState>("loading");
 
   const [episodes, setEpisodes] = useState<EpisodeDayRow[] | null>(null);
+  const [episodesState, setEpisodesState] = useState<LoadState>("loading");
+
   const [ov, setOv] = useState<Overview | null>(null);
+  const [ovState, setOvState] = useState<LoadState>("loading");
+
   const [comp, setComp] = useState<
     import("./api.ts").ComprehensionSummary | null
   >(null);
+  const [compState, setCompState] = useState<LoadState>("loading");
 
   useEffect(() => {
-    void api.statsSummary().then(setSummary).catch(() => {});
-    void api.statsEpisodes().then(setEpisodes).catch(() => {});
-    void api.statsOverview().then(setOv).catch(() => {});
-    void api.statsComprehension().then(setComp).catch(() => {});
+    void api
+      .statsSummary()
+      .then((v) => { setSummary(v); setSummaryState("ok"); })
+      .catch(() => setSummaryState("error"));
+    void api
+      .statsEpisodes()
+      .then((v) => { setEpisodes(v); setEpisodesState("ok"); })
+      .catch(() => setEpisodesState("error"));
+    void api
+      .statsOverview()
+      .then((v) => { setOv(v); setOvState("ok"); })
+      .catch(() => setOvState("error"));
+    void api
+      .statsComprehension()
+      .then((v) => { setComp(v); setCompState("ok"); })
+      .catch(() => setCompState("error"));
   }, []);
   // Per-episode coverage, computed in idle time (web/coverage.ts hook).
   const coverage = useCoverage(entries, anki);
@@ -1095,11 +1130,15 @@ function Stats({ go }: { go: (h: string) => void }) {
       <div className="section-intro muted">
         Daily watch time over the last ~20 weeks — darker means more minutes.
       </div>
-      <ActivityGrid
-        byDate={
-          new Map((summary?.days ?? []).map((d) => [d.date, d.playSec]))
-        }
-      />
+      {summaryState !== "ok" ? (
+        <SectionLoad state={summaryState} label="activity" />
+      ) : (
+        <ActivityGrid
+          byDate={
+            new Map((summary?.days ?? []).map((d) => [d.date, d.playSec]))
+          }
+        />
+      )}
 
       {summary && summary.days.length > 0 && (
         <>
@@ -1174,7 +1213,12 @@ function Stats({ go }: { go: (h: string) => void }) {
         </>
       )}
 
-      {episodes && episodes.length > 0 && (
+      {episodesState !== "ok" && episodesState !== "loading" ? (
+        <>
+          <h2 className="h2">Episode pace</h2>
+          <SectionLoad state={episodesState} label="episode pace" />
+        </>
+      ) : episodesState === "loading" ? null : episodes && episodes.length > 0 && (
         <>
           <h2 className="h2">
             Episode pace{" "}
@@ -1246,7 +1290,12 @@ function Stats({ go }: { go: (h: string) => void }) {
         </>
       )}
 
-      {ov && (
+      {ovState === "error" ? (
+        <>
+          <h2 className="h2">Cards / min (30 days, 7d rolling)</h2>
+          <SectionLoad state="error" label="cards/min overview" />
+        </>
+      ) : ov && (
         <>
           <h2 className="h2">Cards / min (30 days, 7d rolling)</h2>
           <div className="section-intro muted">
@@ -1298,7 +1347,12 @@ function Stats({ go }: { go: (h: string) => void }) {
         </>
       )}
 
-      {comp && comp.quizzes > 0 && (
+      {compState === "error" ? (
+        <>
+          <h2 className="h2">Comprehension trend</h2>
+          <SectionLoad state="error" label="comprehension trend" />
+        </>
+      ) : comp && comp.quizzes > 0 && (
         <>
           <h2 className="h2">Comprehension trend</h2>
           <div className="section-intro muted">

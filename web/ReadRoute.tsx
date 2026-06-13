@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type Cue, type LibraryEntry, type WordLookup } from "./api.ts";
 import { Read } from "./Read.tsx";
+import { clampPopupPos } from "./readlayout.ts";
 import { TokenLine, AccentReading } from "./TokenLine.tsx";
 import {
   buildWordIndex,
@@ -304,9 +305,12 @@ export function ReadRoute({
     (tok: KToken, e: React.MouseEvent, ctx: string, secondary?: string) => {
       e.stopPropagation();
       const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      // Y-clamp: flip the popup above the word when a below-word popup would
+      // spill past the viewport bottom (e.g. words in a last/low paragraph).
+      const pos = clampPopupPos(rect, window.innerWidth, window.innerHeight);
       setPopup({
-        x: Math.min(rect.left, window.innerWidth - 340),
-        y: rect.bottom + 6 + window.scrollY,
+        x: pos.x,
+        y: pos.y + window.scrollY,
         surface: tok.surface_form,
         reading: tok.reading,
         dictForm:

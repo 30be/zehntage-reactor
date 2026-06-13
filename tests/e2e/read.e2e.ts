@@ -47,3 +47,52 @@ test("x hotkey toggles blacklist for the popup word", async ({ page }) => {
   await page.keyboard.press("x");
   await expect(popup.locator(".known-flag", { hasText: "blacklisted" })).toHaveCount(0);
 });
+
+test("tokenizer loading affordance shows then swaps in tokenized lines", async ({ page }) => {
+  const id = await entryId(page, "clip.mp4");
+  await page.goto(`/#/read/${id}`);
+  await expect(page.locator(".read-mode")).toBeVisible();
+  // Either we catch the quiet spinner, or tokens are already up — both are fine;
+  // what matters is that tokenized lines eventually appear (no permanent plain
+  // text), and the affordance is gone once they do.
+  await expect(page.locator(".read-para .tok").first()).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator(".read-tokenizing")).toHaveCount(0);
+});
+
+test("clicking a word low on the page keeps the popup within the viewport", async ({ page }) => {
+  await openRead(page);
+  await page.locator(".read-para .tok").first().waitFor({ timeout: 20_000 });
+  // click a token in the last paragraph (most likely below the fold)
+  const lastTok = page.locator(".read-para").last().locator(".tok").last();
+  await lastTok.scrollIntoViewIfNeeded();
+  await lastTok.click();
+  const popup = page.locator(".read-popup");
+  await expect(popup).toBeVisible();
+  const box = await popup.boundingBox();
+  const vh = page.viewportSize()?.height ?? 0;
+  expect(box).not.toBeNull();
+  // top within viewport and the panel not running off the bottom edge
+  expect(box!.y).toBeGreaterThanOrEqual(-1);
+  expect(box!.y).toBeLessThan(vh);
+});
+
+test("t hotkey toggles the secondary translation lines and persists", async ({ page }) => {
+  const id = await openRead(page);
+  const secondary = page.locator(".read-secondary").first();
+  await expect(secondary).toBeVisible();
+  // hide
+  await page.keyboard.press("t");
+  await expect(page.locator(".read-secondary")).toHaveCount(0);
+  // persisted via zr.* localStorage
+  const stored = await page.evaluate(() => localStorage.getItem("zr.read.secondary"));
+  expect(stored).toBe("0");
+  // survives a reload
+  await page.reload();
+  await expect(page.locator(".read-mode")).toBeVisible();
+  await page.locator(".read-para .tok").first().waitFor({ timeout: 20_000 });
+  await expect(page.locator(".read-secondary")).toHaveCount(0);
+  // show again
+  await page.keyboard.press("t");
+  await expect(page.locator(".read-secondary").first()).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem("zr.read.secondary"))).toBe("1");
+});

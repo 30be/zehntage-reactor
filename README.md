@@ -80,6 +80,7 @@ Read scope:
 | j / ↓ | next line |
 | k / ↑ | prev line |
 | Enter | open word popup on cursor line |
+| t | toggle translation lines |
 
 Global scope:
 
