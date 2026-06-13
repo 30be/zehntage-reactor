@@ -10,6 +10,7 @@ export interface KToken {
   reading?: string;
   pos?: string;
   pos_detail_1?: string;
+  pos_detail_2?: string;
   basic_form?: string;
 }
 
@@ -22,6 +23,14 @@ function isNoun(t: KToken): boolean {
 }
 function isDependent(t: KToken): boolean {
   return t.pos_detail_1 === "非自立";
+}
+/** A person-name proper noun (名詞/固有名詞/人名), e.g. a name kanji chunk. */
+function isPersonName(t: KToken): boolean {
+  return (
+    t.pos === "名詞" &&
+    t.pos_detail_1 === "固有名詞" &&
+    t.pos_detail_2 === "人名"
+  );
 }
 /**
  * A single-kanji content token that kuromoji failed to fold into a compound.
@@ -44,6 +53,10 @@ function isContentKanji(t: KToken): boolean {
  *   1. Glue adjacent single-kanji content tokens (姉 + 貴 -> 姉貴).
  *   2. Re-attach a single-kana dependent noun (ん) onto a preceding all-kana
  *      token so の-da contractions don't explode (な + ん -> なん, then + だ).
+ *   3. Glue consecutive person-name proper-noun tokens (折木 + 奉太郎 ->
+ *      折木奉太郎) so a character name is one markable lexical unit instead of
+ *      N name-parts. Only fires when BOTH parts are 固有名詞/人名, so a place
+ *      (東京) followed by a person (折木) is never glued.
  */
 export function mergeTokens(raw: KToken[]): KToken[] {
   const out: KToken[] = [];
@@ -60,11 +73,21 @@ export function mergeTokens(raw: KToken[]): KToken[] {
       isDependent(t) &&
       SINGLE_HIRAGANA.test(t.surface_form) &&
       ALL_HIRAGANA.test(prev.surface_form);
-    if (glueKanji || attachDependent) {
+    const gluePersonName =
+      prev != null && isPersonName(prev) && isPersonName(t);
+    if (glueKanji || attachDependent || gluePersonName) {
       prev!.surface_form += t.surface_form;
-      prev!.reading = (prev!.reading ?? "") + (t.reading ?? "");
+      if (prev!.reading == null || t.reading == null) {
+        prev!.reading = undefined;
+      } else {
+        prev!.reading = prev!.reading + t.reading;
+      }
       prev!.basic_form = prev!.surface_form;
       if (isNoun(t)) prev!.pos = "名詞";
+      if (gluePersonName) {
+        prev!.pos_detail_1 = "固有名詞";
+        prev!.pos_detail_2 = "人名";
+      }
     } else {
       out.push({ ...t });
     }

@@ -41,3 +41,35 @@ test("legitimate compounds are preserved", () => {
   expect(surfaces("日本語を勉強する")).toContain("日本語");
   expect(surfaces("私は学生です")).toContain("学生");
 });
+
+test("consecutive person-name parts merge into one name token", () => {
+  const merged = mergeTokens([
+    { surface_form: "折木", reading: "オレキ", pos: "名詞", pos_detail_1: "固有名詞", pos_detail_2: "人名" },
+    { surface_form: "奉太郎", reading: "ホウタロウ", pos: "名詞", pos_detail_1: "固有名詞", pos_detail_2: "人名" },
+    { surface_form: "は", reading: "ハ", pos: "助詞", pos_detail_1: "係助詞", pos_detail_2: "*" },
+  ]);
+  expect(merged.map((t) => t.surface_form)).toEqual(["折木奉太郎", "は"]);
+  const name = merged[0]!;
+  expect(name.reading).toBe("オレキホウタロウ");
+  expect(name.basic_form).toBe("折木奉太郎");
+  expect(name.pos).toBe("名詞");
+  expect(name.pos_detail_1).toBe("固有名詞");
+  expect(name.pos_detail_2).toBe("人名");
+});
+
+test("place + person proper nouns do NOT merge", () => {
+  const merged = mergeTokens([
+    { surface_form: "東京", reading: "トウキョウ", pos: "名詞", pos_detail_1: "固有名詞", pos_detail_2: "地域" },
+    { surface_form: "折木", reading: "オレキ", pos: "名詞", pos_detail_1: "固有名詞", pos_detail_2: "人名" },
+  ]);
+  expect(merged.map((t) => t.surface_form)).toEqual(["東京", "折木"]);
+});
+
+test("merged name with a missing-reading part drops the partial reading", () => {
+  const merged = mergeTokens([
+    { surface_form: "折木", reading: "オレキ", pos: "名詞", pos_detail_1: "固有名詞", pos_detail_2: "人名" },
+    { surface_form: "奉太郎", pos: "名詞", pos_detail_1: "固有名詞", pos_detail_2: "人名" },
+  ]);
+  expect(merged.map((t) => t.surface_form)).toEqual(["折木奉太郎"]);
+  expect(merged[0]!.reading).toBeUndefined();
+});

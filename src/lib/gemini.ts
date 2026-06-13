@@ -324,6 +324,107 @@ export function assertTranslationCount(translations: string[], expected: number)
   }
 }
 
+// --- proper-noun correction pass for whisper-transcribed JP subs ---
+
+const CORRECT_BATCH_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    corrected: { type: "ARRAY", items: { type: "STRING" } },
+  },
+  required: ["corrected"],
+} as const;
+
+export function buildCorrectBatchPrompt(lines: string[], glossary: string[]): string {
+  const numbered = lines.map((l, i) => `${i + 1}. ${l.replace(/\n/g, " ")}`).join("\n");
+  const gloss = glossary.join("、");
+  return `The following ${lines.length} numbered lines are Japanese subtitles produced by automatic speech recognition (whisper). They may contain MISHEARD or garbled PROPER NOUNS (names of people and places). Using ONLY the glossary of correct proper nouns below, fix any garbled proper noun to its correct form. DO NOT change any other words, grammar, kana, conjugations, or punctuation. If a line contains no glossary proper noun, return it completely unchanged. Return EXACTLY ${lines.length} lines, in the same order, one per input line.
+
+Glossary of correct proper nouns: ${gloss}
+
+${numbered}`;
+}
+
+/**
+ * Levenshtein edit distance. Exported for testing the correction safety guard.
+ */
+export function editDistance(a: string, b: string): number {
+  const ac = [...a];
+  const bc = [...b];
+  const m = ac.length;
+  const n = bc.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, i) => i);
+  let cur = new Array<number>(n + 1);
+  for (let i = 1; i <= m; i++) {
+    cur[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = ac[i - 1] === bc[j - 1] ? 0 : 1;
+      cur[j] = Math.min(prev[j]! + 1, cur[j - 1]! + 1, prev[j - 1]! + cost);
+    }
+    [prev, cur] = [cur, prev];
+  }
+  return prev[n]!;
+}
+
+/**
+ * Decide whether a proposed correction is safe to accept. A correction that
+ * changes too much of the line (relative to its length) suggests the model
+ * rewrote non-name text, so we reject it and keep the original. Exported for
+ * testing. Threshold ~40% of the original line's characters.
+ */
+export function acceptCorrection(original: string, corrected: string): boolean {
+  if (corrected === original) return true;
+  if (!corrected.trim()) return false;
+  const dist = editDistance(original, corrected);
+  const limit = Math.max(1, Math.floor([...original].length * 0.4));
+  return dist <= limit;
+}
+
+/**
+ * Gemini-based proper-noun correction pass for whisper-transcribed Japanese
+ * cues. Only `.text` is touched; timings are preserved. Fail-safe: on any
+ * error, count mismatch, or an over-large "correction", the ORIGINAL cue text
+ * is kept — this pass must never worsen subtitles.
+ */
+export async function correctNames(
+  cues: Cue[],
+  glossary: string[],
+  onProgress?: (done: number, total: number) => void,
+): Promise<Cue[]> {
+  if (geminiFake()) {
+    await fakeDelay();
+    onProgress?.(cues.length, cues.length);
+    return cues.map((c) => ({ start: c.start, end: c.end, text: c.text }));
+  }
+  if (glossary.length === 0) return cues.map((c) => ({ ...c }));
+
+  const out: Cue[] = [];
+  for (let i = 0; i < cues.length; i += BATCH_SIZE) {
+    const batch = cues.slice(i, i + BATCH_SIZE);
+    try {
+      const result = (await callGemini(
+        buildCorrectBatchPrompt(batch.map((c) => c.text), glossary),
+        CORRECT_BATCH_SCHEMA,
+      )) as { corrected: string[] };
+      if (!Array.isArray(result.corrected)) {
+        throw new Error("Gemini returned no corrected array");
+      }
+      assertTranslationCount(result.corrected, batch.length);
+      batch.forEach((c, j) => {
+        const proposed = result.corrected[j]!;
+        const text = acceptCorrection(c.text, proposed) ? proposed : c.text;
+        out.push({ start: c.start, end: c.end, text });
+      });
+    } catch {
+      // fail safe: keep the originals for this batch
+      batch.forEach((c) => out.push({ start: c.start, end: c.end, text: c.text }));
+    }
+    onProgress?.(Math.min(i + BATCH_SIZE, cues.length), cues.length);
+  }
+  return out;
+}
+
 export async function translateCues(
   cues: Cue[],
   targetLang: string,

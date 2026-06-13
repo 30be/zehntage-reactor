@@ -2,13 +2,27 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { existsSync } from "node:fs";
 import { unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import type { Cue } from "./subs.ts";
 import { cleanCues, cuesToSrt, findCoverageHoles, parseTimestamp } from "./subs.ts";
 
-const MODEL_PATH = join(homedir(), "models", "ggml-medium.bin");
 const THREADS = 12;
+
+/** Resolve which whisper model binary to use at run time.
+ *  Priority: (1) $WHISPER_MODEL env var if set and file exists;
+ *            (2) ~/models/ggml-large-v3.bin if it exists;
+ *            (3) ~/models/ggml-medium.bin as final fallback. */
+export function resolveModelPath(): string {
+  const envModel = process.env.WHISPER_MODEL;
+  if (envModel && existsSync(envModel)) return envModel;
+  const largeV3 = join(homedir(), "models", "ggml-large-v3.bin");
+  if (existsSync(largeV3)) return largeV3;
+  const medium = join(homedir(), "models", "ggml-medium.bin");
+  console.warn("ggml-large-v3.bin not found, using ggml-medium.bin");
+  return medium;
+}
 
 export type WhisperJobStatus = "queued" | "extracting" | "running" | "done" | "error" | "canceled";
 
@@ -30,6 +44,10 @@ export interface WhisperJob {
 export type WhisperEvent =
   | { type: "status"; status: WhisperJobStatus; error?: string }
   | { type: "cue"; cue: Cue }
+  // Full replacement of the live cue list — used to reconcile `job.cues` with the
+  // cleaned final set after repair passes, so the live overlay never keeps the
+  // raw looping cues that repair re-emitted.
+  | { type: "snapshot"; status: WhisperJobStatus; cues: Cue[] }
   | { type: "warning"; message: string };
 
 /** Parse whisper-cli progressive output lines:
@@ -231,14 +249,27 @@ class WhisperQueue {
         const pad = 1;
         const offsetMs = Math.max(0, Math.round((hole.start - pad) * 1000));
         const durMs = Math.round((hole.end - hole.start + 2 * pad) * 1000);
-        const repair = await this.whisperPass(job, wavPath, [
-          "-ot", String(offsetMs),
-          "-d", String(durMs),
-          "-mc", "0", // no past-text conditioning: the anti-loop knob
-        ]);
+        // Do NOT stream raw repair cues: the pass can loop and would push
+        // duplicate lines onto the live overlay. We collect them silently…
+        const repair = await this.whisperPass(
+          job,
+          wavPath,
+          [
+            "-ot", String(offsetMs),
+            "-d", String(durMs),
+            "-mc", "0", // no past-text conditioning: the anti-loop knob
+          ],
+          false,
+        );
         if (job.canceled) return;
+        // …clean them with the cycle-aware repairHole, then append + emit only
+        // the cleaned result so the overlay still fills in progressively.
         const fixed = repairHole(repair, hole);
         cues = [...cues, ...fixed].sort((a, b) => a.start - b.start);
+        for (const cue of fixed) {
+          job.cues.push(cue);
+          this.emit(job, { type: "cue", cue });
+        }
       }
 
       // 4. Anything still uncovered is a real problem — surface it.
@@ -249,7 +280,15 @@ class WhisperQueue {
         this.emit(job, { type: "warning", message: msg });
       }
 
-      // 5. Save sidecar SRT.
+      // 5. Reconcile the live cue list with the cleaned final set. During the
+      // main pass `job.cues` accumulated raw (possibly looping) cues that
+      // cleanCues collapsed; repair regions were already appended clean. Replace
+      // the whole live list with the authoritative `cues` and push a snapshot so
+      // SSE clients drop any looped/duplicate lines and match the saved SRT.
+      job.cues = cues;
+      this.emit(job, { type: "snapshot", status: "running", cues });
+
+      // 6. Save sidecar SRT (identical to the reconciled live set).
       await Bun.write(job.outPath, cuesToSrt(cues));
       this.setStatus(job, "done");
     } finally {
@@ -257,11 +296,21 @@ class WhisperQueue {
     }
   }
 
-  /** One whisper-cli invocation. Streams cues (pushed to job.cues + emitted)
-   * and returns just this pass's cues. */
-  private async whisperPass(job: WhisperJob, wavPath: string, extraArgs: string[]): Promise<Cue[]> {
+  /** One whisper-cli invocation. Returns just this pass's cues.
+   *
+   * `stream` controls whether raw cues are pushed to `job.cues` and emitted live
+   * as they arrive. The MAIN pass streams (true) for progressive UX. REPAIR
+   * passes must NOT stream raw cues: a repair can loop on its own and would push
+   * duplicated/looped lines onto the live overlay. Repair callers instead clean
+   * the returned cues (repairHole) and emit only the cleaned result. */
+  private async whisperPass(
+    job: WhisperJob,
+    wavPath: string,
+    extraArgs: string[],
+    stream = true,
+  ): Promise<Cue[]> {
     const proc = Bun.spawn(
-      ["whisper-cli", "-m", MODEL_PATH, "-t", String(THREADS), "-l", job.lang, ...extraArgs, "-f", wavPath],
+      ["whisper-cli", "-m", resolveModelPath(), "-t", String(THREADS), "-l", job.lang, ...extraArgs, "-f", wavPath],
       { stdout: "pipe", stderr: "pipe" },
     );
     job.proc = proc;
@@ -278,8 +327,10 @@ class WhisperQueue {
         const cue = parseWhisperLine(line);
         if (cue) {
           passCues.push(cue);
-          job.cues.push(cue);
-          this.emit(job, { type: "cue", cue });
+          if (stream) {
+            job.cues.push(cue);
+            this.emit(job, { type: "cue", cue });
+          }
         }
       }
     }

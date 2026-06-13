@@ -23,7 +23,7 @@ import { readBlacklist, writeBlacklist } from "./blacklist.ts";
 import { isTextInput } from "./keys.ts";
 import { tmEvent } from "./telemetry.ts";
 import { isJaLang } from "./lang.ts";
-import { readKnownWords } from "./coverage.ts";
+import { CACHE_PREFIX, readKnownWords } from "./coverage.ts";
 import { deckCardToLookup, type QaItem } from "./player/shared.ts";
 
 interface ReadPopup {
@@ -362,7 +362,7 @@ export function ReadRoute({
   // we just want an approximate number for the header display).
   const knownPct = useMemo<number | null>(() => {
     try {
-      const raw = localStorage.getItem(`zr.cov.${id}`);
+      const raw = localStorage.getItem(CACHE_PREFIX + id);
       if (!raw) return null;
       const v = JSON.parse(raw) as { pct?: number };
       return typeof v.pct === "number" ? v.pct : null;

@@ -26,7 +26,9 @@ export interface Coverage {
   i1density: number;
 }
 
-const CACHE_PREFIX = "zr.cov.";
+// v2: bumped when the tokenizer changed (proper-noun merge) so all cached
+// coverage numbers recompute against the new tokenization.
+export const CACHE_PREFIX = "zr.cov.v2.";
 
 // Cache key deliberately does NOT include the cue count: knowing it would
 // require downloading the full cue list, which is exactly the expensive call
