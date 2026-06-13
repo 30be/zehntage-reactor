@@ -145,7 +145,7 @@ test("? opens the hotkey cheatsheet; player hotkeys stay quiet under it", async 
   await expect(sheet).toHaveCount(0);
 });
 
-test("due words from progress get the dotted .due hint", async ({ page }) => {
+test("due words from progress get the .due class", async ({ page }) => {
   await page.route("**/api/anki/words", (route) =>
     route.fulfill({
       json: {
@@ -171,7 +171,9 @@ test("due words from progress get the dotted .due hint", async ({ page }) => {
   const due = page.locator(".sub-primary .tok.due");
   await expect(due).toHaveText(/図書館/);
   await expect(due).toHaveClass(/known/);
-  await expect(due).toHaveCSS("text-decoration-style", "dotted");
+  // wave-11: underlines dropped (color is the only signal) — assert the .due
+  // class is present rather than the removed dotted text-decoration.
+  await expect(due).toHaveClass(/\bdue\b/);
 });
 
 test("pre-study promotes i+1 candidates with a badge", async ({ page }) => {
