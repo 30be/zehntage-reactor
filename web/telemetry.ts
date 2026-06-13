@@ -48,9 +48,10 @@ function flush(useBeacon = false): void {
     body,
     keepalive: useBeacon,
   }).catch(() => {
-    // network hiccup: re-queue so the next flush retries (bounded by cap)
+    // network hiccup: re-queue so the next flush retries (bounded by cap,
+    // dropping OLDEST events to keep the newest)
     queue.unshift(...events);
-    if (queue.length > QUEUE_CAP) queue.length = QUEUE_CAP;
+    if (queue.length > QUEUE_CAP) queue.splice(0, queue.length - QUEUE_CAP);
   });
 }
 
