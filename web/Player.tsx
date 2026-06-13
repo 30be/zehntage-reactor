@@ -61,7 +61,8 @@ import {
 import { useWhisperJob } from "./player/useWhisperJob.ts";
 import { shouldSkipAutopause } from "./player/autopause.ts";
 import { computeCueUnknowns } from "./player/cueUnknowns.ts";
-import { pickResumeTime } from "./player/resume.ts";
+import { useResume } from "./player/useResume.ts";
+import { useSession } from "./player/useSession.ts";
 import { usePlayerHotkeys } from "./player/useHotkeys.ts";
 import { useHudAutohide } from "./player/useHudAutohide.ts";
 import { useSubControls } from "./player/useSubControls.ts";
@@ -767,53 +768,28 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     };
   }, [displayCues, wordIndex, knownWords, blacklist]);
 
-  // --- session counters (for the end-of-episode summary overlay) ---
-  const sessionStartRef = useRef(Date.now());
-  const sessCuesRef = useRef(0); // distinct cue entries during playback
-  const sessLookupsRef = useRef(0); // word popups opened
-  const sessCardsRef = useRef(0); // anki cards added (popup + sentence + bulk)
-  const sessKnownRef = useRef(0); // words marked known via `k`
-  const [sessionSummary, setSessionSummary] = useState<{
-    min: number;
-    cues: number;
-    lookups: number;
-    cards: number;
-    known: number;
-    echo: { tried: number; perfect: number };
-    streak: number | null;
-  } | null>(null);
-  // unique unknown lemmas seen across passed cues this session (for the HUD)
-  const sessUnknownSetRef = useRef<Set<string>>(new Set());
-  // cues passed + cues passed with zero unknowns → comprehension % in the HUD
-  const sessPassedRef = useRef(0);
-  const sessClearRef = useRef(0);
-  // echo dictation session tallies
-  const sessEchoRef = useRef({ tried: 0, perfect: 0 });
-
-  // --- Wave 13.A: session HUD (`o`) — a tiny absolute overlay in the stage.
-  // Gated on hudOpenRef so a closed HUD costs zero per-cue setState churn. ---
-  const [hudOpen, setHudOpen] = useState(false);
-  const hudOpenRef = useRef(false);
-  const [hudTick, setHudTick] = useState(0); // bump to re-render HUD on cue cross
-  const toggleHud = useCallback(() => {
-    setHudOpen((o) => {
-      const next = !o;
-      hudOpenRef.current = next;
-      if (next) setHudTick((t) => t + 1);
-      return next;
-    });
-  }, []);
-
-  // The HUD counters live in refs (mined/cards/unique-unknowns) and only the
-  // cue-cross path bumps hudTick. Lookups, card saves and elapsed-time tick
-  // outside that path, so an open HUD would show stale numbers until the next
-  // cue. While the HUD is open, a 1s tick keeps every value live; it's gated on
-  // hudOpen so a closed HUD costs nothing (no timer, no per-cue setState churn).
-  useEffect(() => {
-    if (!hudOpen) return;
-    const id = window.setInterval(() => setHudTick((t) => t + 1), 1000);
-    return () => window.clearInterval(id);
-  }, [hudOpen]);
+  // --- session counters + HUD (extracted to useSession). All 9 session refs +
+  // summary/HUD state are owned by the hook and returned so the still-inline
+  // concerns (activeCues, autoNext, lookup, onAdd, bulkAdd, echo, hotkeys) keep
+  // mutating/reading the SAME ref instances. ---
+  const {
+    sessionStartRef,
+    sessCuesRef,
+    sessLookupsRef,
+    sessCardsRef,
+    sessKnownRef,
+    sessUnknownSetRef,
+    sessPassedRef,
+    sessClearRef,
+    sessEchoRef,
+    sessionSummary,
+    setSessionSummary,
+    hudOpen,
+    hudOpenRef,
+    hudTick,
+    setHudTick,
+    toggleHud,
+  } = useSession();
 
   // --- Wave 13.A: smart-resume — now AUTO-resumes on load (see onMeta below).
   // The old "resume at MM:SS? press z" affordance + `z` hotkey were removed.
@@ -963,88 +939,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     };
   }, [entry.id, secondaryId]);
 
-  // --- resume position: save throttled while playing, restore on metadata ---
-  // A deep-link start time (#/play/<id>@t) wins over the saved position, once.
-  const startAtRef = useRef<number | null>(
-    typeof startAt === "number" && Number.isFinite(startAt) && startAt >= 0
-      ? startAt
-      : null,
-  );
-  // Sticky flag: an explicit deep-link "@t" was provided for the CURRENT
-  // episode load. Unlike startAtRef (which is nulled once consumed), this stays
-  // true so the auto-resume path can never override the deep-link seek
-  // regardless of loadedmetadata handler ordering.
-  const hasDeepLinkRef = useRef(startAtRef.current != null);
-  useEffect(() => {
-    hasDeepLinkRef.current = false;
-  }, [entry.id]);
-  // Re-navigating to the same episode with a new "@t" doesn't remount the
-  // Player (key={entry.id} is unchanged), so consume prop changes here too.
-  useEffect(() => {
-    if (!(typeof startAt === "number" && Number.isFinite(startAt) && startAt >= 0)) return;
-    const v = videoRef.current;
-    hasDeepLinkRef.current = true;
-    if (v && v.readyState >= 1) {
-      v.currentTime = Math.min(v.duration || Infinity, startAt);
-      startAtRef.current = null;
-    } else {
-      startAtRef.current = startAt; // metadata not loaded yet — onMeta seeks
-    }
-  }, [startAt]);
-  // Guard: auto-resume fires at most once per episode load (per onMeta run).
-  const autoResumedRef = useRef(false);
-  useEffect(() => {
-    autoResumedRef.current = false;
-  }, [entry.id]);
-  useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    const posKey = `zr.pos.${entry.id}`;
-    let lastSave = 0;
-    const onTime = () => {
-      if (v.paused) return;
-      const now = Date.now();
-      if (now - lastSave < 5000) return;
-      lastSave = now;
-      try {
-        localStorage.setItem(posKey, String(v.currentTime));
-        // recency stamp powers the Home "continue watching" affordance
-        localStorage.setItem(`zr.posAt.${entry.id}`, String(now));
-      } catch {
-        /* ignore */
-      }
-    };
-    const onMeta = () => {
-      if (startAtRef.current != null) {
-        v.currentTime = Math.min(v.duration || Infinity, startAtRef.current);
-        startAtRef.current = null;
-        return;
-      }
-      // Auto-resume: no explicit deep-link, so jump to the saved position
-      // once. Skips near-start (<15s) / near-end (within 10s of duration).
-      // An explicit deep-link "@t" ALWAYS wins: bail even if startAtRef was
-      // already consumed by the deep-link effect (handler-order independent).
-      if (hasDeepLinkRef.current) return;
-      if (autoResumedRef.current) return;
-      try {
-        const saved = parseFloat(localStorage.getItem(posKey) ?? "");
-        const target = pickResumeTime({ saved, duration: v.duration });
-        if (target != null) {
-          autoResumedRef.current = true;
-          v.currentTime = target;
-        }
-      } catch {
-        /* ignore */
-      }
-    };
-    v.addEventListener("timeupdate", onTime);
-    v.addEventListener("loadedmetadata", onMeta);
-    if (v.readyState >= 1) onMeta();
-    return () => {
-      v.removeEventListener("timeupdate", onTime);
-      v.removeEventListener("loadedmetadata", onMeta);
-    };
-  }, [entry.id]);
+  // --- resume position (extracted to useResume): save throttled while playing,
+  // restore on metadata. A deep-link start time (#/play/<id>@t) wins over the
+  // saved position, once — see the three-flag handshake inside the hook. ---
+  useResume({ videoRef, mediaId: entry.id, startAt });
 
   // --- active cue tracking via timeupdate (+ autopause at each cue end) ---
   useEffect(() => {
@@ -2293,6 +2191,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           togglePlay={togglePlay}
           toggleFullscreen={toggleFullscreen}
           displayCues={displayCues}
+          secondaryCues={secondaryCues}
           cueUnknowns={cueUnknowns}
           tracks={tracks}
           primaryId={primaryId}

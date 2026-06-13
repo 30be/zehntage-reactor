@@ -29,6 +29,7 @@ export function Vbar({
   togglePlay,
   toggleFullscreen,
   displayCues,
+  secondaryCues,
   cueUnknowns,
   tracks,
   primaryId,
@@ -53,6 +54,7 @@ export function Vbar({
   togglePlay: () => void;
   toggleFullscreen: () => void;
   displayCues: Cue[];
+  secondaryCues?: Cue[];
   cueUnknowns: number[] | null;
   tracks: SubTrackInfo[];
   primaryId: string;
@@ -276,9 +278,18 @@ export function Vbar({
         {seekHover && (() => {
           const idx = activeCueIndex(displayCues, seekHover.t);
           const jaText = idx >= 0 ? displayCues[idx]!.text : null;
+          const ruIdx = secondaryCues
+            ? activeCueIndex(secondaryCues, seekHover.t)
+            : -1;
+          const ruText = ruIdx >= 0 ? secondaryCues![ruIdx]!.text : null;
           return jaText ? (
             <div className="seek-cue-tip" style={{ left: seekHover.x }}>
-              {jaText}
+              <span className="seek-cue-ja">{jaText}</span>
+              {ruText && (
+                <span className="seek-cue-ru" style={{ opacity: 0.7 }}>
+                  {ruText}
+                </span>
+              )}
             </div>
           ) : null;
         })()}
