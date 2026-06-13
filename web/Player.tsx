@@ -69,6 +69,7 @@ import { useHudAutohide } from "./player/useHudAutohide.ts";
 import { useSubControls } from "./player/useSubControls.ts";
 import { useEcho } from "./player/useEcho.ts";
 import { useHoverPause } from "./player/useHoverPause.ts";
+import { useLookup } from "./player/useLookup.ts";
 import { LookupPanel } from "./player/LookupPanel.tsx";
 import {
   PreStudyPanel,
@@ -628,11 +629,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   const [popupPos, setPopupPos] = useState<React.CSSProperties>({
     visibility: "hidden",
   });
-  const [lookup, setLookup] = useState<WordLookup | null>(null);
-  const [lookupLoading, setLookupLoading] = useState(false);
-  const lookupCache = useRef<Map<string, WordLookup>>(new Map());
-  const inflight = useRef<Map<string, Promise<WordLookup>>>(new Map());
-
   // --- encounter history (word popup): lazy "encounters: N" line ---
   const [encHits, setEncHits] = useState<EncounterHit[] | null>(null);
   const [encOpen, setEncOpen] = useState(false);
@@ -1455,96 +1451,32 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     };
   }, [popup?.kind, popup?.surface, popup?.dictForm, entry.id]);
 
-  // fetch lookup when popup target changes (default: NO frame — saves latency)
-  useEffect(() => {
-    if (!popup || popup.kind !== "word") {
-      setLookup(null);
-      return;
-    }
-    sessLookupsRef.current += 1; // session-summary counter
-    // Word already in the deck? Fill the popup from the existing card —
-    // no Gemini call. The Regenerate button still forces a fresh lookup.
-    const matched = matchFront(
-      wordIndexRef.current,
-      popup.surface,
-      popup.reading,
-      popup.dictForm,
-    );
-    const deckCard = matched ? deckCardsRef.current.get(matched) : undefined;
-    if (deckCard) {
-      setLookup(deckCardToLookup(deckCard));
-      setLookupLoading(false);
-      return;
-    }
-    // Cache key includes the cue context so the same word in a NEW sentence
-    // gets a fresh, context-correct answer instead of a stale cached one.
-    const cacheKey = `${popup.surface} ${popup.context} :: ${popup.secondary ?? ""}`;
-    const cached = lookupCache.current.get(cacheKey);
-    if (cached) {
-      setLookup(cached);
-      setLookupLoading(false);
-      return;
-    }
-    let cancelled = false;
-    setLookup(null);
-    setLookupLoading(true);
-    // De-dup concurrent/repeat requests for the same word: share one in-flight
-    // promise so sliding away and back never fires a second Gemini call.
-    const surface = popup.surface;
-    // Give Gemini the dictionary form when the token is conjugated.
-    const ctx = popup.dictForm
-      ? `${popup.context}\n(dictionary form: ${popup.dictForm})`
-      : popup.context;
-    let p = inflight.current.get(cacheKey);
-    if (!p) {
-      const _lookupT0 = Date.now();
-      p = api.lookup({
-        word: surface,
-        context: ctx,
-        source: entry.name,
-        secondary: popup.secondary,
-      })
-        .then((res) => {
-          tmEvent("perf.client.lookup", { ms: Date.now() - _lookupT0, word: surface });
-          lookupCache.current.set(cacheKey, res);
-          return res;
-        })
-        .finally(() => inflight.current.delete(cacheKey));
-      inflight.current.set(cacheKey, p);
-    }
-    void p
-      .then((res) => {
-        if (!cancelled) setLookup(res);
-      })
-      .catch(() => {})
-      .finally(() => !cancelled && setLookupLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [popup?.kind, popup?.surface, popup?.context]);
-
-  // Regenerate the lookup text for the same word, BYPASSING the cache (force a
-  // fresh Gemini call). Replaces the panel content and updates the cache.
-  // Bound to the `g` hotkey (no button — laconic popup).
-  const onReload = useCallback(async () => {
-    if (!popup || popup.kind !== "word") return;
-    setLookupLoading(true);
-    try {
-      const res = await api.lookup({
-        word: popup.surface,
-        context: popup.context,
-        secondary: popup.secondary,
-        source: entry.name,
-        noCache: true,
-      });
-      lookupCache.current.set(`${popup.surface} ${popup.context} :: ${popup.secondary ?? ""}`, res);
-      setLookup(res);
-    } catch (e) {
-      toast(`Regenerate failed: ${e instanceof Error ? e.message : e}`);
-    } finally {
-      setLookupLoading(false);
-    }
-  }, [popup, entry.name, toast]);
+  // Word-lookup popup sub-system (web/player/useLookup.ts): lookup fetch +
+  // cache + de-dup, onReload, the reading-aware deck-front resolution
+  // (popupFront/popupMatchedFront/popupSaved) and cueBoundsAt. The central
+  // `popup` state, hover/pin/close handlers, explain/encounters/qa and
+  // onAdd/onAddSentence/onDelete stay in Player and consume this return.
+  const {
+    lookup,
+    lookupLoading,
+    popupFront,
+    popupMatchedFront,
+    popupSaved,
+    onReload,
+    cueBoundsAt,
+  } = useLookup({
+    popup,
+    wordIndex,
+    wordIndexRef,
+    knownFronts,
+    deckCardsRef,
+    primaryCuesRef,
+    subOffsetRef,
+    sessLookupsRef,
+    entryName: entry.name,
+    tmEvent,
+    toast,
+  });
   regenLookupRef.current = () => void onReload();
 
   // Position the lookup panel: prefer above the word, flip below when there
@@ -1573,42 +1505,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
 
     setPopupPos({ left, top, visibility: "visible" });
   }, [popup, lookup, lookupLoading, explain, explainLoading, qa]);
-
-  const popupFront = useMemo(() => {
-    if (!popup) return null;
-    // Front uses the dictionary (lemma) form so all conjugations match (the
-    // lookup reading is the dict-form reading — it's looked up on the lemma).
-    const word = popup.dictForm ?? popup.surface;
-    const reading = lookup?.reading || popup.reading;
-    return reading ? `${word} [${reading}]` : word;
-  }, [popup, lookup]);
-
-  // The deck front this popup actually refers to: reading-aware match for
-  // word popups (conjugated surfaces resolve to the dictionary-form card),
-  // exact front for sentence panels. null = not in the deck.
-  const popupMatchedFront = useMemo(() => {
-    if (!popup) return null;
-    if (popup.kind === "sentence")
-      return knownFronts.has(popup.surface) ? popup.surface : null;
-    return (
-      matchFront(wordIndex, popup.surface, popup.reading, popup.dictForm) ??
-      (popupFront && knownFronts.has(popupFront) ? popupFront : null)
-    );
-  }, [popup, wordIndex, knownFronts, popupFront]);
-  const popupSaved = popupMatchedFront != null;
-
-  // Bounds of the primary cue at `timestamp` in FILE time (cue times are
-  // track-time, so re-add the user's sync offset) for sentence-audio capture.
-  const cueBoundsAt = useCallback((timestamp: number) => {
-    const cues = primaryCuesRef.current;
-    const idx = activeCueIndex(cues, timestamp - subOffsetRef.current);
-    const cue = idx >= 0 ? cues[idx] : undefined;
-    if (!cue) return {};
-    return {
-      cueStart: cue.start + subOffsetRef.current,
-      cueEnd: cue.end + subOffsetRef.current,
-    };
-  }, []);
 
   const onAdd = useCallback(async () => {
     if (!popup || !lookup || !popupFront) return;
