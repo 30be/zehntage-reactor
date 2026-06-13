@@ -779,6 +779,26 @@ textarea.prompt {
   z-index: 3;
 }
 
+/* Seekbar hover: cue text tooltip — pill above the time tip */
+.seek-cue-tip {
+  position: absolute;
+  bottom: 32px;
+  transform: translateX(-50%);
+  max-width: min(420px, 90vw);
+  padding: 4px 10px;
+  background: rgba(0, 0, 0, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  z-index: 4;
+}
+
 .vbar-row {
   display: flex;
   align-items: center;
@@ -2246,6 +2266,34 @@ textarea:focus-visible {
 .container .ep-known {
   min-width: 0;
   margin-left: 8px;
+}
+
+/* on-demand re-translate button: subtle, ink-only, brightens on row hover */
+.container .lib-row .retranslate-btn {
+  flex: none;
+  font-size: 11px;
+  line-height: 1.2;
+  padding: 1px 6px;
+  margin-left: 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--muted);
+  opacity: 0.35;
+  cursor: pointer;
+  transition: opacity 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.container .lib-row:hover .retranslate-btn {
+  opacity: 0.8;
+}
+.container .lib-row .retranslate-btn:hover {
+  opacity: 1;
+  color: var(--fg);
+  border-color: var(--border);
+}
+.container .lib-row .retranslate-btn:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 
 /* --- S: subtitle-lang badges as a far-right vertical stacked column --- */
