@@ -2,10 +2,10 @@
 
 The minimalist local player that turns anime into your Anki deck.
 
-A local, hotkey-first "Language-Reactor for anime": play raw episodes, generate
-Japanese subtitles with whisper, look up words and sentences inline, and mine
-SRS cards (with video frame + sentence audio) straight into Anki — all behind a
-calm, monochrome Japanese-zen interface, in light or dark.
+A local, hotkey-first "Language Reactor for anime": play raw episodes, look up
+words and sentences inline, and mine SRS cards (with video frame + sentence
+audio) straight into Anki — all behind a calm, monochrome zen interface with
+light, dark, and system themes.
 
 ## Screenshots
 
@@ -24,25 +24,41 @@ Dark theme:
 
 ## Features
 
-- Whisper subtitle generation for raw video, streamed live while transcribing,
-  with anti-hallucination cleanup (repeated-cue runs on music/silence collapsed)
+**Subtitle generation**
+- Jimaku-first: fetches human Japanese subtitles from jimaku.cc automatically;
+  falls back to local whisper large-v3 only when no confident match is found
+- Whisper output is streamed live while transcribing, with anti-hallucination
+  cleanup (repeated-cue runs on music/silence collapsed)
+- Gemini proper-noun correction pass on whisper output — fixes misheard character
+  and place names using the per-series glossary
+- Gemini Russian translation, generated and stored as a sidecar; on-demand
+  "re-translate RU" per episode (Settings or command palette)
+
+**Player**
 - Gemini word and sentence lookups: hover/click a word for reading + notes,
   sentence explanations, AI translation into a synced secondary (blurred) line
-- Anki integration: local AnkiConnect when reachable, remote fallback otherwise;
-  one-click cards with video frame and sentence audio
+- Seekbar cue tooltip: hover the progress bar to preview the subtitle line at
+  that position (Japanese + Russian), alongside the difficulty heat strip
+- Shadowing loops, per-cue replay, smart autopause on lines with unknown words
+- Comprehension quiz (`q`) over the cues you just watched; end-of-episode prompt
+  (toggle in Settings → Player behavior)
+- Echo dictation mode (`e`), picture-in-picture (`i`), session HUD (`o`)
+- Deep links: `#/play/<id>@<seconds>` jumps straight into an episode
+
+**Vocabulary & cards**
 - Word coloring by Anki interval: new words highlighted, learning words fade
   from blue to ambient as the SRS interval grows; furigana on unknown kanji
+- Person-name tokenizer merge: consecutive name tokens (e.g. 折木 + 奉太郎) are
+  treated as one word for lookup and card mining
 - Pre-study mode: bulk-add the unknown words of the upcoming minutes
-- Shadowing loops, per-cue replay, smart autopause on lines with unknown words
-- Comprehension quiz (`q`) over the cues you just watched; at the end of an
-  episode a quiet "comprehension check? (q)" prompt appears (toggle in
-  Settings → Player behavior → "End-of-episode comprehension prompt")
-- Difficulty heat strip on the seek bar
+- Anki integration: local AnkiConnect when reachable, remote fallback otherwise;
+  one-click cards with video frame and sentence audio
+
+**UI**
+- Three themes (light/dark/system) switchable from the sidebar 日/月/◐ buttons
 - Read mode: full transcripts with the same lookups and hotkeys
 - Stats: activity grid, watch time, mining pace, per-episode coverage
 - Home "Today" panel: words mined, cues watched, minutes, quizzes, daily streak
-- jimaku.cc subtitle search
-- Deep links: `#/play/<id>@<seconds>` jumps straight into an episode
 
 ## Quickstart
 
@@ -53,13 +69,13 @@ bun run src/cli.ts /path/to/media/dir   # serves http://localhost:8417
 
 Keys go in `~/.env` (names only — never commit values):
 
-- `GEMINI_API_KEY` — lookups, explanations, translation
+- `GEMINI_API_KEY` — word/sentence lookups, Russian translation, proper-noun correction
+- `JIMAKU_API_KEY` — jimaku.cc human subtitle fetch
 - `ZEHNTAGE_ANKI_URL` / `ZEHNTAGE_ANKI_KEY` — remote Anki fallback
-- `JIMAKU_API_KEY` — jimaku.cc subtitle search
 - `ANKICONNECT_URL` — optional, defaults to local AnkiConnect
 
-Subtitle generation needs `ffmpeg` and `whisper-cli`. Other CLI modes:
-`subtitle <lang> [<lang2>] <file>`, `backup [<dir>]`, `backups`.
+Subtitle generation needs `ffmpeg` and `whisper-cli` (for the whisper fallback).
+Other CLI modes: `subtitle <lang> [<lang2>] <file>`, `backup [<dir>]`, `backups`.
 
 ## Hotkeys
 
@@ -71,25 +87,31 @@ Player scope:
 
 | keys | action |
 | --- | --- |
-| space / f | play–pause / fullscreen |
-| ← → / ↑ ↓ | seek ±5s / volume |
+| space | play / pause |
+| f | fullscreen |
+| ← → | seek −5s / +5s |
+| ↑ ↓ | volume |
 | Tab / Shift+Tab | next / previous cue |
-| r / s | replay cue / shadowing loop |
-| a / g | Anki add–remove popup word / regenerate |
-| , . | frame step back / forward |
-| - = / Shift+- = | speed / subtitle size |
-| [ ] \\ | subtitle offset − / + / reset |
-| Shift+← → | previous / next episode |
-| p | autopause |
-| l / w | cue sidebar / pre-study panel |
-| q | comprehension quiz (watched cues) |
+| r | replay current cue |
+| s | shadowing loop current cue |
+| a | add/remove popup word in Anki |
+| g | regenerate popup explanation |
+| , / . | frame step back / forward |
+| - / = | playback speed |
+| Shift+- / Shift+= | subtitle size |
+| [ / ] / \\ | subtitle offset − / + / reset |
+| Shift+← / Shift+→ | previous / next episode |
+| p | toggle autopause |
+| l | cue-list sidebar |
+| w | pre-study panel |
+| q | comprehension quiz |
 | b / bb | peek translation / toggle blur |
 | i | picture-in-picture |
-| k / x | mark word known / blacklist |
+| k | mark hovered word known |
+| x | blacklist hovered word |
 | o | session HUD overlay |
 | e | echo dictation mode |
 | j | jump to next i+1 cue |
-| z | accept resume affordance |
 
 Read scope:
 
@@ -104,7 +126,9 @@ Global scope:
 
 | keys | action |
 | --- | --- |
-| Ctrl+K / ? / Esc | palette / cheatsheet / close |
+| Ctrl+K | command palette |
+| ? | hotkey cheatsheet |
+| Esc | close popups / panels |
 
 ## Architecture
 
