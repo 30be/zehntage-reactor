@@ -60,9 +60,13 @@ import {
   storeMedia,
   retrieveMedia,
   bustListWordsCache,
-  reviewQueue,
-  answerCard,
 } from "../lib/anki.ts";
+import {
+  reviewQueueAuto,
+  answerCardAuto,
+  deckCountsAuto,
+  reviewStatus,
+} from "../lib/review.ts";
 import { readSettings, writeSettings } from "../lib/settings.ts";
 import {
   logEvent,
@@ -2034,8 +2038,27 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
           return err("scope must be 'zehntage' or 'all'", 400);
         }
         const scope = raw as "zehntage" | "all";
-        const { available, due, cards } = await reviewQueue(scope);
+        // Selector: DB-direct read (works with Anki closed) → AnkiConnect.
+        // `backend` is informational and stripped from the wire response.
+        const { available, due, cards } = await reviewQueueAuto(scope);
         return json({ scope, available, due, cards });
+      }
+
+      // Due counts {new, learning, review}. Additive; DB-direct preferred.
+      if (req.method === "GET" && path === "/api/review/counts") {
+        const raw = url.searchParams.get("scope") ?? "zehntage";
+        if (raw !== "zehntage" && raw !== "all") {
+          return err("scope must be 'zehntage' or 'all'", 400);
+        }
+        const scope = raw as "zehntage" | "all";
+        const counts = await deckCountsAuto(scope);
+        return json(counts);
+      }
+
+      // Engine capability snapshot. Additive; not consumed by current UI.
+      if (req.method === "GET" && path === "/api/review/status") {
+        const status = await reviewStatus();
+        return json(status);
       }
 
       if (req.method === "POST" && path === "/api/review/answer") {
@@ -2051,10 +2074,12 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         if (ease !== 1 && ease !== 2 && ease !== 3 && ease !== 4) {
           return err("ease must be 1, 2, 3 or 4", 400);
         }
-        const res = await answerCard(cardId, ease);
+        // Write-back routes to AnkiConnect only; no DB-write path. On failure
+        // `reason` is passed through (e.g. anki-closed-db-write-not-enabled).
+        const res = await answerCardAuto(cardId, ease);
         // A recorded grade changes due state — refresh words/cards caches.
         if (res.ok) bustAnkiWordsCache();
-        return json(res);
+        return json({ ok: res.ok, error: res.error, reason: res.reason });
       }
 
       // --- show-local lemma frequency (pre-study ordering) ---

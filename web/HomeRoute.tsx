@@ -5,14 +5,6 @@
 import { useEffect, useState } from "react";
 import { api } from "./api.ts";
 import { HOTKEYS } from "./commands.ts";
-import {
-  clampGoal,
-  DEFAULT_GOAL,
-  GOAL_KEY,
-  goalFraction,
-  goalMet,
-  ringDashoffset,
-} from "./goal.ts";
 import { localDateStr } from "./statsfmt.ts";
 import {
   loadCachedWordOfDay,
@@ -21,95 +13,11 @@ import {
   type WordOfDay,
 } from "./wordday.ts";
 
-// Daily-goal ring for the Today panel: today's words-mined count vs a target
-// kept in localStorage. SVG ring + center number + streak; the goal is nudged
-// inline with +/- (persisted). Monochrome, in keeping with the zen aesthetic.
-const RING_R = 34;
-const RING_C = 2 * Math.PI * RING_R;
-
-function loadGoal(): number {
-  try {
-    const raw = localStorage.getItem(GOAL_KEY);
-    if (raw == null) return DEFAULT_GOAL;
-    return clampGoal(Number(raw));
-  } catch {
-    return DEFAULT_GOAL;
-  }
-}
-
-function saveGoal(goal: number): void {
-  try {
-    localStorage.setItem(GOAL_KEY, String(goal));
-  } catch { /* ignore quota / disabled storage */ }
-}
-
-function TodayGoal({ value, streak }: { value: number; streak: number }) {
-  const [goal, setGoal] = useState<number>(loadGoal);
-  const nudge = (d: number) => {
-    setGoal((g) => {
-      const next = clampGoal(g + d);
-      saveGoal(next);
-      return next;
-    });
-  };
-  const met = goalMet(value, goal);
-  const pct = Math.round(goalFraction(value, goal) * 100);
-  return (
-    <div className={`today-goal${met ? " is-met" : ""}`}>
-      <svg
-        className="goal-ring"
-        viewBox="0 0 80 80"
-        role="img"
-        aria-label={`${value} of ${goal} words mined today (${pct}%)`}
-      >
-        <circle className="goal-ring-track" cx="40" cy="40" r={RING_R} />
-        <circle
-          className="goal-ring-fill"
-          cx="40"
-          cy="40"
-          r={RING_R}
-          strokeDasharray={RING_C}
-          strokeDashoffset={ringDashoffset(value, goal, RING_C)}
-        />
-        <text className="goal-ring-num" x="40" y="40">{value}</text>
-        <text className="goal-ring-sub" x="40" y="54">/ {goal}</text>
-      </svg>
-      <div className="today-goal-meta">
-        <div className="today-goal-ctl">
-          <button
-            type="button"
-            className="goal-step"
-            aria-label="lower daily goal"
-            onClick={() => nudge(-1)}
-          >
-            −
-          </button>
-          <span className="goal-label">words/day{met ? " · done" : ""}</span>
-          <button
-            type="button"
-            className="goal-step"
-            aria-label="raise daily goal"
-            onClick={() => nudge(1)}
-          >
-            +
-          </button>
-        </div>
-        {streak > 0 && (
-          <div className="today-goal-streak">
-            <span className="stat-num">{streak}</span> day streak
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 // --- Home / onboarding ---
 // (hotkey data lives in web/commands.ts — shared with the `?` overlay)
 
 // Quiet summary of TODAY's study, from telemetry. Renders nothing until data
-// arrives; shows an inline offline note if AnkiConnect is unreachable; renders
-// the ring even on zero-activity days so new users see the goal.
+// arrives; shows an inline offline note if AnkiConnect is unreachable.
 function TodayPanel() {
   const [today, setToday] = useState<import("./api.ts").TodayStats | null>(null);
   const [ankiErr, setAnkiErr] = useState(false);
@@ -133,7 +41,6 @@ function TodayPanel() {
   }
   // Still loading
   if (today === null) return null;
-  // Loaded: render ring even when inactive/zero so new users see the goal widget
   const tiles: { label: string; value: number }[] = [
     { label: "words mined", value: today.wordsMined },
     { label: "cues watched", value: today.cuesWatched },
@@ -143,12 +50,6 @@ function TodayPanel() {
   return (
     <section className="today-panel card">
       <h2 className="h2">Today</h2>
-      <TodayGoal value={today.wordsMined} streak={today.streak} />
-      {today.wordsMined === 0 && (
-        <p className="muted" style={{ margin: "0.25rem 0 0.5rem", fontSize: "0.85em" }}>
-          Mine your first word today!
-        </p>
-      )}
       <div className="today-tiles">
         {tiles.map((t) => (
           <div key={t.label} className="stat">

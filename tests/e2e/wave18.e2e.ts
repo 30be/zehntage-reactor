@@ -101,6 +101,5 @@ test.describe("Home today panel", () => {
     // words mined today (anki_add) should read ≥ 1
     await expect(panel).toContainText("words mined");
     await expect(panel).toContainText("cues watched");
-    await expect(panel).toContainText("day streak");
   });
 });
