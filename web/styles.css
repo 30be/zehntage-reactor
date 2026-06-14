@@ -1509,6 +1509,9 @@ textarea.prompt {
 
 /* reading-mode link in the player title row */
 .read-link { text-decoration: none; }
+/* G8: frame/clip export button — inherits .ep-nav chrome; cursor only. */
+.export-frame { cursor: pointer; }
+.export-frame svg { display: block; }
 
 /* reading-mode simplified popup */
 .read-popup { max-width: 340px; }

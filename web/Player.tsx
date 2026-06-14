@@ -1884,6 +1884,37 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     ]);
   }, [entry.id]);
 
+  // G8: download the current frame, or (shift) the active cue's audio clip.
+  // Reuses the server's captureFrame/cutAudio via /api/export/*; the browser
+  // saves the file thanks to the endpoint's Content-Disposition header.
+  const exportCurrent = useCallback(
+    (kind: "frame" | "clip") => {
+      const v = videoRef.current;
+      if (!v) return;
+      const t = Math.max(0, v.currentTime - subOffsetRef.current);
+      let url: string;
+      if (kind === "clip") {
+        const idx = activeCueIndex(displayCues, t);
+        const cue = idx >= 0 ? displayCues[idx] : undefined;
+        if (!cue) {
+          toast("no active cue to clip");
+          return;
+        }
+        url = api.exportClipUrl(entry.id, cue.start, cue.end);
+      } else {
+        url = api.exportFrameUrl(entry.id, t);
+      }
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      toast(kind === "clip" ? "exporting clip…" : "exporting frame…");
+    },
+    [entry.id, displayCues, toast],
+  );
+
   return (
     <div className="player-wrap">
       <div className="episode-title-row">
@@ -1914,6 +1945,18 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         >
           <BookOpenIcon size={16} />
         </a>
+        {/* G8: export the current frame (subtitle is burned into the screenshot
+            by the overlay only visually; the JPEG is the raw video frame). The
+            browser downloads it via Content-Disposition on the endpoint. A
+            right-click / shift offers the cue audio clip too. */}
+        <button
+          className="btn icon ep-nav export-frame"
+          title="export frame (shift+click: export cue audio)"
+          aria-label="Export current frame"
+          onClick={(e) => exportCurrent(e.shiftKey ? "clip" : "frame")}
+        >
+          <CameraGlyph />
+        </button>
       </div>
       <div className="stage-row">
       <div
@@ -2164,5 +2207,26 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         />
       )}
     </div>
+  );
+}
+
+// Monochrome camera glyph for the frame-export button. Inline (not in icons.tsx,
+// which this module doesn't own) but matches the app's currentColor / stroke style.
+function CameraGlyph() {
+  return (
+    <svg
+      width={16}
+      height={16}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.75}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M14.5 4h-5L8 6H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-4l-1.5-2Z" />
+      <circle cx={12} cy={13} r={3.2} />
+    </svg>
   );
 }

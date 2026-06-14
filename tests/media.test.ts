@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { contentTypeFor, mergeAudioSpans, mediaDurationSec } from "../src/lib/media.ts";
+import { contentTypeFor, mergeAudioSpans, mediaDurationSec, exportMediaFileName } from "../src/lib/media.ts";
 import type { AudioSpan } from "../src/lib/media.ts";
 
 // NOTE: serveFileWithRange is skipped here — it calls Bun.file(path) eagerly
@@ -164,5 +164,31 @@ describe("mediaDurationSec", () => {
         throw e; // unexpected error — re-throw
       }
     }
+  });
+});
+
+describe("exportMediaFileName", () => {
+  it("strips the extension and appends @mm-ss + target ext", () => {
+    expect(exportMediaFileName("Hyouka - 01.mkv", 75, "jpg")).toBe("Hyouka_-_01@01-15.jpg");
+  });
+  it("formats sub-minute timestamps with zero-padded mm", () => {
+    expect(exportMediaFileName("ep.mp4", 9, "mp3")).toBe("ep@00-09.mp3");
+  });
+  it("floors fractional seconds", () => {
+    expect(exportMediaFileName("ep.mp4", 65.9, "jpg")).toBe("ep@01-05.jpg");
+  });
+  it("sanitizes unsafe characters in the stem", () => {
+    expect(exportMediaFileName("名作/危: a*b.mkv", 0, "jpg")).toBe("a_b@00-00.jpg");
+  });
+  it("clamps negative / non-finite timestamps to 0", () => {
+    expect(exportMediaFileName("ep.mkv", -5, "mp3")).toBe("ep@00-00.mp3");
+    expect(exportMediaFileName("ep.mkv", NaN, "mp3")).toBe("ep@00-00.mp3");
+  });
+  it("falls back to 'clip' for an empty / all-stripped name", () => {
+    expect(exportMediaFileName("", 30, "jpg")).toBe("clip@00-30.jpg");
+    expect(exportMediaFileName("...", 0, "mp3")).toBe("clip@00-00.mp3");
+  });
+  it("keeps a dotfile-style name without an extension intact", () => {
+    expect(exportMediaFileName("noext", 0, "jpg")).toBe("noext@00-00.jpg");
   });
 });

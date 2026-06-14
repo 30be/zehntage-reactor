@@ -348,6 +348,22 @@ export async function condenseAudio(
   return spans.reduce((acc, s) => acc + (s.end - s.start), 0);
 }
 
+/**
+ * Build a safe download filename for an exported frame/clip.
+ * `base` is the source media name (e.g. "Hyouka - 01.mkv"); the extension is
+ * stripped, the stem sanitized to [\w.-], and a "@mm-ss" timestamp + the target
+ * extension appended. Always returns a non-empty name (falls back to "clip").
+ */
+export function exportMediaFileName(base: string, t: number, ext: "jpg" | "mp3"): string {
+  const dot = base.lastIndexOf(".");
+  const stem = (dot > 0 ? base.slice(0, dot) : base) || "clip";
+  const safe = stem.replace(/[^\w.-]+/g, "_").replace(/^[._]+|[._]+$/g, "") || "clip";
+  const sec = Math.max(0, Math.floor(Number.isFinite(t) ? t : 0));
+  const mm = String(Math.floor(sec / 60)).padStart(2, "0");
+  const ss = String(sec % 60).padStart(2, "0");
+  return `${safe}@${mm}-${ss}.${ext}`;
+}
+
 /** Grab one frame at `t` seconds, scaled to `width`, as JPEG bytes. */
 export async function captureFrame(
   file: string,

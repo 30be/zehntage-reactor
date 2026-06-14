@@ -18,6 +18,7 @@ import {
   mergeAudioSpans,
   condenseAudio,
   mediaDurationSec,
+  exportMediaFileName,
 } from "../lib/media.ts";
 import {
   listEmbeddedSubTracks,
@@ -1151,6 +1152,49 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         const entry = library.get(mediaInfo[1]!);
         if (!entry) return err("not found", 404);
         return json(await checkCodecs(entry.absPath));
+      }
+
+      // --- export: a frame (jpg) or a cue audio clip (mp3) for download ---
+      // Security: media is resolved via library.get(id) only — never a raw path —
+      // so there is no path-traversal surface (the id is a hex content hash).
+      const exportFrame = path.match(/^\/api\/export\/frame\/([a-f0-9]+)$/);
+      if (req.method === "GET" && exportFrame) {
+        const entry = library.get(exportFrame[1]!);
+        if (!entry) return err("not found", 404);
+        const t = Math.max(0, parseFloat(url.searchParams.get("t") ?? "0") || 0);
+        try {
+          const bytes = await captureFrame(entry.absPath, t, 1280);
+          void logEvent("export_frame", { mediaId: entry.id, t });
+          return new Response(bytes, {
+            headers: {
+              "Content-Type": "image/jpeg",
+              "Content-Disposition": `attachment; filename="${exportMediaFileName(entry.name, t, "jpg")}"`,
+            },
+          });
+        } catch (e) {
+          return err(`frame export failed: ${String(e)}`, 500);
+        }
+      }
+
+      const exportClip = path.match(/^\/api\/export\/clip\/([a-f0-9]+)$/);
+      if (req.method === "GET" && exportClip) {
+        const entry = library.get(exportClip[1]!);
+        if (!entry) return err("not found", 404);
+        const start = Math.max(0, parseFloat(url.searchParams.get("start") ?? "") || 0);
+        const end = parseFloat(url.searchParams.get("end") ?? "") || 0;
+        if (!(end > start)) return err("end must be greater than start", 400);
+        try {
+          const bytes = await cutAudio(entry.absPath, start, end);
+          void logEvent("export_clip", { mediaId: entry.id, start, end });
+          return new Response(bytes, {
+            headers: {
+              "Content-Type": "audio/mpeg",
+              "Content-Disposition": `attachment; filename="${exportMediaFileName(entry.name, start, "mp3")}"`,
+            },
+          });
+        } catch (e) {
+          return err(`clip export failed: ${String(e)}`, 500);
+        }
       }
 
       // --- subtitles ---

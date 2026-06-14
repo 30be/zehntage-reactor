@@ -417,6 +417,13 @@ export const api = {
       `/api/condense/${id}`,
       {},
     ),
+  // URLs for the browser to download directly (Content-Disposition: attachment).
+  exportFrameUrl: (id: string, t: number) =>
+    `/api/export/frame/${id}?t=${encodeURIComponent(String(Math.max(0, t)))}`,
+  exportClipUrl: (id: string, start: number, end: number) =>
+    `/api/export/clip/${id}?start=${encodeURIComponent(
+      String(Math.max(0, start)),
+    )}&end=${encodeURIComponent(String(end))}`,
   getRoot: () => jget<RootInfo>("/api/root"),
   setRoot: (path: string) => jpost<RootInfo>("/api/root", { path }),
   statsSummary: () => jget<StatsSummary>("/api/stats/summary"),
