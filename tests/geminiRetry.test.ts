@@ -98,18 +98,53 @@ describe("translateCues count-mismatch resilience", () => {
     expect(out.map((c) => c.text)).toEqual(["перевод-a", "перевод-b"]);
   });
 
-  test("falls back to ORIGINAL text (not zero output) if count still wrong after retry", async () => {
+  test("falls back to ORIGINAL text (not zero output) only at the per-cue floor", async () => {
     let calls = 0;
     globalThis.fetch = (async () => {
       calls++;
-      return jsonResp(["always-one"]); // always wrong count
+      // Always zero items → length never matches any non-empty request, so even
+      // single-cue requests mismatch and hit the per-cue keep-original floor.
+      return jsonResp([]);
     }) as unknown as typeof fetch;
 
     const out = await translateCues(twoCues, "ru");
-    expect(calls).toBe(2); // one initial + one retry, then give up
+    // 2-cue batch: try+retry (2) → split → each 1-cue: try+retry (2 each) = 6.
+    expect(calls).toBe(6);
     expect(out).toHaveLength(2); // never zero output
     expect(out.map((c) => c.text)).toEqual(["alpha", "beta"]); // originals kept
     expect(out[0]!.start).toBe(0); // timings preserved
     expect(out[1]!.end).toBe(2);
+  });
+
+  test("split fallback translates the good cues, keeps ONLY the failing cue original", async () => {
+    // Three cues; the model can handle a 1-cue request EXCEPT for "beta", for
+    // which it always returns the wrong count. Multi-cue requests also mismatch
+    // (forcing the split). Result: alpha+gamma translated, beta kept original.
+    const threeCues: Cue[] = [
+      { start: 0, end: 1, text: "alpha" },
+      { start: 1, end: 2, text: "beta" },
+      { start: 2, end: 3, text: "gamma" },
+    ];
+    globalThis.fetch = (async (_url: string, init: { body: string }) => {
+      const body = JSON.parse(init.body) as {
+        contents: { parts: { text: string }[] }[];
+      };
+      const prompt = body.contents[0]!.parts[0]!.text;
+      const numbered = prompt.split("\n").filter((l) => /^\d+\.\s/.test(l));
+      // Single-cue request that is NOT beta → return the one correct translation.
+      if (numbered.length === 1 && !numbered[0]!.includes("beta")) {
+        const text = numbered[0]!.replace(/^\d+\.\s/, "");
+        return jsonResp([`ru-${text}`]);
+      }
+      // Everything else (multi-cue, or the beta single-cue) → wrong count
+      // (zero items never matches a non-empty request).
+      return jsonResp([]);
+    }) as unknown as typeof fetch;
+
+    const out = await translateCues(threeCues, "ru");
+    expect(out).toHaveLength(3);
+    expect(out.map((c) => c.text)).toEqual(["ru-alpha", "beta", "ru-gamma"]);
+    expect(out[0]!.start).toBe(0);
+    expect(out[2]!.end).toBe(3);
   });
 });

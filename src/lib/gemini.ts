@@ -569,36 +569,56 @@ export async function translateCues(
     return result.translations.map((t, j) => stripEnumerator(t, j));
   };
 
-  const out: Cue[] = [];
-  for (let i = 0; i < cues.length; i += BATCH_SIZE) {
-    const batch = cues.slice(i, i + BATCH_SIZE);
-    let texts: string[];
+  // Translate a batch, recovering from COUNT mismatches by retrying once at the
+  // same size, then SPLITTING into halves (down to a single cue) so a structural
+  // quirk in ONE cue can't drag its whole batch into untranslated passthrough.
+  // Only at the per-cue floor — where a mismatch can no longer be isolated — do
+  // we keep the original (Japanese) text, so at most that single cue stays
+  // untranslated instead of the entire batch. Bounded: each level retries once
+  // and halves, so the call count is linear in the offending region, not runaway.
+  // Returns translated texts aligned 1:1 with `batch`.
+  const translateBatchResilient = async (batch: Cue[]): Promise<string[]> => {
+    if (batch.length === 0) return [];
     try {
-      texts = await translateBatch(batch);
+      return await translateBatch(batch);
     } catch (e1) {
       // Only a COUNT mismatch is recoverable here. Fatal errors (bad API key /
       // 4xx, exhausted transient retries, network) still propagate so a real
       // failure isn't silently turned into an untranslated sidecar.
       if (!(e1 instanceof TranslationCountError)) throw e1;
-      // Resilience safety net: a count hiccup on one batch must NOT fail the
-      // whole episode (which would leave ZERO ru output). Retry the batch once;
-      // if it STILL mismatches, fall back to keeping the ORIGINAL (untranslated)
-      // cue text for this batch — graceful degradation mirroring correctNames'
-      // fail-safe spirit (some untranslated cues > no episode output at all).
-      console.warn(
-        `translateCues: batch at ${i} count mismatch (${e1.message}); retrying once`,
-      );
+      // Retry once at the same size — transient count hiccups often clear.
       try {
-        texts = await translateBatch(batch);
+        return await translateBatch(batch);
       } catch (e2) {
         if (!(e2 instanceof TranslationCountError)) throw e2;
+        if (batch.length === 1) {
+          // Per-cue floor: this single cue deterministically mismatches. Keep
+          // its ORIGINAL text — graceful degradation limited to ONE cue, not a
+          // whole batch (the ep11/ep17 untranslated-passthrough bug).
+          console.warn(
+            `translateCues: single cue still mismatched (${e2.message}); ` +
+              `keeping original text for 1 cue`,
+          );
+          return [batch[0]!.text];
+        }
+        // Split in half and recurse — isolates the offending cue(s) so the rest
+        // of the batch still gets translated.
         console.warn(
-          `translateCues: batch at ${i} still mismatched (${e2.message}); ` +
-            `keeping original text for ${batch.length} cues`,
+          `translateCues: batch of ${batch.length} still mismatched (${e2.message}); ` +
+            `splitting into halves`,
         );
-        texts = batch.map((c) => c.text);
+        const mid = Math.ceil(batch.length / 2);
+        const left = await translateBatchResilient(batch.slice(0, mid));
+        const right = await translateBatchResilient(batch.slice(mid));
+        return [...left, ...right];
       }
     }
+  };
+
+  const out: Cue[] = [];
+  for (let i = 0; i < cues.length; i += BATCH_SIZE) {
+    const batch = cues.slice(i, i + BATCH_SIZE);
+    const texts = await translateBatchResilient(batch);
     batch.forEach((c, j) => {
       out.push({ start: c.start, end: c.end, text: texts[j]! });
     });
