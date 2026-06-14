@@ -716,9 +716,13 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   // wordIndex already carries the per-front progress/isDue from the deck cache).
   const dueCueIndicesRef = useRef<number[] | null>(null);
   const [dueCount, setDueCount] = useState(0);
+  // F6: due-cue indices as state too, so the seekbar heatmap (Vbar) can render
+  // markers at their timeline positions (refs alone don't trigger re-render).
+  const [dueCueIndices, setDueCueIndices] = useState<number[]>([]);
   useEffect(() => {
     dueCueIndicesRef.current = null;
     setDueCount(0);
+    setDueCueIndices([]);
     if (displayCues.length === 0) return;
     let cancelled = false;
     void getTokenizer()
@@ -743,6 +747,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         if (!cancelled) {
           dueCueIndicesRef.current = hits;
           setDueCount(hits.length);
+          setDueCueIndices(hits);
         }
       })
       .catch(() => {});
@@ -1358,6 +1363,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     toggleHud,
     toggleEcho,
     seekIPlusOne,
+    seekNextDue,
     toast,
   });
 
@@ -1934,6 +1940,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           displayCues={displayCues}
           secondaryCues={secondaryCues}
           cueUnknowns={cueUnknowns}
+          dueCueIndices={dueCueIndices}
           tracks={tracks}
           primaryId={primaryId}
           secondaryId={secondaryId}

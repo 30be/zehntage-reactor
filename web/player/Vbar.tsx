@@ -6,7 +6,7 @@
 // Shared-with-parent refs: scrubbingRef / barHoverRef / ccOpenRef keep the
 // HUD autohide logic in Player.tsx aware of the bar's interaction state.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Cue, SubTrackInfo } from "../api.ts";
 import { heatBins, heatAlpha } from "../heat.ts";
 import { isJaLang, isRuLang } from "../lang.ts";
@@ -20,6 +20,7 @@ import {
 } from "../icons.tsx";
 import { fmtTime, langLabel } from "./shared.ts";
 import { activeCueIndex } from "../cues.ts";
+import { iPlusOneIndices } from "../iplusone.ts";
 
 export function Vbar({
   videoRef,
@@ -31,6 +32,7 @@ export function Vbar({
   displayCues,
   secondaryCues,
   cueUnknowns,
+  dueCueIndices,
   tracks,
   primaryId,
   secondaryId,
@@ -56,6 +58,8 @@ export function Vbar({
   displayCues: Cue[];
   secondaryCues?: Cue[];
   cueUnknowns: number[] | null;
+  /** F6: indices (into displayCues) of cues holding a due deck word. */
+  dueCueIndices: number[];
   tracks: SubTrackInfo[];
   primaryId: string;
   secondaryId: string;
@@ -247,6 +251,25 @@ export function Vbar({
     if (!scrubbingRef.current) setSeekHover(null);
   }, [scrubbingRef]);
 
+  // --- F6: seekbar cue heatmap. Thin ticks at the timeline positions of
+  // study-worthy cues: i+1 cues (exactly one unknown — neutral ink) and
+  // due-word cues (content-red, since it encodes word state). Positioned by
+  // cue.start / duration; pointer-events:none so scrubbing/tooltip stay intact.
+  const iPlusOneMarks = useMemo(() => {
+    if (!(videoDuration > 0)) return [];
+    return iPlusOneIndices(cueUnknowns)
+      .map((i) => displayCues[i]?.start)
+      .filter((t): t is number => t != null)
+      .map((t) => (t / videoDuration) * 100);
+  }, [cueUnknowns, displayCues, videoDuration]);
+  const dueMarks = useMemo(() => {
+    if (!(videoDuration > 0)) return [];
+    return dueCueIndices
+      .map((i) => displayCues[i]?.start)
+      .filter((t): t is number => t != null)
+      .map((t) => (t / videoDuration) * 100);
+  }, [dueCueIndices, displayCues, videoDuration]);
+
   const hasJa = tracks.some((t) => isJaLang(t.lang));
   // Only a GENERATED (synced) RU track hides the Translate button; external or
   // embedded RU tracks are often out of sync with the JA track.
@@ -274,6 +297,21 @@ export function Vbar({
           />
         )}
         <div ref={playedRef} className="seek-played" />
+        {iPlusOneMarks.map((pct, i) => (
+          <div
+            key={`ip-${i}`}
+            className="seek-marker seek-marker-iplus"
+            style={{ left: `${pct}%` }}
+          />
+        ))}
+        {dueMarks.map((pct, i) => (
+          <div
+            key={`due-${i}`}
+            className="seek-marker seek-marker-due"
+            data-testid="seek-marker-due"
+            style={{ left: `${pct}%` }}
+          />
+        ))}
         <div ref={densityMarkerRef} className="density-marker" />
         {seekHover && (() => {
           const idx = activeCueIndex(displayCues, seekHover.t);

@@ -52,6 +52,7 @@ export interface PlayerHotkeyCtx {
   toggleHud: () => void;
   toggleEcho: () => void;
   seekIPlusOne: () => void;
+  seekNextDue: () => void;
   toast: (msg: string) => void;
 }
 
@@ -63,7 +64,7 @@ const RATES = [0.5, 0.75, 1, 1.25, 1.5];
 const LETTERS: Record<string, string> = {
   KeyF: "f", KeyA: "a", KeyR: "r", KeyL: "l", KeyK: "k", KeyS: "s",
   KeyP: "p", KeyG: "g", KeyW: "w", KeyB: "b", KeyI: "i", KeyX: "x",
-  KeyO: "o", KeyE: "e", KeyJ: "j", KeyQ: "q",
+  KeyO: "o", KeyE: "e", KeyJ: "j", KeyQ: "q", KeyD: "d",
 };
 const HANDLED = new Set([
   " ",
@@ -73,7 +74,7 @@ const HANDLED = new Set([
   "Tab",
   ...Object.values(LETTERS),
 ]);
-const REPEAT_TOGGLES = new Set([" ", "f", "l", "k", "s", "p", "g", "a", "w", "b", "i", "x", "o", "e", "j", "q"]);
+const REPEAT_TOGGLES = new Set([" ", "f", "l", "k", "s", "p", "g", "a", "w", "b", "i", "x", "o", "e", "j", "q", "d"]);
 
 export function usePlayerHotkeys(ctx: PlayerHotkeyCtx): void {
   const ctxRef = useRef(ctx);
@@ -356,6 +357,9 @@ export function usePlayerHotkeys(ctx: PlayerHotkeyCtx): void {
           break;
         case "j":
           c.seekIPlusOne();
+          break;
+        case "d":
+          c.seekNextDue();
           break;
       }
     };

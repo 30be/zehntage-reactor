@@ -731,6 +731,29 @@ textarea.prompt {
   opacity: 1;
   z-index: 2;
 }
+/* F6: seekbar cue heatmap — thin ticks marking study-worthy cues. Sit between
+   the played line (z1) and the position caret (z2); never intercept pointers so
+   scrubbing + the hover tooltip keep working. i+1 = neutral ink, due = red. */
+.seek-marker {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  pointer-events: none;
+}
+.seek-marker-iplus {
+  height: 7px;
+  background: rgba(255, 255, 255, 0.55);
+  z-index: 1;
+}
+.seek-marker-due {
+  height: 11px;
+  background: var(--tok-unk);
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.5);
+  z-index: 2;
+}
 .seek-tip {
   position: absolute;
   bottom: 15px;
