@@ -6,7 +6,14 @@
 // Jumping a timestamp navigates back to the player.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type Cue, type LibraryEntry, type WordLookup } from "./api.ts";
+import {
+  api,
+  type Cue,
+  type EncounterHit,
+  type LibraryEntry,
+  type WordLookup,
+} from "./api.ts";
+import { Encounters } from "./player/Encounters.tsx";
 import { Read } from "./Read.tsx";
 import { clampPopupPos } from "./readlayout.ts";
 import { TokenLine, AccentReading } from "./TokenLine.tsx";
@@ -58,6 +65,11 @@ export function ReadRoute({
   const [popup, setPopup] = useState<ReadPopup | null>(null);
   const [lookup, setLookup] = useState<WordLookup | null>(null);
   const [lookupLoading, setLookupLoading] = useState(false);
+  // encounter history (word popup): "encounters: N" line, lazy + cached per
+  // lemma, scoped to this episode — same as the player popup.
+  const [encHits, setEncHits] = useState<EncounterHit[] | null>(null);
+  const [encOpen, setEncOpen] = useState(false);
+  const encCache = useRef<Map<string, EncounterHit[]>>(new Map());
   // deck fronts (drives the popup saved-state color), optimistically updated
   const [knownFronts, setKnownFronts] = useState<Set<string>>(new Set());
   // optimistic fronts not yet confirmed by the server payload
@@ -272,6 +284,35 @@ export function ReadRoute({
   useEffect(() => {
     lookupArrivedRef.current = false;
   }, [popup?.surface, popup?.context]);
+
+  // fetch encounter history when a word popup opens (lazy, cached per lemma,
+  // scoped to this episode) — mirrors the player popup.
+  useEffect(() => {
+    if (!popup) {
+      setEncHits(null);
+      setEncOpen(false);
+      return;
+    }
+    setEncOpen(false);
+    const lemma = popup.dictForm ?? popup.surface;
+    const cached = encCache.current.get(lemma);
+    if (cached) {
+      setEncHits(cached);
+      return;
+    }
+    setEncHits(null);
+    let cancelled = false;
+    void api
+      .indexEncounters(lemma, [id])
+      .then((hits) => {
+        encCache.current.set(lemma, hits);
+        if (!cancelled) setEncHits(hits);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [popup?.surface, popup?.dictForm, id]);
 
   // `g`: regenerate the explanation (bypass any deck-card fill)
   const onRegen = useCallback(() => {
@@ -551,6 +592,11 @@ export function ReadRoute({
               {lookup.notes && <div className="notes">{lookup.notes}</div>}
             </>
           )}
+          <Encounters
+            hits={encHits}
+            open={encOpen}
+            onToggle={() => setEncOpen((o) => !o)}
+          />
           <div className="row">
             <button className="btn" onClick={() => setPopup(null)}>
               Close

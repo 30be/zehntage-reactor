@@ -192,3 +192,26 @@ test("t hotkey toggles the secondary translation lines and persists", async ({ p
   await expect(page.locator(".read-secondary").first()).toBeVisible();
   expect(await page.evaluate(() => localStorage.getItem("zr.read.secondary"))).toBe("1");
 });
+
+test("read popup shows the encounters line for a word in the library", async ({ page }) => {
+  // read.mp4 cue 2 is 図書館へ行きます。 — the lemma 行く is indexed for this
+  // episode, so the popup's encounters line (player↔read parity) must render.
+  await openRead(page, "read.mp4");
+  await page.locator(".read-para .tok").first().waitFor({ timeout: 20_000 });
+  // click the 勉強 token — a noun whose lemma (= surface) is indexed for this
+  // episode, so the encounters lookup returns a hit.
+  const tok = page.locator(".read-para .tok", { hasText: "勉強" }).first();
+  await tok.click();
+  const popup = page.locator(".read-popup");
+  await expect(popup).toBeVisible();
+  await expect(popup.locator(".translation")).toBeVisible();
+  // the encounters line renders with a count
+  const encLine = popup.locator(".enc .enc-line");
+  await expect(encLine).toBeVisible();
+  await expect(encLine).toContainText("encounters:");
+  const count = Number((await encLine.textContent())!.replace(/\D+/g, ""));
+  expect(count).toBeGreaterThanOrEqual(1);
+  // clicking the line expands the cue list
+  await encLine.click();
+  await expect(popup.locator(".enc .enc-list .enc-hit").first()).toBeVisible();
+});

@@ -7,7 +7,8 @@ import type { EncounterHit, ExplainResult, WordLookup } from "../api.ts";
 import { AccentReading } from "../TokenLine.tsx";
 import { accentOf } from "../accent.ts";
 import { freqRankOf, freqTier } from "../freq.ts";
-import { fmtTime, type PopupState, type QaItem } from "./shared.ts";
+import { type PopupState, type QaItem } from "./shared.ts";
+import { Encounters } from "./Encounters.tsx";
 
 export function LookupPanel({
   popup,
@@ -159,45 +160,11 @@ export function LookupPanel({
               {lookup.notes && <div className="notes">{lookup.notes}</div>}
             </>
           )}
-          {encHits && encHits.length > 0 && (
-            <div className="enc">
-              <div
-                className="enc-line"
-                title="Where else this word appears in the library"
-                onClick={onToggleEncounters}
-              >
-                encounters: {encHits.reduce((s, h) => s + h.count, 0)}
-              </div>
-              {encOpen && (
-                <div className="enc-list">
-                  {encHits
-                    .flatMap((h) =>
-                      h.cues.map((c) => ({
-                        mediaId: h.mediaId,
-                        name: h.name,
-                        start: c.start,
-                        text: c.text,
-                      })),
-                    )
-                    .slice(0, 20)
-                    .map((s, i) => (
-                      <div
-                        key={`${s.mediaId}:${s.start}:${i}`}
-                        className="enc-hit"
-                        onClick={() => {
-                          window.location.hash = `#/play/${s.mediaId}@${s.start}`;
-                        }}
-                      >
-                        <span className="enc-meta">
-                          {s.name.replace(/\.[^.]+$/, "")} · {fmtTime(s.start)}
-                        </span>{" "}
-                        {s.text}
-                      </div>
-                    ))}
-                </div>
-              )}
-            </div>
-          )}
+          <Encounters
+            hits={encHits}
+            open={encOpen}
+            onToggle={onToggleEncounters}
+          />
         </>
       )}
 

@@ -197,6 +197,11 @@ a { color: inherit; }
 .tok:hover { background: rgba(255,255,255,0.18); }
 /* unknown (not in deck, not marked known/blacklisted) */
 .tok.unk { color: var(--tok-unk); }
+/* retention decay: an OVERDUE deck word whose learning color is being pulled
+   back toward --tok-unk (see learningColor()). Color carries the signal — no
+   underline (design law). This hook just lets the rotting state be targeted
+   (e.g. future hover affordance) without overriding the inline mixed color. */
+.tok.rot { font-style: italic; }
 /* dark video overlay: lighter shades stay legible on the dark, shadowed bg */
 .sub-overlay .tok,
 .fs-sidebar .tok {
