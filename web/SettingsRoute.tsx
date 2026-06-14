@@ -348,7 +348,10 @@ export function Settings({
                 value={minutesGoal}
                 onChange={(e) => {
                   setMinutesGoal(e.target.value);
-                  saveMinutesGoal(clampMinutesGoal(Number(e.target.value)));
+                  // Don't snap to the clamp min while the field is mid-edit
+                  // (empty/partial) — onBlur re-clamps and persists.
+                  if (e.target.value.trim() !== "")
+                    saveMinutesGoal(clampMinutesGoal(Number(e.target.value)));
                 }}
                 onBlur={() => {
                   const clamped = clampMinutesGoal(Number(minutesGoal));
