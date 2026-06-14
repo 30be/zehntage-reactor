@@ -405,10 +405,31 @@ export function sanitizeCueLine(text: string): string {
     .trim();
 }
 
+/**
+ * HYOUKA (氷菓) cast/place glossary for consistent Japanese→Russian name
+ * transliteration. Surnames follow community-standard forms (Читанда), given
+ * names use a fused readable form; everything else is plain Polivanov. Injected
+ * only when the target language is Russian. Kept deliberately short (main cast +
+ * a couple of places) so it doesn't bloat per-batch token usage.
+ */
+const HYOUKA_RU_GLOSSARY = [
+  "折木奉太郎 → Ореки Хотаро",
+  "千反田える → Читанда Эру (имя — Эру; в обращении часто просто Тиэру)",
+  "福部里志 → Фукубэ Сатоси",
+  "伊原摩耶花 → Ибара Маяка",
+  "古典部 → клуб классической литературы",
+  "神山高校 → старшая школа Камияма",
+].join("\n");
+
 export function buildTranslateBatchPrompt(lines: string[], targetLang: string): string {
   const target = languageName(targetLang);
   const numbered = lines.map((l, i) => `${i + 1}. ${sanitizeCueLine(l)}`).join("\n");
-  return `Translate the following numbered subtitle lines into ${target}. They are consecutive lines from one video — use the surrounding lines for context, but translate each line separately. The reader is LEARNING the source language: translate literally, preserving the source word choices, grammatical structure, and word order as far as the target language allows — do NOT polish into nice idiomatic prose. A slightly awkward but transparent translation is better than a natural-sounding loose one. Keep each line concise. Return exactly ${lines.length} translations, in order, one per input line. Return ONLY the translated line text — do NOT include the line number or any prefix.
+  const isRu = targetLang.toLowerCase() === "ru";
+  const glossaryBlock = isRu
+    ? `\nThese subtitles are from the anime "Hyouka" (氷菓). Use this glossary so character and place names stay CONSISTENT across every line and episode. Transliterate any OTHER Japanese proper name (people, places) using standard Polivanov romanization-to-Russian rules; do NOT invent or anglicize names.\n${HYOUKA_RU_GLOSSARY}\n`
+    : "";
+  return `Translate the following numbered subtitle lines into ${target}. They are consecutive lines from one video — use the surrounding lines for context, but translate each line separately. Produce natural, fluent, idiomatic ${target} that reads the way a person actually speaks — NOT a word-for-word calque. Preserve the speaker's register and tone (casual stays casual, formal stays formal, rude stays rude). Handle Japanese honorifics naturally for ${target}: do NOT transliterate "-san"/"-kun"/"-chan"/"-senpai" as a literal suffix on a name — convey the politeness through wording or simply drop it where it would sound unnatural. Keep each line concise and suitable as a subtitle.${glossaryBlock}
+Return exactly ${lines.length} translations, in order, one per input line. Return ONLY the translated line text — do NOT include the line number or any prefix.
 
 ${numbered}`;
 }

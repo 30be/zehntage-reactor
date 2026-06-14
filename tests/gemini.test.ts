@@ -232,6 +232,44 @@ describe("batch prompts: each cue is exactly ONE physical line", () => {
   });
 });
 
+describe("translate prompt: quality instructions + Hyouka glossary", () => {
+  test("ru target includes natural-translation + honorific guidance", () => {
+    const p = buildTranslateBatchPrompt(["一", "二"], "ru");
+    expect(p).toContain("natural, fluent, idiomatic");
+    expect(p).toContain("register and tone");
+    expect(p).toMatch(/honorific/i);
+    expect(p).toContain("-san");
+  });
+
+  test("ru target embeds the Hyouka name glossary and Polivanov rule", () => {
+    const p = buildTranslateBatchPrompt(["一"], "ru");
+    expect(p).toContain("Ореки Хотаро");
+    expect(p).toContain("Читанда Эру");
+    expect(p).toContain("Фукубэ Сатоси");
+    expect(p).toContain("Ибара Маяка");
+    expect(p).toContain("клуб классической литературы");
+    expect(p).toContain("старшая школа Камияма");
+    expect(p).toMatch(/Polivanov/i);
+  });
+
+  test("non-ru target keeps generic natural-translation, no glossary", () => {
+    const p = buildTranslateBatchPrompt(["一"], "en");
+    expect(p).toContain("natural, fluent, idiomatic");
+    expect(p).not.toContain("Ореки Хотаро");
+    expect(p).not.toContain("Hyouka");
+  });
+
+  test("line-count contract unchanged: N cues → N numbered lines (ru & en)", () => {
+    const lines = ["a", "b", "c", "d", "e"];
+    for (const lang of ["ru", "en", "de"]) {
+      const p = buildTranslateBatchPrompt(lines, lang);
+      const numbered = p.split("\n").filter((l) => /^\d+\.\s/.test(l));
+      expect(numbered).toHaveLength(lines.length);
+      expect(p).toContain(`Return exactly ${lines.length} translations`);
+    }
+  });
+});
+
 describe("translateCues (GEMINI_FAKE) with multiline cues", () => {
   test("a multiline cue still yields exactly N outputs, timings preserved", async () => {
     const prev = process.env.GEMINI_FAKE;
