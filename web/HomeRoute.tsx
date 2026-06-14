@@ -13,6 +13,13 @@ import {
   goalMet,
   ringDashoffset,
 } from "./goal.ts";
+import { localDateStr } from "./statsfmt.ts";
+import {
+  loadCachedWordOfDay,
+  pickWordOfDay,
+  saveCachedWordOfDay,
+  type WordOfDay,
+} from "./wordday.ts";
 
 // Daily-goal ring for the Today panel: today's words-mined count vs a target
 // kept in localStorage. SVG ring + center number + streak; the goal is nudged
@@ -130,6 +137,74 @@ function TodayPanel() {
   );
 }
 
+// G5 — "Word of the day": resurface ONE previously-learned deck word per day to
+// passively reinforce it (word · reading · meaning + a deep-link into a clip
+// where it appears). Deterministic per day (cached in localStorage); the deck +
+// progress drive the pick, with a best-effort encounter for the context link.
+function WordOfDayCard({ go }: { go: (h: string) => void }) {
+  const [pick, setPick] = useState<WordOfDay | null>(null);
+  const [link, setLink] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const day = localDateStr(new Date());
+    const cached = loadCachedWordOfDay(day);
+    if (cached) setPick(cached);
+    void api.ankiWords().then((res) => {
+      if (!alive) return;
+      const chosen = pickWordOfDay(res.words, res.progress, day);
+      if (!chosen) return;
+      setPick(chosen);
+      saveCachedWordOfDay(day, chosen);
+    }).catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+  // Best-effort "watch in context" deep-link from the encounter index.
+  useEffect(() => {
+    if (!pick) return;
+    let alive = true;
+    void api.indexEncounters(pick.word).then((hits) => {
+      if (!alive) return;
+      const hit = hits.find((h) => h.cues && h.cues.length > 0);
+      const cue = hit?.cues?.[0];
+      if (hit && cue) {
+        setLink(`#/play/${hit.mediaId}@${Math.floor(cue.start)}`);
+      }
+    }).catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [pick]);
+  if (!pick) return null;
+  return (
+    <section className="today-panel card wordday-card">
+      <h2 className="h2">Word of the day</h2>
+      <div className="wordday-body">
+        <span className="wordday-word" style={{ color: "var(--accent-known, #7aa2f7)" }}>
+          {pick.word}
+          {pick.reading ? <span className="wordday-reading muted"> [{pick.reading}]</span> : null}
+        </span>
+        <span className="wordday-meaning">{pick.meaning}</span>
+        {link
+          ? (
+            <a
+              className="wordday-link"
+              href={link}
+              onClick={(e) => {
+                e.preventDefault();
+                go(link);
+              }}
+            >
+              watch in context →
+            </a>
+          )
+          : null}
+      </div>
+    </section>
+  );
+}
+
 export function Home({ go }: { go: (h: string) => void }) {
   const [root, setRoot] = useState<{ root: string; count: number } | null>(null);
   useEffect(() => {
@@ -138,6 +213,7 @@ export function Home({ go }: { go: (h: string) => void }) {
   return (
     <>
       <TodayPanel />
+      <WordOfDayCard go={go} />
       <h2 className="h2">How it works</h2>
       <ol className="home-steps">
         <li>Pick an episode in the <a href="#/" onClick={() => go("#/")}>Library</a></li>
