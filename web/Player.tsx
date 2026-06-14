@@ -709,6 +709,48 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     };
   }, [displayCues, wordIndex, knownWords, blacklist]);
 
+  // --- F4: "due here" — per-cue flag for cues containing a DUE deck word ---
+  // A deck word is due when a cue token matches an existing Anki front
+  // (matchFront) whose progress entry has isDue === true. Reuses the same
+  // tokenization pass shape as cueUnknowns; client-side only (no server call —
+  // wordIndex already carries the per-front progress/isDue from the deck cache).
+  const dueCueIndicesRef = useRef<number[] | null>(null);
+  const [dueCount, setDueCount] = useState(0);
+  useEffect(() => {
+    dueCueIndicesRef.current = null;
+    setDueCount(0);
+    if (displayCues.length === 0) return;
+    let cancelled = false;
+    void getTokenizer()
+      .then((tok) => {
+        if (cancelled) return;
+        const idx = wordIndex;
+        const hits: number[] = [];
+        for (let i = 0; i < displayCues.length; i++) {
+          let due = false;
+          for (const t of tok.tokenize(displayCues[i]!.text)) {
+            if (!isLexical(t)) continue;
+            if (t.pos === "助詞" || t.pos === "助動詞") continue;
+            const front = matchFront(idx, t.surface_form, t.reading, t.basic_form);
+            if (front == null) continue;
+            if (idx.progress[front]?.isDue === true) {
+              due = true;
+              break;
+            }
+          }
+          if (due) hits.push(i);
+        }
+        if (!cancelled) {
+          dueCueIndicesRef.current = hits;
+          setDueCount(hits.length);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [displayCues, wordIndex]);
+
   // --- session counters + HUD (extracted to useSession). All 9 session refs +
   // summary/HUD state are owned by the hook and returned so the still-inline
   // concerns (activeCues, autoNext, lookup, onAdd, bulkAdd, echo, hotkeys) keep
@@ -772,6 +814,24 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     if (!cue) return;
     v.currentTime = Math.max(0, cue.start + subOffsetRef.current);
     toast(`i+1 cue ${target + 1}`);
+  }, [displayCues, toast]);
+
+  // --- F4: seek to the next cue with a DUE deck word (wraps), mirror of `j` ---
+  const seekNextDue = useCallback(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const hits = dueCueIndicesRef.current;
+    if (!hits || hits.length === 0) {
+      toast("no due cue");
+      return;
+    }
+    const cues = displayCues;
+    const cur = activeCueIndex(cues, v.currentTime - subOffsetRef.current);
+    const target = hits.find((i) => i > cur) ?? hits[0]!;
+    const cue = cues[target];
+    if (!cue) return;
+    v.currentTime = Math.max(0, cue.start + subOffsetRef.current);
+    toast(`due cue ${target + 1}`);
   }, [displayCues, toast]);
 
   // --- load tracks + anki words ---
@@ -1720,6 +1780,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     toggleHud,
     toggleEcho,
     seekIPlusOne,
+    seekNextDue,
     primaryText,
     toast,
   });
@@ -1737,6 +1798,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     toggleHud,
     toggleEcho,
     seekIPlusOne,
+    seekNextDue,
     primaryText,
     toast,
   };
@@ -1750,6 +1812,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       { id: "pl.hud", title: "player: toggle session HUD", hint: "o", run: () => c().toggleHud() },
       { id: "pl.echo", title: "player: toggle echo dictation", hint: "e", run: () => c().toggleEcho() },
       { id: "pl.iplus1", title: "player: jump to next i+1 cue", hint: "j", run: () => c().seekIPlusOne() },
+      { id: "pl.duejump", title: "player: jump to next due-word cue", run: () => c().seekNextDue() },
       { id: "pl.fs", title: "player: fullscreen", hint: "f", run: () => c().toggleFullscreen() },
       { id: "pl.offset0", title: "player: reset subtitle offset", hint: "\\", run: () => c().changeOffset(null) },
       { id: "pl.next", title: "player: next episode", hint: "⇧→", run: () => void c().gotoEpisode(1) },
@@ -1893,6 +1956,21 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             title="No dialogue here — jump to the next line"
           >
             Skip →
+          </button>
+        )}
+        {/* F4: "N due" indicator — count of cues with a due deck word in this
+            episode. Click jumps to the next such cue (mirror of `j`). Reuses the
+            monochrome .skip-pill chrome; placed top-right via inline offset so it
+            never clashes with the bottom-right Skip pill. */}
+        {dueCount > 0 && (
+          <button
+            className="skip-pill"
+            data-testid="due-indicator"
+            style={{ top: 14, bottom: "auto", right: 14 }}
+            onClick={seekNextDue}
+            title="Jump to the next cue with a due deck word"
+          >
+            {dueCount} due
           </button>
         )}
         {/* Wave 13.A: smart-resume is now automatic — no affordance UI. */}
