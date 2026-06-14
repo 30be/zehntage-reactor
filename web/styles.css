@@ -2418,6 +2418,61 @@ textarea:focus-visible {
 
 /* --- Review / Cram mode (#/review): focused single-cloze study screen --- */
 .review { max-width: 640px; margin: 0 auto; }
+
+/* G3: SRS due-forecast histogram — small monochrome bar chart of upcoming
+   review load; only the "due now" bar carries content-red. */
+.forecast {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+}
+.forecast-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.forecast-title { font-size: 13px; font-weight: 700; }
+.forecast-sub { font-size: 11px; }
+.forecast-empty { display: flex; align-items: baseline; gap: 8px; }
+.forecast-emptynote { font-size: 12px; }
+.forecast-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 56px;
+}
+.forecast-col {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.forecast-bar-wrap {
+  width: 100%;
+  height: 40px;
+  display: flex;
+  align-items: flex-end;
+}
+.forecast-bar {
+  width: 100%;
+  background: var(--fg);
+  border-radius: 2px 2px 0 0;
+  min-height: 0;
+  transition: height 0.15s ease;
+}
+.forecast-col.now .forecast-bar { background: var(--tok-unk); }
+.forecast-x {
+  font-size: 9px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.forecast-col.now .forecast-x { color: var(--tok-unk); font-weight: 700; }
+
 .review-head {
   display: flex;
   align-items: baseline;
