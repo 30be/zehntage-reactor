@@ -37,6 +37,28 @@ Newest first. Grouped by shipped wave or named work batch.
 **Read mode**
 - Word-lookup popup now shows the same "encounters: N" collapsible block as the player popup, with deep-links to each occurrence (player↔read parity).
 
+**Global subtitle search** (`#/search`) — G1
+- New sidebar route + Ctrl+K palette command ("search subtitles (jump to any line)").
+- Queries `GET /api/search?q=…`; results grouped by episode.
+- Keyboard nav: ↑/↓ move, Enter opens, Esc clears.
+- Click or Enter deep-links into `#/play/<id>@<start>`.
+
+**Known-words growth chart on Stats** — G2
+- `GET /api/stats/growth` returns cumulative words-added-per-day.
+- Rendered as a bar chart in `#/stats` ("Vocabulary growth" section).
+- Each bar = total deck size on a day cards were added; tooltip shows `+N` for that day.
+
+**SRS due-forecast histogram in Review mode** — G3
+- Bar chart at the top of `#/review` showing upcoming review load for the next 14 days.
+- Bucket 0 = due now/overdue (accented); buckets 1–14 = earliest-possible next-due by interval.
+- Pure logic in `web/forecast.ts` (`FORECAST_WINDOW = 14`); reads `GET /api/anki/words` progress data.
+
+**Immersion timer + daily minutes goal** — G4
+- Session HUD (`o`) now shows focused watch time this session vs the daily minutes goal.
+- Configure in Settings → "Daily immersion goal (minutes)" (default 30 min).
+- Persisted to `localStorage` under key `zr.goal.minutesPerDay` (see `web/timer.ts`).
+- Pure math helpers in `web/timer.ts`: `formatElapsed`, `minutesFraction`, `minutesGoalMet`.
+
 ### Fixed
 
 - Homograph identity fix: `vocabKey` is distinct from the bare display lemma so conjugated-form clicks don't create a wrong-keyed card.

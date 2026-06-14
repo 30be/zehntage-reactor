@@ -62,11 +62,24 @@ Dark theme:
 - Anki integration: local AnkiConnect when reachable, remote fallback otherwise;
   one-click cards with video frame and sentence audio
 
+**Search** (`#/search`)
+- Global cross-episode subtitle search: type to query every episode's Japanese
+  transcript via `GET /api/search`
+- Results grouped by episode; keyboard nav with ↑/↓ to move, Enter to open,
+  Esc to clear; matched substring highlighted
+- Click or Enter deep-links straight into the player at the cue
+- Also reachable from the sidebar nav and the Ctrl+K command palette
+  ("search subtitles (jump to any line)")
+
 **Review / Cram mode** (`#/review`)
 - Drills your currently-due Anki words as cloze prompts built from your own
   watched cues; type the answer, check, see correct/wrong, advance with Space/→
 - Optional Russian translation hint; "watch in context" deep-link per card
 - Falls back to interval order when `is:due` is unavailable
+- **SRS due-forecast histogram**: bar chart of upcoming review load at the top
+  of the Review page — bucket 0 = due now/overdue (emphasized), buckets 1–14
+  = estimated days until due (15-day window, `FORECAST_WINDOW = 14` in
+  `web/forecast.ts`)
 
 **UI**
 - Three themes (light/dark/system) switchable from the sidebar 日/月/◐ buttons
@@ -75,8 +88,14 @@ Dark theme:
   jump due, open read mode, condensed audio…)
 - Read mode: full transcripts with the same lookups, hotkeys, and encounter list
   (player↔read parity for the encounters block)
-- Stats: activity grid, watch time, mining pace, per-episode coverage
+- Stats: activity grid, watch time, mining pace, per-episode coverage;
+  **vocabulary growth chart** (`GET /api/stats/growth`) — cumulative words
+  mined per day as a bar chart; shows total deck size on each day cards were added
 - Home "Today" panel: words mined, cues watched, minutes, quizzes, daily streak
+- **Immersion timer**: session HUD (`o`) shows focused watch time this session vs
+  your daily minutes goal; configure the goal in Settings → "Daily immersion
+  goal (minutes)" (stored in `localStorage` as `zr.goal.minutesPerDay`,
+  default 30)
 
 ## Quickstart
 
@@ -150,6 +169,18 @@ Global scope:
 | Esc | close popups / panels |
 | Enter / Space | review: check / next card |
 
+Routes:
+
+- `#/` — library / home
+- `#/play/<id>` — player (deep-link: `#/play/<id>@<seconds>`)
+- `#/review` — review / cram mode
+- `#/read/<id>` — read mode
+- `#/search` — global subtitle search
+- `#/cards` — mined cards
+- `#/stats` — stats dashboard
+- `#/settings` — settings
+- `#/health` — debug / observability
+
 ## Architecture
 
 - Bun server (`src/server/index.ts`) + React SPA (`web/`), hash routing
@@ -159,7 +190,8 @@ Global scope:
 - Telemetry, backups, and snapshots: `~/.local/share/zehntage-reactor`
 - Pure logic lives in `src/lib/` and `web/*.ts`, bun-testable without DOM
 - Web layer decomposed into focused route files (`HomeRoute`, `LibraryRoute`,
-  `CardsRoute`, `StatsRoute`, `SettingsRoute`, `ReviewRoute`, `ReadRoute`)
+  `CardsRoute`, `StatsRoute`, `SettingsRoute`, `ReviewRoute`, `ReadRoute`,
+  `SearchRoute`)
   and player hooks (`useWordState`, `useLookup`, `useActiveCues`, `useAutoNext`,
   `useEcho`, `useHotkeys`, `useSession`, `useSubControls`, …)
 
