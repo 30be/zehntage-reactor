@@ -16,6 +16,7 @@ import {
   kanaRatio,
   looksJapanese,
   JAPANESE_KANA_MIN,
+  isFansubCreditCue,
   type SubTrack,
 } from "../src/lib/subs.ts";
 import { repairHole } from "../src/lib/whisper.ts";
@@ -622,5 +623,84 @@ describe("parseAss drops vector-drawing/sign lines", () => {
     const cues = parseAss(ass);
     expect(cues).toHaveLength(1);
     expect(cues[0]!.text).toBe("こんにちは");
+  });
+});
+
+describe("fansub credit / signature filtering", () => {
+  const stylesHeader =
+    "[Script Info]\n" +
+    "[V4+ Styles]\n" +
+    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n" +
+    "Style: JP,Source Han Sans,48,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,10,1\n" +
+    "Style: staff,simhei,50,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,2,0,0,10,1\n" +
+    "Style: Title,simhei,32,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1\n" +
+    "[Events]\n" +
+    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n";
+
+  test("parseAss drops a `staff`-style credit line, keeps real JP dialogue", () => {
+    const ass =
+      stylesHeader +
+      "Dialogue: 0,0:00:01.00,0:00:03.00,JP,,0,0,0,,わたし気になります\n" +
+      "Dialogue: 0,0:02:21.95,0:02:24.95,staff,NTP,0,0,0,,{\\an8\\pos(640,420)\\fnBella Donna}KamiGami\n" +
+      "Dialogue: 0,0:02:21.75,0:02:24.95,staff,NTP,0,0,0,,{\\an2\\pos(640,680)}@ 湮·Molly／小然·酸菜／喵儿·小冷／时末·竭力而为\n";
+    const cues = parseAss(ass);
+    expect(cues.map((c) => c.text)).toEqual(["わたし気になります"]);
+  });
+
+  test("parseAss drops a `Title`-style end-card credit but keeps a `Title`-style real sign", () => {
+    const ass =
+      stylesHeader +
+      "Dialogue: 0,0:24:05.06,0:24:09.76,Title,NTP,0,0,0,,{\\an1}诸神字幕组《冰果》BD到此完结 感谢各位的支持\\N更多中日双语作品 请关注www.kamigami.org!\n" +
+      "Dialogue: 0,0:10:00.00,0:10:03.00,Title,NTP,0,0,0,,{\\fs48\\pos(1042,580)}遠まわりする雛\n";
+    const cues = parseAss(ass);
+    expect(cues.map((c) => c.text)).toEqual(["遠まわりする雛"]);
+  });
+
+  describe("isFansubCreditCue", () => {
+    test("drops bare group logos", () => {
+      expect(isFansubCreditCue("KamiGami")).toBe(true);
+      expect(isFansubCreditCue("诸神字幕组")).toBe(true);
+      expect(isFansubCreditCue("XKsub")).toBe(true);
+    });
+
+    test("drops translator-handle lists (CN / romanized / RU, with or without @)", () => {
+      expect(isFansubCreditCue("@ 湮·Molly／小然·酸菜／喵儿·小冷／时末·竭力而为")).toBe(true);
+      expect(isFansubCreditCue("湮·Molly／小然·酸菜／喵儿·小冷／时末·竭力而为")).toBe(true);
+      expect(isFansubCreditCue("@ Yan Molly / Xiaoran Suancai / Miaoer Xiaoleng / Shimo Jielieryiwei")).toBe(true);
+      expect(isFansubCreditCue("@ Янь·Molly / Сяожань·Суаньцай / Мяоэр·Сяолен / Шиму·Цзелиэрвэй")).toBe(true);
+    });
+
+    test("drops bare URL cues and kamigami.org end-cards in any localization", () => {
+      expect(isFansubCreditCue("http://www.kamigami.org")).toBe(true);
+      expect(isFansubCreditCue("www.example.com")).toBe(true);
+      expect(
+        isFansubCreditCue(
+          "Группа субтитров Kamigami «Хёка» BD на этом завершена, спасибо всем за поддержку, больше китайско-японских двуязычных работ, пожалуйста, следите за www.kamigami.org!",
+        ),
+      ).toBe(true);
+      expect(
+        isFansubCreditCue("诸神字幕组《冰果》BD到此完结 感谢各位的支持 更多中日双语作品 请关注www.kamigami.org!"),
+      ).toBe(true);
+    });
+
+    test("KEEPS real dialogue (incl. names, numbers, a URL mention, and ♪ music)", () => {
+      expect(isFansubCreditCue("私の名前は千反田える")).toBe(false);
+      expect(isFansubCreditCue("彼は2時に来た")).toBe(false);
+      expect(isFansubCreditCue("http://example.com を見てください")).toBe(false);
+      expect(isFansubCreditCue("遠まわりする雛")).toBe(false);
+      expect(isFansubCreditCue("請輸入名字：學姐？")).toBe(false);
+      expect(isFansubCreditCue("♪ 笑顔がいちばん ♪")).toBe(false);
+      // a single middle-dot name is NOT a handle list
+      expect(isFansubCreditCue("アガサ·クリスティ")).toBe(false);
+    });
+  });
+
+  test("parseSrt drops credit cues from generated .ru.srt", () => {
+    const srt =
+      "1\n00:02:08,000 --> 00:02:11,000\nKamiGami\n\n" +
+      "2\n00:02:07,800 --> 00:02:11,000\n湮·Molly／小然·酸菜／喵儿·小冷／时末·竭力而为\n\n" +
+      "3\n00:03:00,000 --> 00:03:02,000\nЯ очень хочу знать\n";
+    const cues = parseSrt(srt);
+    expect(cues.map((c) => c.text)).toEqual(["Я очень хочу знать"]);
   });
 });

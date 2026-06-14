@@ -106,6 +106,83 @@ export function formatSrtTimestamp(t: number): string {
   return `${p(h, 2)}:${p(m, 2)}:${p(s, 2)},${p(rem, 3)}`;
 }
 
+// --- fansub credit / signature filtering -----------------------------------
+
+/**
+ * ASS Style names that are PURE fansub credits / signatures (the whole style is
+ * a watermark — every Dialogue line under it is a credit, never real dialogue).
+ * Matched case-insensitively as whole tokens against the Style name.
+ *
+ * Hyouka (Kamigami BD) uses `staff` for the "KamiGami" logo + translator-handle
+ * lines. We DELIBERATELY do NOT list `Title` here: in these files `Title` carries
+ * real on-screen sign translations (episode arc titles like 「绕远的偶人」) AND the
+ * single end-card credit (诸神字幕组…kamigami.org). The end-card is caught by the
+ * content filter (isFansubCreditCue) instead, so the real signs survive.
+ */
+const CREDIT_STYLE_RE =
+  /^(?:staff|credits?|logo|watermark|group|fansub|fx[-_]?credit|credit[-_].*|.*[-_]credits?)$/i;
+
+function isCreditStyle(style: string): boolean {
+  return CREDIT_STYLE_RE.test(style.trim());
+}
+
+/**
+ * Content-based detector for fansub SIGNATURE cues that must never reach the
+ * viewer. Conservative by design: a cue is only a credit if it is DOMINATED by
+ * the signature (essentially the whole cue is one). A normal dialogue line that
+ * merely mentions a name, number, or URL is NOT dropped.
+ *
+ * Catches, on the already-stripped cue text (no ASS override tags):
+ *   - the bare group logo, e.g. "KamiGami", "诸神字幕组", "XKsub", "Kamigami"
+ *   - translator-handle lists: `@`-prefixed or `／`/`·`-separated handle chains
+ *     (incl. the romanized/RU variants leaked into the generated .srt)
+ *   - a cue that is essentially just a URL (http… / www.…)
+ *   - the "字幕组 … kamigami.org" end-card credit
+ *   - "Original Script / Translation / Timing …" style credit headers
+ *
+ * KEEPS: real dialogue, on-screen signs, and ♪ music cues (benign per QA).
+ */
+export function isFansubCreditCue(text: string): boolean {
+  const t = text.replace(/\s+/g, " ").trim();
+  if (!t) return false;
+
+  // Bare group logo: the entire cue is just a known group name.
+  if (/^(?:kamigami|诸神字幕组|诸神|xksub|x-?ks|kamigami\.org)$/i.test(t)) return true;
+
+  // Translator-handle list: starts with "@" OR is built from "·"/"／"-joined
+  // handles. Require it to be (essentially) the whole cue — at least two
+  // segments — so an ordinary line containing a middle dot isn't dropped.
+  const handleBody = t.replace(/^@\s*/, "");
+  const looksLikeHandleList =
+    /[／/·]/.test(handleBody) &&
+    handleBody.split(/[／/·]/).filter((s) => s.trim().length > 0).length >= 2;
+  if (t.startsWith("@") && looksLikeHandleList) return true;
+  // Even without "@": a pure handle chain like "湮·Molly／小然·酸菜／…" (≥3 segments,
+  // no sentence-ending punctuation) is a credit.
+  if (
+    looksLikeHandleList &&
+    handleBody.split(/[／/·]/).filter((s) => s.trim().length > 0).length >= 3 &&
+    !/[。.!?！？…]/.test(t)
+  ) {
+    return true;
+  }
+
+  // Cue that is essentially just a URL.
+  if (/^(?:https?:\/\/|www\.)\S+$/i.test(t)) return true;
+
+  // Fansub-group end-card: any cue that cites the group's watermark domain
+  // (kamigami.org) is a credit, in every localization (CN/RU/EN end-cards all
+  // carry it). The domain never appears in legitimate Hyouka dialogue.
+  if (/kamigami\.org/i.test(t)) return true;
+  // Generic 字幕组 / fansub credit sentence that carries a URL.
+  if (/字幕组/.test(t) && /(kamigami|www\.|https?:\/\/)/i.test(t)) return true;
+  if (/^(?:original\s+(?:script|translation|timing)|translated\s+by|timing\s+by|encode(?:d)?\s+by)\b/i.test(t)) {
+    return true;
+  }
+
+  return false;
+}
+
 // --- parsers ---
 
 function stripHtmlishTags(text: string): string {
@@ -127,7 +204,7 @@ export function parseSrt(text: string): Cue[] {
     if (Number.isNaN(start) || Number.isNaN(end)) continue;
     const body = lines.slice(i + 1).join("\n");
     const cleaned = stripHtmlishTags(body);
-    if (cleaned) cues.push({ start, end, text: cleaned });
+    if (cleaned && !isFansubCreditCue(cleaned)) cues.push({ start, end, text: cleaned });
   }
   return cues.sort((a, b) => a.start - b.start);
 }
@@ -222,6 +299,9 @@ export function parseAss(text: string): Cue[] {
       const end = parseTimestamp(get("End"));
       if (Number.isNaN(start) || Number.isNaN(end)) continue;
       const style = get("Style");
+      // Drop credit/signature styles wholesale (e.g. `staff` = KamiGami logo +
+      // translator handles). Real dialogue and sign styles are unaffected.
+      if (isCreditStyle(style)) continue;
       // Text is everything from textIdx on (it may itself contain commas).
       const raw = parts.slice(textIdx).join(",");
       // Drop vector-drawing dialogue (\p1..\p0 blocks): signs/typesetting, not
@@ -242,7 +322,9 @@ export function parseAss(text: string): Cue[] {
     }
   }
 
-  const kept = selectJapaneseDialogues(dialogues);
+  const kept = selectJapaneseDialogues(dialogues).filter(
+    (d) => !isFansubCreditCue(d.text),
+  );
   const cues = kept.map((d) => ({ start: d.start, end: d.end, text: d.text }));
   cues.sort((a, b) => a.start - b.start);
   return cues;
