@@ -10,14 +10,24 @@ import { cleanCues, cuesToSrt, findCoverageHoles, parseTimestamp } from "./subs.
 
 const THREADS = 12;
 
-/** Atomic write: stage to `<path>.tmp-<pid>`, then rename over the target.
+/** Per-process monotonic counter — combined with pid it makes every atomicWrite
+ * call site produce a unique temp filename even when multiple calls race on the
+ * same target path within the same process (e.g. two concurrent translate-batch
+ * writes). Date.now/Math.random are avoided because they may be unavailable or
+ * unsafe in certain runtime contexts. */
+let _atomicSeq = 0;
+function nextAtomicSeq(): number { return ++_atomicSeq; }
+
+/** Atomic write: stage to `<path>.tmp-<pid>-<seq>`, then rename over the target.
  * A crash mid-write can leave the temp behind but never a partial/zero-byte
- * sidecar. Uses process.pid (Date.now/Math.random unavailable in some contexts). */
+ * sidecar. The pid+seq suffix is unique per call even under intra-process
+ * concurrency, so two concurrent atomicWrite calls to the same path cannot
+ * collide on the temp file. */
 export async function atomicWrite(
   path: string,
   data: string | Uint8Array,
 ): Promise<void> {
-  const tmp = `${path}.tmp-${process.pid}`;
+  const tmp = `${path}.tmp-${process.pid}-${nextAtomicSeq()}`;
   try {
     await Bun.write(tmp, data);
     await rename(tmp, path);

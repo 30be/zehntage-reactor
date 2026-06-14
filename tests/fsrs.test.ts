@@ -274,3 +274,47 @@ describe("user's real deck params (decay=0.1, w[20]=0.1)", () => {
     approx(res.stability, 1.6576);
   });
 });
+
+describe("decay validation — bad inputs throw, valid inputs work", () => {
+  const st: CardState = { stability: 10, difficulty: 5 };
+
+  const badDecays: Array<{ label: string; decay: number }> = [
+    { label: "omitted (undefined cast)", decay: undefined as unknown as number },
+    { label: "zero", decay: 0 },
+    { label: "negative", decay: -0.1 },
+    { label: "NaN", decay: NaN },
+    { label: "Infinity", decay: Infinity },
+    { label: "-Infinity", decay: -Infinity },
+  ];
+
+  for (const { label, decay } of badDecays) {
+    test(`schedule throws on decay=${label}`, () => {
+      expect(() =>
+        schedule(st, 3, 10, { ...PARAMS, decay }),
+      ).toThrow(RangeError);
+    });
+
+    test(`nextInterval throws on decay=${label}`, () => {
+      expect(() => nextInterval(10, 0.9, decay)).toThrow(RangeError);
+    });
+
+    test(`retrievability throws on decay=${label}`, () => {
+      expect(() => retrievability(10, 10, decay)).toThrow(RangeError);
+    });
+  }
+
+  test("schedule succeeds with valid decay=0.1", () => {
+    const res = schedule(st, 3, 10, { ...PARAMS, decay: 0.1 });
+    expect(res.intervalDays).toBeGreaterThanOrEqual(1);
+    expect(Number.isFinite(res.stability)).toBe(true);
+  });
+
+  test("nextInterval succeeds with valid decay=0.1", () => {
+    const i = nextInterval(50, 0.9, 0.1);
+    approx(i, 50, 1e-9);
+  });
+
+  test("retrievability succeeds with valid decay=0.1", () => {
+    approx(retrievability(10, 10, 0.1), 0.9, 1e-12);
+  });
+});

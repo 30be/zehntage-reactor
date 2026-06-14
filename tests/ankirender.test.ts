@@ -88,6 +88,28 @@ describe("readProtoFields", () => {
   test("throws on truncated varint", () => {
     expect(() => readProtoFields(new Uint8Array([0x08, 0x80]))).toThrow();
   });
+
+  test("throws on unterminated varint mid-message (after a valid field)", () => {
+    // field 1 = "hi", then tag for field 2 varint, then an unterminated varint.
+    const buf = bytes(encString(1, "hi"), tag(2, WireType.Varint), [0x80, 0x80]);
+    expect(() => readProtoFields(buf)).toThrow(/truncated varint/);
+  });
+
+  test("throws on truncated length-delimited field (claims more than remains)", () => {
+    // field 1, len-delimited, declares 100 bytes but only 3 follow.
+    const buf = bytes([...tag(1, WireType.LengthDelimited), ...encVarint(100)], [1, 2, 3]);
+    expect(() => readProtoFields(buf)).toThrow(/truncated length-delimited/);
+  });
+
+  test("throws on truncated fixed32", () => {
+    const buf = bytes([...tag(5, WireType.Fixed32)], [0x00, 0x01]); // only 2 of 4 bytes
+    expect(() => readProtoFields(buf)).toThrow(/truncated fixed32/);
+  });
+
+  test("throws on truncated fixed64", () => {
+    const buf = bytes([...tag(7, WireType.Fixed64)], [0x00, 0x01, 0x02]); // 3 of 8 bytes
+    expect(() => readProtoFields(buf)).toThrow(/truncated fixed64/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -131,6 +153,22 @@ describe("config decoders", () => {
     expect(dc.revPerDay).toBe(9999);
     expect(dc.maximumReviewInterval).toBe(36500);
     expect(dc.desiredRetention).toBeCloseTo(0.9, 5);
+  });
+
+  test("decodeDeckConfig throws on a wrong-length weight array", () => {
+    // f6 present but only 20 weights (one short of the required 21).
+    const bad20 = Array.from({ length: 20 }, (_, i) => i + 0.5);
+    const blob = bytes(
+      encPackedFloats(1, [1, 10]),
+      encPackedFloats(6, bad20),
+      encVarintField(9, 1000),
+    );
+    expect(() => decodeDeckConfig(blob)).toThrow(/expected 21 FSRS weights, got 20/);
+  });
+
+  test("decodeDeckConfig throws when no weight array is present at all", () => {
+    const blob = bytes(encVarintField(9, 1000), encVarintField(10, 9999));
+    expect(() => decodeDeckConfig(blob)).toThrow(/expected 21 FSRS weights, got 0/);
   });
 });
 

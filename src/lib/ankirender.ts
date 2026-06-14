@@ -58,16 +58,22 @@ export function readProtoFields(buf: Uint8Array): Map<number, ProtoValue[]> {
         push(field, readVarint());
         break;
       case WireType.Fixed64:
+        if (p + 8 > buf.length)
+          throw new Error(`protobuf: truncated fixed64 (field ${field})`);
         push(field, buf.slice(p, p + 8));
         p += 8;
         break;
       case WireType.LengthDelimited: {
         const len = Number(readVarint());
+        if (len < 0 || p + len > buf.length)
+          throw new Error(`protobuf: truncated length-delimited field ${field} (need ${len}, have ${buf.length - p})`);
         push(field, buf.slice(p, p + len));
         p += len;
         break;
       }
       case WireType.Fixed32:
+        if (p + 4 > buf.length)
+          throw new Error(`protobuf: truncated fixed32 (field ${field})`);
         push(field, buf.slice(p, p + 4));
         p += 4;
         break;
@@ -174,6 +180,12 @@ export function decodeDeckConfig(configBlob: Uint8Array): DeckConfigDecoded {
       : weightHistory[5]?.length
         ? weightHistory[5]
         : (weightHistory[3] ?? []);
+  // FSRS-5/6 schedules on exactly 21 weights; a malformed/truncated array would
+  // silently corrupt write-back, so reject it here before any caller schedules.
+  if (weights.length !== 21)
+    throw new Error(
+      `deck_config: expected 21 FSRS weights, got ${weights.length}`,
+    );
   return {
     weights,
     weightHistory,

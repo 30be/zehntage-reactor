@@ -318,7 +318,26 @@ interface AcReviewCardInfo {
   cardId: number;
   question: string;
   answer: string;
+  queue: number;
+  due: number;
+  type: number;
   fields: Record<string, { value: string; order: number }>;
+}
+
+/**
+ * Scheduler-priority rank for a card's queue, mirroring ankidb.ts `selectDue`:
+ * learning/relearning (queue 1 and 3) first, then review (queue 2), then new
+ * (queue 0). Anything else sorts last. Within a rank, callers sort by ascending
+ * `due` (most-overdue first). NOTE: `due`'s units differ per queue (epoch-secs
+ * for queue 1, day-number for 2/3, position for 0) — but since we only ever
+ * compare `due` between cards of the SAME queue rank, the mixed semantics are
+ * harmless (exactly as ankidb.ts sorts each group independently).
+ */
+function queueRank(queue: number): number {
+  if (queue === 1 || queue === 3) return 0; // (re)learning
+  if (queue === 2) return 1; // review
+  if (queue === 0) return 2; // new
+  return 3; // suspended/buried/other — shouldn't appear in is:due
 }
 
 /**
@@ -344,9 +363,19 @@ export async function reviewQueue(
     const ids = await acRaw<number[]>("findCards", { query });
     const due = ids.length;
     if (due === 0) return { available: true, due: 0, cards: [] };
-    const wanted = ids.slice(0, limit);
-    const infos = await acRaw<AcReviewCardInfo[]>("cardsInfo", { cards: wanted });
-    const cards: ReviewCard[] = infos.map((c) => {
+    // findCards returns ids in DB/nid order, NOT scheduler/due order — so a
+    // naive slice would surface an arbitrary subset in arbitrary order, missing
+    // the most-overdue cards. Fetch cardsInfo for ALL due ids, sort the way
+    // Anki's scheduler roughly would (mirroring ankidb.ts selectDue), THEN
+    // slice. (Bounded by the deck's due set; reused below — no double-fetch.)
+    const infos = await acRaw<AcReviewCardInfo[]>("cardsInfo", { cards: ids });
+    infos.sort((a, b) => {
+      const ra = queueRank(a.queue);
+      const rb = queueRank(b.queue);
+      if (ra !== rb) return ra - rb;
+      return a.due - b.due; // ascending due within a queue group (most-overdue first)
+    });
+    const cards: ReviewCard[] = infos.slice(0, limit).map((c) => {
       const frontRaw =
         c.fields[fm.front]?.value ??
         Object.values(c.fields).sort((a, b) => a.order - b.order)[0]?.value ??

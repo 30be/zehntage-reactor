@@ -20,7 +20,12 @@
 export interface FsrsParams {
   /** 21-element FSRS-6 weight vector w[0..20]. */
   w: number[];
-  /** DECAY magnitude (positive). Curve exponent = -decay. Default 0.1542 → magnitude. */
+  /**
+   * DECAY magnitude (positive, required). Curve exponent = -decay.
+   * Must be a finite number > 0; a missing or zero decay is a programming error
+   * (the value must come from the deck config — e.g. this user's deck uses 0.1).
+   * Do NOT pass 0 or omit this field; `schedule` will throw.
+   */
   decay: number;
   /** Desired retention r, e.g. 0.9. */
   desiredRetention: number;
@@ -62,6 +67,19 @@ function clamp(x: number, lo: number, hi: number): number {
 }
 
 /**
+ * Guard that decay is a valid positive finite number. A missing or zero decay
+ * is a programming error (it must come from the deck config, never defaulted).
+ */
+function assertDecay(decay: number): void {
+  if (!Number.isFinite(decay) || decay <= 0) {
+    throw new RangeError(
+      `FSRS: decay must be a finite number > 0, got ${decay}. ` +
+      `Supply the deck's stored decay (e.g. 0.1) — do not omit or zero it.`,
+    );
+  }
+}
+
+/**
  * Indexed weight access. Under `noUncheckedIndexedAccess` `w[i]` is typed
  * `number | undefined`; a missing weight is a programmer error (the vector
  * must be 21-long), so we surface it loudly rather than silently using NaN.
@@ -100,6 +118,7 @@ export function retrievability(
   stability: number,
   decay: number,
 ): number {
+  assertDecay(decay);
   const exponent = -decay;
   const factor = factorFromDecay(decay);
   return Math.pow(1 + factor * (elapsedDays / stability), exponent);
@@ -123,6 +142,7 @@ export function nextInterval(
   desiredRetention: number,
   decay: number,
 ): number {
+  assertDecay(decay);
   const exponent = -decay;
   const factor = factorFromDecay(decay);
   return (stability / factor) * (Math.pow(desiredRetention, 1 / exponent) - 1);
@@ -254,6 +274,7 @@ export function schedule(
   params: FsrsParams,
 ): ScheduleResult {
   const { w, decay, desiredRetention } = params;
+  assertDecay(decay);
   const maxInterval = params.maxInterval ?? DEFAULT_MAX_INTERVAL;
 
   let stability: number;
@@ -275,6 +296,10 @@ export function schedule(
       stability = lapseStability(w, d, s, retr);
     } else if (elapsedDays <= 0) {
       // Same-day success: short-term path.
+      // TODO(write-path): gate short-term path on learning/relearning phase —
+      // spec §2 scopes S'_ss to intraday learning/relearning steps only, not
+      // review-state cards. Schedule currently lacks phase info; fix in the
+      // write-back wave once the phase is threaded through from the caller.
       stability = shortTermStability(w, s, grade);
     } else {
       // Long-term recall.
