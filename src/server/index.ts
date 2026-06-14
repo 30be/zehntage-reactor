@@ -35,7 +35,7 @@ import {
   type Cue,
   type SubTrack,
 } from "../lib/subs.ts";
-import { whisperQueue, type WhisperEvent } from "../lib/whisper.ts";
+import { whisperQueue, atomicWrite, type WhisperEvent } from "../lib/whisper.ts";
 import {
   lookupWord,
   translateCues,
@@ -210,6 +210,14 @@ async function cuesForTrack(entry: LibraryEntry, trackId: string): Promise<Cue[]
     return cues;
   }
   throw new Error(`bad track id: ${trackId}`);
+}
+
+// BCP-47-ish language tag (e.g. "ja", "jpn", "ru", "ja-JP"). `lang`/`targetLang`
+// flow into sidecarPath() as a filename component; validate before use so a value
+// like "../../evil" can't escape the subs/ directory (path injection).
+const LANG_RE = /^[a-z]{2,3}(-[a-z]{2,4})?$/i;
+function isValidLang(lang: string): boolean {
+  return LANG_RE.test(lang);
 }
 
 /** Output path for AUTO-GENERATED sidecars: <videodir>/subs/<base>.<lang>.srt.
@@ -454,7 +462,7 @@ async function pumpTranslateBatch(library: Library): Promise<void> {
           throw e;
         }
         void logEvent("perf.gemini", { op: "translate", ms: Date.now() - _trT0, mediaId: item.entryId, cues: cues.length });
-        await Bun.write(sidecarPath(entry, item.targetLang), cuesToSrt(translated));
+        await atomicWrite(sidecarPath(entry, item.targetLang), cuesToSrt(translated));
         await library.refresh();
         item.status = "done";
         void logEvent("translate_done", { mediaId: item.entryId, lang: item.targetLang });
@@ -753,7 +761,7 @@ async function chainGenerateAll(
             const corrected = await correctNames(cues, glossary);
             const changed = corrected.some((c, i) => c.text !== cues[i]?.text);
             if (changed) {
-              await Bun.write(jaPath, cuesToSrt(corrected));
+              await atomicWrite(jaPath, cuesToSrt(corrected));
               await library.refresh();
               void logEvent("correct_names", { mediaId: fresh.id, cues: cues.length });
             }
@@ -1004,7 +1012,7 @@ async function cleanupHallucinatedSidecars(library: Library): Promise<void> {
         const cues = parseSrt(await Bun.file(s.path).text());
         const collapsed = collapseRepeatedCues(cues);
         if (collapsed.length < cues.length) {
-          await Bun.write(s.path, cuesToSrt(collapsed));
+          await atomicWrite(s.path, cuesToSrt(collapsed));
           fixed++;
           console.log(
             `[subs-cleanup] ${s.path}: ${cues.length} → ${collapsed.length} cues`,
@@ -1262,6 +1270,9 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         if (!entry) return err("not found", 404);
         const body = (await req.json().catch(() => ({}))) as { lang?: string };
         const lang = body.lang ?? "ja";
+        // `lang` becomes a filename component in sidecarPath — reject anything
+        // that isn't a plain BCP-47 tag to prevent path injection.
+        if (!isValidLang(lang)) return err("invalid lang", 400);
         // Dedup: an active/queued job for the same file+lang is returned as-is
         // instead of enqueuing a duplicate 20-minute transcription.
         const existing = whisperQueue.activeFor(entry.absPath, lang);
@@ -1301,6 +1312,9 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       if (req.method === "GET" && whisperEvents) {
         const job = whisperQueue.get(whisperEvents[1]!);
         if (!job) return err("job not found", 404);
+        // Hoisted so cancel() (client disconnect) can detach the listener and
+        // not leak a closure holding `controller` in job.listeners (P5).
+        let streamListener: ((e: WhisperEvent) => void) | null = null;
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
             const enc = new TextEncoder();
@@ -1327,7 +1341,13 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
                 job.listeners.delete(listener);
               }
             };
+            streamListener = listener;
             job.listeners.add(listener);
+          },
+          cancel() {
+            // Client disconnected — remove our listener so it doesn't linger in
+            // job.listeners for the lifetime of a long whisper job.
+            if (streamListener) job.listeners.delete(streamListener);
           },
         });
         return new Response(stream, {
@@ -1470,6 +1490,9 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         if (!entry) return err("not found", 404);
         const body = (await req.json().catch(() => ({}))) as { targetLang?: string };
         const targetLang = body.targetLang ?? "ru";
+        // `targetLang` becomes a filename component in sidecarPath — reject
+        // anything that isn't a plain BCP-47 tag to prevent path injection.
+        if (!isValidLang(targetLang)) return err("invalid targetLang", 400);
         // Safety net: refuse to overwrite an existing GENERATED sidecar for the
         // target language. External/embedded tracks (often out of sync) don't
         // block translation — a synced generated track is preferred.
@@ -1482,7 +1505,7 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         const cues = await cuesForTrack(entry, decodeURIComponent(translate[2]!));
         const translated = await translateCues(cues, targetLang);
         const out = sidecarPath(entry, targetLang);
-        await Bun.write(out, cuesToSrt(translated));
+        await atomicWrite(out, cuesToSrt(translated));
         await library.refresh();
         return json({
           ok: true,
@@ -1593,6 +1616,11 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         const raw = (url.searchParams.get("path") ?? "").trim() || currentRoot;
         if (!raw.startsWith("/")) return err("path must be absolute", 400);
         const p = resolve(raw); // normalize ".." segments / trailing slashes
+        // Restrict browsing to the current media root subtree so a rogue request
+        // can't enumerate arbitrary filesystem directories.
+        if (p !== currentRoot && !p.startsWith(currentRoot + "/")) {
+          return err("forbidden", 403);
+        }
         const st = await stat(p).catch(() => null);
         if (!st?.isDirectory()) return err(`not a directory: ${p}`, 400);
         const entries = await readdir(p, { withFileTypes: true }).catch(() => []);
@@ -2144,6 +2172,17 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         };
         if (!body.mediaId || !body.url || !body.name)
           return err("mediaId, url and name required", 400);
+        // SSRF guard: the server fetches body.url, so restrict it to jimaku.cc
+        // (its real download host) — never an arbitrary attacker-chosen URL.
+        let dlHost: string;
+        try {
+          dlHost = new URL(body.url).hostname;
+        } catch {
+          return err("invalid url", 400);
+        }
+        if (dlHost !== "jimaku.cc" && !dlHost.endsWith(".jimaku.cc")) {
+          return err("forbidden url host", 403);
+        }
         const entry = library.get(body.mediaId);
         if (!entry) return err("not found", 404);
         const ext = extname(body.name).toLowerCase() || ".srt";
@@ -2245,7 +2284,13 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
 
       // --- other static assets in public/ ---
       if (req.method === "GET" && !path.startsWith("/api/")) {
-        const file = Bun.file(join(PUBLIC_DIR, path.slice(1)));
+        const filePath = join(PUBLIC_DIR, path.slice(1));
+        // join() does not canonicalize, so a "../" in the URL could escape
+        // PUBLIC_DIR — refuse anything resolving outside the public root.
+        if (filePath !== PUBLIC_DIR && !filePath.startsWith(PUBLIC_DIR + "/")) {
+          return err("not found", 404);
+        }
+        const file = Bun.file(filePath);
         if (await file.exists()) {
           // App bundle must never be served stale; dict/freq keep defaults.
           const noCache = path === "/app.js" || path === "/app.css";

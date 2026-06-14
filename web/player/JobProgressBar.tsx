@@ -21,6 +21,10 @@ export function JobProgressBar({
   videoDuration: number;
   onCancelWhisper: () => void;
 }) {
+  const whisperPct =
+    videoDuration > 0
+      ? Math.min(100, (whisperLastEnd / videoDuration) * 100)
+      : 0;
   return (
     <div className="controls">
       {translateBusy && <span className="spinner-line">Translating…</span>}
@@ -33,16 +37,20 @@ export function JobProgressBar({
               {videoDuration > 0 ? ` / ${fmtTime(videoDuration)}` : ""}
               {whisperStatus && whisperStatus !== "running" ? ` (${whisperStatus})` : ""}
             </span>
-            <div className="progress-track">
+            <div
+              className="progress-track"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={videoDuration > 0 ? Math.round(whisperPct) : undefined}
+              aria-valuetext={
+                videoDuration > 0 ? `${Math.round(whisperPct)}%` : undefined
+              }
+              aria-label="Whisper transcription progress"
+            >
               <div
                 className="progress-fill"
-                style={{
-                  width: `${
-                    videoDuration > 0
-                      ? Math.min(100, (whisperLastEnd / videoDuration) * 100)
-                      : 0
-                  }%`,
-                }}
+                style={{ width: `${whisperPct}%` }}
               />
             </div>
           </div>

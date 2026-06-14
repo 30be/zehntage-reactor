@@ -31,8 +31,8 @@ Dark theme:
   cleanup (repeated-cue runs on music/silence collapsed)
 - Gemini proper-noun correction pass on whisper output — fixes misheard character
   and place names using the per-series glossary
-- Gemini Russian translation, generated and stored as a sidecar; on-demand
-  "re-translate RU" per episode (Settings or command palette)
+- Gemini translation into your configured known language, generated and stored as
+  a sidecar; on-demand "re-translate" per episode (Settings or command palette)
 
 **Player**
 - Gemini word and sentence lookups: hover/click a word for reading + notes,
@@ -106,7 +106,7 @@ bun run src/cli.ts /path/to/media/dir   # serves http://localhost:8417
 
 Keys go in `~/.env` (names only — never commit values):
 
-- `GEMINI_API_KEY` — word/sentence lookups, Russian translation, proper-noun correction
+- `GEMINI_API_KEY` — word/sentence lookups, translation (into `knownLang`), proper-noun correction
 - `JIMAKU_API_KEY` — jimaku.cc human subtitle fetch
 - `ZEHNTAGE_ANKI_URL` / `ZEHNTAGE_ANKI_KEY` — remote Anki fallback
 - `ANKICONNECT_URL` — optional, defaults to local AnkiConnect

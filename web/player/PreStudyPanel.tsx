@@ -2,6 +2,7 @@
 // i+1 / muddy badges and sequential bulk add. Pure presentation — scanning
 // and the add loop live in Player.tsx. Extracted from Player.tsx.
 
+import { useEffect, useRef } from "react";
 import { freqTier } from "../freq.ts";
 
 // One unknown word in the pre-study (`w`) panel.
@@ -51,8 +52,41 @@ export function PreStudyPanel({
   onClose: () => void;
 }) {
   const todo = preStudy.items.filter((i) => i.checked && !i.added);
+  const overlayRef = useRef<HTMLDivElement>(null);
+
+  // autofocus the first control when the panel opens
+  useEffect(() => {
+    const first = overlayRef.current?.querySelector<HTMLElement>(
+      'button,input,[tabindex]:not([tabindex="-1"])'
+    );
+    first?.focus();
+  }, []);
+
   return (
-    <div className="lookup prestudy">
+    <div
+      ref={overlayRef}
+      className="lookup prestudy"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Pre-study word list"
+      onKeyDown={(e) => {
+        if (e.key === "Tab") {
+          const focusable = overlayRef.current
+            ? Array.from(overlayRef.current.querySelectorAll<HTMLElement>(
+                'button,input:not([disabled]),[tabindex]:not([tabindex="-1"])'
+              ))
+            : [];
+          if (focusable.length === 0) { e.preventDefault(); return; }
+          const first = focusable[0]!;
+          const last = focusable[focusable.length - 1]!;
+          if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault(); last.focus();
+          } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault(); first.focus();
+          }
+        }
+      }}
+    >
       <div className="prestudy-head">
         <span className="word">pre-study</span>
         <span

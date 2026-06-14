@@ -3,7 +3,7 @@
 ## Overview
 
 zehntage-reactor is a single-binary Bun server + React SPA for immersion-based
-Japanese study. The server (port 8888 by default) streams video, manages sidecar
+Japanese study. The server (port 8417 by default) streams video, manages sidecar
 subtitles, proxies Anki, and runs Whisper transcription. The SPA is served as a
 static bundle from `public/`.
 
@@ -29,7 +29,7 @@ static bundle from `public/`.
 | `/api/state` GET/POST | zr.* localStorage sync |
 | `/api/settings` GET/POST | settings.json CRUD |
 | `/api/events` POST | telemetry ingest |
-| `/api/stats/*` | summary, episodes, comprehension, today |
+| `/api/stats/*` | summary, episodes, episodes.csv, overview, growth, comprehension, today |
 | `/api/index/*` | token index: encounters, comprehensibility, due, showfreq |
 | `/api/root` GET/POST | media root hot-swap |
 | `/api/jimaku/*` | subtitle search/download |
@@ -48,7 +48,7 @@ lines are parsed and streamed as SSE `WhisperEvent`s. Post-processing:
 - Coverage-hole detection + `-mc 0` re-pass (up to one repair loop).
 - Warns via SSE on non-fatal problems.
 
-Model path: `~/models/ggml-medium.bin`. Threads: 12.
+Model path: `$WHISPER_MODEL` → `~/models/ggml-large-v3.bin` (primary) → `~/models/ggml-medium.bin` (fallback). Threads: 12.
 
 ### Anki layer (`src/lib/anki.ts`)
 
@@ -106,7 +106,7 @@ Last-write-wins per key. Shape:
 ### App shell (`web/App.tsx`)
 
 Hash-based router. Routes: `library | player | read | settings | stats | cards |
-home | health`. Holds global state: known words, blacklist, Anki word cache,
+home | health | review | search`. Holds global state: known words, blacklist, Anki word cache,
 coverage, frequency list. Starts `sync.ts` on mount.
 
 ### Player (`web/Player.tsx` + `web/player/`)
@@ -136,7 +136,6 @@ Split into modules:
 - `web/telemetry.ts` — client-side event helpers + `performance.mark`.
 - `web/tokenizer.ts` — kuromoji wrapper; `kataToHira`, token cache.
 - `web/coverage.ts` — known-word coverage computation.
-- `web/curriculum.ts` — "study next" episode planner.
 - `web/iplusone.ts` — i+1 cue finder (one unknown word).
 - `web/heat.ts` — difficulty heat map data.
 - `web/freq.ts` — 30k Leeds frequency list loader.

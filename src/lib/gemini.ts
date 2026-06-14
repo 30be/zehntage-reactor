@@ -76,7 +76,7 @@ function isRetryableStatus(status: number): boolean {
  * a `retryDelay` (e.g. "12s") in the Gemini error body. Returns undefined if no
  * usable hint. Capped by the caller at MAX_RETRY_DELAY_MS.
  */
-function parseRetryAfter(headerVal: string | null, body: string): number | undefined {
+export function parseRetryAfter(headerVal: string | null, body: string): number | undefined {
   if (headerVal) {
     const secs = Number(headerVal);
     if (Number.isFinite(secs)) return Math.max(0, secs * 1000);

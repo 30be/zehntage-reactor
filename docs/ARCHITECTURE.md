@@ -49,8 +49,10 @@ serves the `public/` static bundle for non-`/api/` GETs (`/app.js` and
   `POST /api/explain`, `POST /api/ask`, `POST /api/lookup`.
 - **anki**: `GET /api/anki/words`, `GET /api/anki/cards`, `GET <ankiMedia>`,
   `POST /api/anki/add`, `POST /api/anki/delete`.
-- **stats**: `/api/stats/summary`, `/episodes`, `/episodes.csv`, `/overview`,
-  `/growth`, `/comprehension`, `/today` (all GET).
+- **stats**: `/api/stats/summary`, `/api/stats/episodes`, `/api/stats/episodes.csv`,
+  `/api/stats/overview`, `/api/stats/growth`, `/api/stats/comprehension`,
+  `/api/stats/today` (all GET).
+- **search**: `GET /api/search` (global transcript search).
 - **word / index (mining)**: `GET /api/word/history`,
   `GET /api/index/encounters`, `GET|POST /api/index/comprehensibility`,
   `POST /api/index/due`, `GET /api/index/showfreq`.
@@ -85,10 +87,10 @@ serves the `public/` static bundle for non-`/api/` GETs (`/app.js` and
   server. In-memory mtime-keyed cache; `INDEX_VERSION` ("v2-homograph") folds
   into the cache key so a key-shape change invalidates stale entries across a
   hot reload.
-- **coverage.ts** / **mining.ts** — mining queries over the per-entry indexes.
+- **mining.ts** — mining queries over the per-entry indexes.
   `showFrequency()` sums lemma occurrences across entries (backs
   `/api/index/showfreq`); the client-side i+1/prestudy ranking lives in
-  `web/prestudy.ts`.
+  `web/prestudy.ts`. (Coverage computation is client-side only: `web/coverage.ts`.)
 - **anki.ts** — proxy to the anki-mcp `/zehntage/*` endpoints, with a preferred
   local AnkiConnect path. `ANKI_FAKE=1` uses an in-memory card map. `tags`
   includes `zehntage` to mark mined cards; `image` accepts data URI / URL /
@@ -110,7 +112,8 @@ serves the `public/` static bundle for non-`/api/` GETs (`/app.js` and
   **state.ts** (localStorage sync persistence), **settings.ts**,
   **datatransfer.ts** (portable JSON export/import bundle), **glossary.ts**
   (Hyouka proper-noun glossary + per-folder `names.txt` for name correction),
-  **env.ts** (`~/.env` secret loader), **accent.ts** (pitch-accent data).
+  **env.ts** (`~/.env` secret loader). (Pitch-accent data lives in
+  `web/accent.ts` — there is no `src/lib/accent.ts`.)
 
 ### Key invariants
 
@@ -182,7 +185,7 @@ DOM-free, network-free, fully unit-tested:
 `vocabKey`/`mergeTokens`/`lemmaOf`/`isLexical`/`kataToHira`), `coverage`,
 `quiz`, `forecast`, `goal`, `timer`, `searchquery`, `wordday`, `cardfilter`,
 `iplusone`, `prestudy`, `review`. Plus `freq`, `accent`, `heat`, `dictation`,
-`curriculum`, `readProgress`, `readlayout`, `statsfmt`, `ankicache`,
+`readProgress`, `readlayout`, `statsfmt`, `ankicache`,
 `continueWatching`, `sync`, `blacklist`, `vocabreset`, `commands`, `lang`,
 `keys`, `cues`, `telemetry`.
 
@@ -260,11 +263,12 @@ language; the translation lang comes from settings, not hard-coded to Russian.)
 - `src/cli.ts` — CLI entrypoint (server / subtitle / backup).
 - `src/server/index.ts` — single Bun.serve handler, all routes.
 - `src/lib/` — server logic (subs, jimaku, whisper, gemini, tokenindex,
-  coverage, mining, anki, telemetry, backup, media, episode, jatok, library,
-  state, settings, datatransfer, glossary, env, accent).
+  mining, anki, telemetry, backup, media, episode, jatok, library,
+  state, settings, datatransfer, glossary, env). (`coverage` and `accent`
+  are client-side only: `web/coverage.ts`, `web/accent.ts`.)
 - `web/` — React frontend: `main.tsx`, `App.tsx`, `*Route.tsx`, `Player.tsx`,
   `web/player/` (hooks + overlays), and the pure modules.
 - `public/` — built bundle (`app.js`, `app.css`, `dict/`).
 - `scripts/` — `build-web.ts`, `check-web.ts`, `smoke.ts`, `gen-freq.ts`,
-  `gen-accent.ts`, `screenshots.ts`.
+  `gen-accent.ts`, `screenshots.ts`, `progress.test.ts`, `tokenizer.test.ts`.
 - `tests/` — `*.test.ts` (bun) and `tests/e2e/` (Playwright).

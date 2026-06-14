@@ -668,3 +668,130 @@ describe("toCsv", () => {
     expect(dataLine).toContain(",4");
   });
 });
+
+// ─── currentStreak: calendar-boundary cases (wave-13 item #5) ────────────────
+//
+// All walking is done via new Date(y, m, d-i) which is DST-safe local calendar.
+// We test: leap-year Feb→Mar boundary, year-end Dec→Jan boundary, future dates.
+
+describe("currentStreak — calendar boundaries", () => {
+  // Helper: build a "YYYY-MM-DD" string from a local Date without depending on
+  // localDate (which is private). Matches the implementation exactly.
+  const fmt = (y: number, m: number, d: number) =>
+    `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+
+  test("leap-year boundary: 2024-03-01 ← 2024-02-29 → streak=2", () => {
+    // 2024 is a leap year; Feb has 29 days.
+    const now = new Date(2024, 2, 1, 0, 30).getTime(); // 2024-03-01 00:30 local
+    const activeDates = new Set([fmt(2024, 3, 1), fmt(2024, 2, 29)]);
+    expect(currentStreak(activeDates, now)).toBe(2);
+  });
+
+  test("leap-year boundary: only 2024-03-01 present, not Feb-29 → streak=1", () => {
+    const now = new Date(2024, 2, 1, 12).getTime();
+    const activeDates = new Set([fmt(2024, 3, 1)]);
+    expect(currentStreak(activeDates, now)).toBe(1);
+  });
+
+  test("year boundary: 2025-01-01 ← 2024-12-31 ← 2024-12-30 → streak=3", () => {
+    const now = new Date(2025, 0, 1, 12).getTime(); // 2025-01-01 noon local
+    const activeDates = new Set([
+      fmt(2025, 1, 1),
+      fmt(2024, 12, 31),
+      fmt(2024, 12, 30),
+    ]);
+    expect(currentStreak(activeDates, now)).toBe(3);
+  });
+
+  test("year boundary: gap on Dec-31 breaks streak → streak=1 (only Jan-1)", () => {
+    const now = new Date(2025, 0, 1, 12).getTime();
+    const activeDates = new Set([fmt(2025, 1, 1), fmt(2024, 12, 30)]);
+    // Dec 31 is missing → streak stops at 1
+    expect(currentStreak(activeDates, now)).toBe(1);
+  });
+
+  test("future-dated entry is not counted: only past/today matter", () => {
+    // The streak walks from today backward; a future date in activeDates
+    // is irrelevant because i=0 is today, i<0 is never visited.
+    const now = new Date(2026, 5, 14, 12).getTime(); // 2026-06-14
+    const activeDates = new Set([
+      fmt(2026, 6, 14), // today
+      fmt(2026, 6, 13), // yesterday
+      "2099-12-31",     // far future — should have no effect on streak count
+    ]);
+    // Streak should count today + yesterday = 2, not more
+    expect(currentStreak(activeDates, now)).toBe(2);
+  });
+
+  test("activeDates contains only a future date → streak=0", () => {
+    const now = new Date(2026, 5, 14, 12).getTime(); // 2026-06-14
+    const activeDates = new Set(["2099-12-31"]);
+    // today (2026-06-14) is not in the set → streak=0 immediately
+    expect(currentStreak(activeDates, now)).toBe(0);
+  });
+
+  test("today = Feb 29 on a leap year → streak=1 when only that date present", () => {
+    const now = new Date(2028, 1, 29, 12).getTime(); // 2028-02-29 (2028 is leap)
+    const activeDates = new Set([fmt(2028, 2, 29)]);
+    expect(currentStreak(activeDates, now)).toBe(1);
+  });
+});
+
+// ─── percentile floor-index semantics (wave-13 item #7) ──────────────────────
+//
+// percentile(sorted, p) = sorted[floor(p/100 * (len-1))].
+// Tested indirectly through healthSummary's perfStats, which uses the private
+// percentile() function for p50/p95 on sorted buckets.
+//
+// Key case from the spec: percentile([1, 10], 95) === 1
+//   → floor(0.95 * 1) = floor(0.95) = 0 → sorted[0] = 1  (not 10!)
+
+describe("percentile floor-index semantics (via healthSummary)", () => {
+  // Helper: produce a healthSummary with a single perf.test bucket
+  // containing the given ms values, all within the last 24h.
+  const now = Date.now();
+  const mkEvents = (msValues: number[]): TelemetryEvent[] =>
+    msValues.map((ms) => ({ ts: now - 1000, type: "perf.test", ms }));
+
+  const getStat = (msValues: number[]) => {
+    const s = healthSummary(mkEvents(msValues), now);
+    return s.perfStats.find((r) => r.type === "perf.test")!;
+  };
+
+  test("percentile([1, 10], 95) === 1 — floor(0.95*1)=0 → lower element", () => {
+    // This is the documented floor-index semantics: p95 of a 2-element array
+    // returns the LOWER value, not the upper.
+    const stat = getStat([1, 10]);
+    expect(stat.p95).toBe(1);
+  });
+
+  test("percentile([1, 10], 50) === 1 — floor(0.5*1)=0 → lower element", () => {
+    // Median of [1, 10] with floor: idx = floor(0.5) = 0 → returns 1
+    const stat = getStat([1, 10]);
+    expect(stat.p50).toBe(1);
+  });
+
+  test("percentile([1,2,3,4], 50) === 2 — floor(0.5*3)=1 → sorted[1]", () => {
+    // 4-element: idx = floor(1.5) = 1 → sorted[1] = 2
+    const stat = getStat([1, 2, 3, 4]);
+    expect(stat.p50).toBe(2);
+  });
+
+  test("percentile([1,2,3,4], 95) === 3 — floor(0.95*3)=2 → sorted[2]", () => {
+    // 4-element: idx = floor(2.85) = 2 → sorted[2] = 3 (not 4!)
+    const stat = getStat([1, 2, 3, 4]);
+    expect(stat.p95).toBe(3);
+  });
+
+  test("percentile of 1-element array: p50=p95=that value", () => {
+    const stat = getStat([42]);
+    expect(stat.p50).toBe(42);
+    expect(stat.p95).toBe(42);
+  });
+
+  test("percentile([5,10,15,20,25], 95) — floor(0.95*4)=3 → sorted[3]=20", () => {
+    // 5-element: idx = floor(3.8) = 3 → sorted[3] = 20
+    const stat = getStat([5, 10, 15, 20, 25]);
+    expect(stat.p95).toBe(20);
+  });
+});

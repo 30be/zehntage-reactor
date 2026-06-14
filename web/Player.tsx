@@ -1956,8 +1956,14 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         <button
           className="btn icon ep-nav export-frame"
           title="export frame (shift+click: export cue audio)"
-          aria-label="Export current frame"
+          aria-label="Export current frame (shift: export cue audio)"
           onClick={(e) => exportCurrent(e.shiftKey ? "clip" : "frame")}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              exportCurrent(e.shiftKey ? "clip" : "frame");
+            }
+          }}
         >
           <CameraGlyph />
         </button>
@@ -1982,6 +1988,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           ref={videoRef}
           src={mediaUrl(entry.id)}
           onClick={togglePlay}
+          aria-label={`Episode video: ${entry.name.replace(/\.[^.]+$/, "")}`}
         />
         <SubOverlay
           subScale={subScale}
@@ -2041,6 +2048,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             className="skip-pill"
             onClick={onSkipGap}
             title="No dialogue here — jump to the next line"
+            aria-label="Skip silent gap — jump to the next line"
           >
             Skip →
           </button>
@@ -2049,13 +2057,14 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             episode. Click jumps to the next such cue (mirror of `j`). Reuses the
             monochrome .skip-pill chrome; placed top-right via inline offset so it
             never clashes with the bottom-right Skip pill. */}
-        {dueCount > 0 && (
+        {dueCount > 0 && !hudHidden && (
           <button
             className="skip-pill"
             data-testid="due-indicator"
             style={{ top: 14, bottom: "auto", right: 14 }}
             onClick={seekNextDue}
             title="Jump to the next cue with a due deck word"
+            aria-label={`${dueCount} due words — jump to next`}
           >
             {dueCount} due
           </button>

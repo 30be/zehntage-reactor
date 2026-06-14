@@ -12,7 +12,7 @@
 
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rename, rm } from "node:fs/promises";
 import { parseEnvText } from "./env.ts";
 import { guessEpisode } from "./episode.ts";
 
@@ -207,7 +207,17 @@ export async function downloadFile(
   }
   await mkdir(dirname(destPath), { recursive: true });
   const bytes = new Uint8Array(await res.arrayBuffer());
-  await Bun.write(destPath, bytes);
+  // Atomic: stage to a temp sibling then rename, so an interrupted download
+  // never leaves a partial sidecar at destPath. (Uses process.pid — Date.now/
+  // Math.random are unavailable in some contexts.)
+  const tmp = `${destPath}.tmp-${process.pid}`;
+  try {
+    await Bun.write(tmp, bytes);
+    await rename(tmp, destPath);
+  } catch (e) {
+    await rm(tmp).catch(() => {});
+    throw e;
+  }
   return bytes.byteLength;
 }
 

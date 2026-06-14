@@ -18,13 +18,19 @@ export function EchoOverlay({
   onEchoKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => void;
 }) {
   return (
-    <div className="echo-overlay">
+    <div
+      className="echo-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Echo dictation"
+    >
       {echoResult == null ? (
         <>
           <input
             ref={echoInputRef}
             className="echo-input"
             value={echoInput}
+            aria-label="Type what you heard — Enter to check, Tab to replay"
             placeholder="type what you heard — Enter to check, Tab to replay"
             onChange={(e) => setEchoInput(e.target.value)}
             onKeyDown={onEchoKeyDown}
@@ -33,7 +39,12 @@ export function EchoOverlay({
         </>
       ) : (
         <div className="echo-reveal">
-          <div className="echo-diff">
+          <div
+            className="echo-diff"
+            role="status"
+            aria-live="polite"
+            aria-label={`Result: ${echoResult.correct} of ${echoResult.total} characters correct`}
+          >
             {echoResult.cells.map((c, i) => (
               <span key={i} className={c.ok ? "echo-ok" : "echo-bad"}>
                 {c.ch}

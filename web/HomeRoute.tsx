@@ -151,7 +151,20 @@ function WordOfDayCard({ go }: { go: (h: string) => void }) {
     if (cached) setPick(cached);
     void api.ankiWords().then((res) => {
       if (!alive) return;
-      const chosen = pickWordOfDay(res.words, res.progress, day);
+      // The deck may hold unrelated cards (chemistry, quantum-computing, …).
+      // Keep only OURS — mirror the server-side /api/anki/cards filter: a card
+      // qualifies if it carries the "zehntage" tag (local AnkiConnect path, not
+      // declared on the AnkiWord type so read defensively) OR its context holds
+      // our source line ("<episode>.mkv @ mm:ss"). The wire payload from
+      // /api/anki/words ships the raw cards including `tags`/`context`.
+      const ours = res.words.filter((w) => {
+        const tags = (w as { tags?: unknown }).tags;
+        if (Array.isArray(tags) && tags.includes("zehntage")) return true;
+        return /\.(mkv|mp4)\s*@\s*\d+:\d{2}/i.test(w.context ?? "");
+      });
+      // If nothing qualifies, pickWordOfDay returns null below and we render
+      // nothing — no crash, no foreign card.
+      const chosen = pickWordOfDay(ours, res.progress, day);
       if (!chosen) return;
       setPick(chosen);
       saveCachedWordOfDay(day, chosen);

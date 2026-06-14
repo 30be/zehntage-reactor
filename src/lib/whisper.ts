@@ -3,12 +3,29 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
-import { unlink } from "node:fs/promises";
+import { unlink, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import type { Cue } from "./subs.ts";
 import { cleanCues, cuesToSrt, findCoverageHoles, parseTimestamp } from "./subs.ts";
 
 const THREADS = 12;
+
+/** Atomic write: stage to `<path>.tmp-<pid>`, then rename over the target.
+ * A crash mid-write can leave the temp behind but never a partial/zero-byte
+ * sidecar. Uses process.pid (Date.now/Math.random unavailable in some contexts). */
+export async function atomicWrite(
+  path: string,
+  data: string | Uint8Array,
+): Promise<void> {
+  const tmp = `${path}.tmp-${process.pid}`;
+  try {
+    await Bun.write(tmp, data);
+    await rename(tmp, path);
+  } catch (e) {
+    await rm(tmp).catch(() => {});
+    throw e;
+  }
+}
 
 /** Resolve which whisper model binary to use at run time.
  *  Priority: (1) $WHISPER_MODEL env var if set and file exists;
@@ -206,7 +223,7 @@ class WhisperQueue {
       job.cues.push(cue);
       this.emit(job, { type: "cue", cue });
     }
-    await Bun.write(job.outPath, cuesToSrt(cleanCues(job.cues)));
+    await atomicWrite(job.outPath, cuesToSrt(cleanCues(job.cues)));
     this.setStatus(job, "done");
   }
 
@@ -291,8 +308,9 @@ class WhisperQueue {
       job.cues = cues;
       this.emit(job, { type: "snapshot", status: "running", cues });
 
-      // 6. Save sidecar SRT (identical to the reconciled live set).
-      await Bun.write(job.outPath, cuesToSrt(cues));
+      // 6. Save sidecar SRT (identical to the reconciled live set). Atomic so a
+      // crash mid-write never leaves a partial/zero-byte sidecar.
+      await atomicWrite(job.outPath, cuesToSrt(cues));
       this.setStatus(job, "done");
     } finally {
       await unlink(wavPath).catch(() => {});

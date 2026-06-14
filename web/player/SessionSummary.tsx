@@ -14,7 +14,12 @@ export interface SessionSummaryData {
 
 export function SessionSummary({ summary }: { summary: SessionSummaryData }) {
   return (
-    <div className="session-summary">
+    <div
+      className="session-summary"
+      role="alertdialog"
+      aria-live="polite"
+      aria-label="Session summary"
+    >
       <div className="ss-title">session</div>
       <div className="ss-line">
         {summary.min} min · {summary.cues} cues
@@ -35,7 +40,7 @@ export function SessionSummary({ summary }: { summary: SessionSummaryData }) {
           {summary.streak === 1 ? "" : "s"}
         </div>
       )}
-      <div className="ss-line ss-dim">
+      <div className="ss-line ss-dim" role="status" aria-live="polite">
         next episode in 5s — any key cancels
       </div>
     </div>

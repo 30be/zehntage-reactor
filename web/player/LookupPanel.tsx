@@ -120,7 +120,7 @@ export function LookupPanel({
       className={`lookup${pinned ? " pinned" : ""}`}
       style={popupPos}
       role="dialog"
-      aria-label="Word lookup"
+      aria-label={popup.kind === "sentence" ? "Sentence lookup" : "Word lookup"}
       aria-modal="true"
       tabIndex={-1}
       onMouseEnter={onPanelEnter}

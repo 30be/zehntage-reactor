@@ -84,9 +84,9 @@ Newest first. Grouped by shipped wave or named work batch.
 - Fix Read resume/progress clamp off-by-one.
 - Whisper: repeating-cycle dedup + `repairHole` loop cap (code only).
 
-## Waves 16–17 — Curriculum planner + Read-mode cursor nav
+## Waves 16–17 — Home planner + Read-mode cursor nav
 
-- Home "study next" planner from curriculum module.
+- Home "study next" planner (inline in `HomeRoute.tsx`; `web/curriculum.ts` was planned but never landed).
 - Stats: comprehension trend chart.
 - Read mode: cursor nav via `j`/`k`/arrows.
 - Read mode: reading progress bar + resume affordance.
