@@ -2593,9 +2593,32 @@ textarea:focus-visible {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
+.search-route-lines {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
 .search-route-text { flex: 1 1 auto; }
-.search-route-text mark {
+.search-route-text mark,
+.search-route-text-ru mark {
   background: transparent;
   color: var(--fg);
   font-weight: 700;
+}
+.search-route-text-ru {
+  font-size: 13px;
+  line-height: 1.45;
+}
+.search-route-tag {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 4px;
+  border: 1px solid var(--muted);
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--muted);
+  vertical-align: 1px;
 }

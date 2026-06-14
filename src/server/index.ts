@@ -468,6 +468,26 @@ function hasGeneratedRu(entry: LibraryEntry): boolean {
   );
 }
 
+/** "ru", "rus", "ru-RU", … */
+function isRussianLang(lang: string): boolean {
+  return /^(ru|rus)(-|$)/i.test(lang);
+}
+
+/** Best Russian track id (prefer generated, then external sidecar). RU is not
+ * extracted from embedded tracks here — the RU translation we care about is the
+ * generated/external sidecar paired with the ja track. Returns null if none. */
+function bestRussianTrackId(entry: LibraryEntry): string | null {
+  const gen = entry.sidecarSubs.find(
+    (s) => s.origin === "generated" && isRussianLang(s.lang),
+  );
+  if (gen) return `sidecar:gen:${gen.lang}`;
+  const ext = entry.sidecarSubs.find(
+    (s) => s.origin === "external" && isRussianLang(s.lang),
+  );
+  if (ext) return `sidecar:${ext.lang}${ext.ext}`;
+  return null;
+}
+
 function translateQueuedFor(entryId: string): boolean {
   return translateBatch.some(
     (i) => i.entryId === entryId && (i.status === "queued" || i.status === "running"),
@@ -732,19 +752,30 @@ function searchNorm(s: string): string {
   return kataToHira(s.toLowerCase());
 }
 
+/** RU normalization: kana-folding is JA-specific, so RU only lowercases/trims. */
+function searchNormRu(s: string): string {
+  return s.toLowerCase().trim();
+}
+
 interface SearchIndexEntry {
-  key: string; // trackId|mtime — invalidates when the ja track changes
-  lines: { start: number; text: string; norm: string }[];
+  key: string; // jaTrackId|ruTrackId|mtime — invalidates when either track changes
+  lines: {
+    start: number;
+    text: string; // JA cue text
+    norm: string; // JA normalized
+    ru?: string; // paired RU cue text (when an RU track exists)
+    ruNorm?: string; // RU normalized
+  }[];
 }
 
 const searchIndex = new Map<string, SearchIndexEntry>();
 const SEARCH_INDEX_MAX = 64; // ~entries cached; a 25-min episode ≈ a few hundred KB
 
-/** Latest mtime among the video and its ja sidecars (cache invalidation). */
+/** Latest mtime among the video and its ja/ru sidecars (cache invalidation). */
 async function jaMtime(entry: LibraryEntry): Promise<number> {
   let mt = (await stat(entry.absPath).catch(() => null))?.mtimeMs ?? 0;
   for (const s of entry.sidecarSubs) {
-    if (!isJapaneseLang(s.lang)) continue;
+    if (!isJapaneseLang(s.lang) && !isRussianLang(s.lang)) continue;
     const st = await stat(s.path).catch(() => null);
     if (st && st.mtimeMs > mt) mt = st.mtimeMs;
   }
@@ -763,17 +794,67 @@ function searchIndexFor(entry: LibraryEntry): Promise<SearchIndexEntry | null> {
   return p;
 }
 
+/**
+ * Pair JA cues with their RU counterparts into search lines. RU sidecars are
+ * generated per-JA-cue, so indices line up 1:1; when counts diverge (external
+ * RU files) we fall back to nearest-start matching within a small tolerance.
+ * Pure + unit-testable.
+ */
+export function buildSearchLines(
+  jaCues: { start: number; text: string }[],
+  ruCues: { start: number; text: string }[] | null,
+): SearchIndexEntry["lines"] {
+  const sameCount = ruCues != null && ruCues.length === jaCues.length;
+  // Sorted-by-start copy for nearest-timestamp fallback.
+  const ruByStart =
+    ruCues && !sameCount ? [...ruCues].sort((a, b) => a.start - b.start) : null;
+  return jaCues.map((c, i) => {
+    let ru: string | undefined;
+    if (ruCues) {
+      if (sameCount) {
+        ru = ruCues[i]!.text;
+      } else if (ruByStart && ruByStart.length) {
+        // nearest RU cue within 0.5s of the JA start
+        let best = ruByStart[0]!;
+        let bestD = Math.abs(best.start - c.start);
+        for (const r of ruByStart) {
+          const d = Math.abs(r.start - c.start);
+          if (d < bestD) {
+            bestD = d;
+            best = r;
+          }
+        }
+        if (bestD <= 0.5) ru = best.text;
+      }
+    }
+    const line: SearchIndexEntry["lines"][number] = {
+      start: c.start,
+      text: c.text,
+      norm: searchNorm(c.text),
+    };
+    if (ru != null && ru !== "") {
+      line.ru = ru;
+      line.ruNorm = searchNormRu(ru);
+    }
+    return line;
+  });
+}
+
 async function buildSearchIndex(entry: LibraryEntry): Promise<SearchIndexEntry | null> {
   const trackId = await bestJapaneseTrackId(entry);
   if (!trackId) return null;
-  const key = `${trackId}|${await jaMtime(entry)}`;
+  const ruTrackId = bestRussianTrackId(entry);
+  const key = `${trackId}|${ruTrackId ?? ""}|${await jaMtime(entry)}`;
   const hit = searchIndex.get(entry.id);
   if (hit && hit.key === key) return hit;
   const cues = await cuesForTrack(entry, trackId).catch(() => null);
   if (!cues) return null;
+  const ruCues = ruTrackId
+    ? await cuesForTrack(entry, ruTrackId).catch(() => null)
+    : null;
   const idx: SearchIndexEntry = {
     key,
-    lines: cues.map((c) => ({ start: c.start, text: c.text, norm: searchNorm(c.text) })),
+    lines: buildSearchLines(cues, ruCues),
   };
   if (!searchIndex.has(entry.id) && searchIndex.size >= SEARCH_INDEX_MAX) {
     const oldest = searchIndex.keys().next().value;
@@ -985,21 +1066,35 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       if (req.method === "GET" && path === "/api/search") {
         const q = (url.searchParams.get("q") ?? "").trim();
         if (!q) return json([]);
-        const nq = searchNorm(q);
+        const nq = searchNorm(q); // JA-normalized query
+        const nqRu = searchNormRu(q); // RU-normalized query
         const entries = await library.refresh();
-        const hits: { mediaId: string; name: string; start: number; text: string }[] = [];
+        const hits: {
+          mediaId: string;
+          name: string;
+          start: number;
+          text: string;
+          ru?: string;
+          matchedLang?: "ja" | "ru";
+        }[] = [];
         for (const entry of entries) {
           if (hits.length >= 100) break;
           const idx = await searchIndexFor(entry);
           if (!idx) continue;
           for (const line of idx.lines) {
-            if (!line.norm.includes(nq)) continue;
-            hits.push({
+            const jaHit = line.norm.includes(nq);
+            const ruHit = line.ruNorm != null && line.ruNorm.includes(nqRu);
+            if (!jaHit && !ruHit) continue;
+            // A cue matched in both languages is one hit; prefer the JA tag.
+            const hit: (typeof hits)[number] = {
               mediaId: entry.id,
               name: entry.name,
               start: line.start,
               text: line.text,
-            });
+              matchedLang: jaHit ? "ja" : "ru",
+            };
+            if (line.ru != null) hit.ru = line.ru;
+            hits.push(hit);
             if (hits.length >= 100) break;
           }
         }

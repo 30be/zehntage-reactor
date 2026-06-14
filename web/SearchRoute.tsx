@@ -9,12 +9,20 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type SearchHit } from "./api.ts";
 import {
   groupByEpisode,
-  highlightSplit,
+  highlightHit,
+  type HighlightSegment,
   displayName,
   fmtTimestamp,
   cueLink,
   flatHits,
 } from "./searchquery.ts";
+
+/** Render highlighted segments; matched substring → <mark>. */
+function renderSegments(segs: HighlightSegment[]) {
+  return segs.map((seg, i) =>
+    seg.match ? <mark key={i}>{seg.text}</mark> : <span key={i}>{seg.text}</span>,
+  );
+}
 
 export function Search({ go }: { go: (h: string) => void }) {
   const [query, setQuery] = useState("");
@@ -130,6 +138,8 @@ export function Search({ go }: { go: (h: string) => void }) {
               {g.hits.map((h) => {
                 flatIdx += 1;
                 const active = flatIdx === sel;
+                const hl = highlightHit(h, query);
+                const ruMatch = h.matchedLang === "ru";
                 return (
                   <button
                     key={`${h.mediaId}:${h.start}`}
@@ -141,13 +151,16 @@ export function Search({ go }: { go: (h: string) => void }) {
                     <span className="search-route-time">
                       ▶ {fmtTimestamp(h.start)}
                     </span>
-                    <span className="search-route-text">
-                      {highlightSplit(h.text, query).map((seg, i) =>
-                        seg.match ? (
-                          <mark key={i}>{seg.text}</mark>
-                        ) : (
-                          <span key={i}>{seg.text}</span>
-                        ),
+                    <span className="search-route-lines">
+                      <span className="search-route-text">
+                        {ruMatch && <span className="search-route-tag">JA</span>}
+                        {renderSegments(hl.ja)}
+                      </span>
+                      {hl.ru != null && (
+                        <span className="search-route-text-ru muted">
+                          {ruMatch && <span className="search-route-tag">RU</span>}
+                          {renderSegments(hl.ru)}
+                        </span>
                       )}
                     </span>
                   </button>

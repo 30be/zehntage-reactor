@@ -7,17 +7,30 @@
 
 import { kataToHira } from "./tokenizer.ts";
 
-/** One transcript hit as returned by GET /api/search (shape is JA-only). */
+/**
+ * One transcript hit as returned by GET /api/search. `text` is always the JA
+ * cue. The optional fields are present once the server also indexes RU sidecars:
+ *   - `ru`        the paired RU translation of this cue (when one exists)
+ *   - `matchedLang` which language the query actually matched on
+ * Older servers omit these → JA-only behavior, fully backward-compatible.
+ */
 export interface SearchHit {
   mediaId: string;
   name: string;
   start: number;
   text: string;
+  ru?: string;
+  matchedLang?: "ja" | "ru";
 }
 
-/** Server-parity normalization: katakana→hiragana + lowercase. */
+/** Server-parity JA normalization: katakana→hiragana + lowercase. */
 export function normalizeQuery(s: string): string {
   return kataToHira(s.trim().toLowerCase());
+}
+
+/** Server-parity RU normalization: lowercase + trim (kana-folding is JA-only). */
+export function normalizeQueryRu(s: string): string {
+  return s.trim().toLowerCase();
 }
 
 /** A run of cue text; `match` marks the segment(s) that matched the query. */
@@ -36,9 +49,50 @@ export interface HighlightSegment {
  * No match → single non-match segment (whole text).
  */
 export function highlightSplit(text: string, query: string): HighlightSegment[] {
-  const nq = normalizeQuery(query);
+  return highlightSplitWith(text, query, normalizeQuery, (s) =>
+    kataToHira(s.toLowerCase()),
+  );
+}
+
+/** RU-language highlight: lowercase-only normalization (no kana folding). */
+export function highlightSplitRu(text: string, query: string): HighlightSegment[] {
+  return highlightSplitWith(text, query, normalizeQueryRu, (s) => s.toLowerCase());
+}
+
+/**
+ * Highlight a hit for rendering. The JA line is always returned; the RU line is
+ * returned when the hit carries one. Highlighting is applied only to the line
+ * the query actually matched (per `matchedLang`, defaulting to JA for old hits).
+ */
+export function highlightHit(
+  hit: SearchHit,
+  query: string,
+): { ja: HighlightSegment[]; ru: HighlightSegment[] | null } {
+  const matchedRu = hit.matchedLang === "ru";
+  return {
+    ja: matchedRu
+      ? [{ text: hit.text, match: false }]
+      : highlightSplit(hit.text, query),
+    ru:
+      hit.ru == null
+        ? null
+        : matchedRu
+          ? highlightSplitRu(hit.ru, query)
+          : [{ text: hit.ru, match: false }],
+  };
+}
+
+/** Length-preserving normalizers keep indices 1:1, so highlighted slices come
+ * from the ORIGINAL (un-normalized) text. */
+function highlightSplitWith(
+  text: string,
+  query: string,
+  normQuery: (s: string) => string,
+  normHay: (s: string) => string,
+): HighlightSegment[] {
+  const nq = normQuery(query);
   if (!nq) return [{ text, match: false }];
-  const hay = kataToHira(text.toLowerCase());
+  const hay = normHay(text);
   const segments: HighlightSegment[] = [];
   let from = 0;
   let i = hay.indexOf(nq, from);

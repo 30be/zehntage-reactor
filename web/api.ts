@@ -91,13 +91,19 @@ export interface MediaInfo {
   [k: string]: unknown;
 }
 
-// One cross-episode transcript hit from GET /api/search (JA text only; the
-// endpoint indexes each entry's best ja track and returns up to 100 hits).
+// One cross-episode transcript hit from GET /api/search. `text` is always the
+// JA cue; the endpoint indexes each entry's best ja track AND its RU sidecar (so
+// a JA cue can be found by its Russian meaning) and returns up to 100 hits.
+//   - `ru`         the paired RU translation of this cue (when one exists)
+//   - `matchedLang` which language the query matched ("ja" | "ru")
+// Both are optional → fully backward-compatible with JA-only servers/responses.
 export interface SearchHit {
   mediaId: string;
   name: string;
   start: number;
   text: string;
+  ru?: string;
+  matchedLang?: "ja" | "ru";
 }
 
 async function jget<T>(path: string): Promise<T> {

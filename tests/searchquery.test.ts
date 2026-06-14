@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 import {
   normalizeQuery,
+  normalizeQueryRu,
   highlightSplit,
+  highlightSplitRu,
+  highlightHit,
   groupByEpisode,
   displayName,
   fmtTimestamp,
@@ -112,4 +115,77 @@ test("fmtTimestamp formats m:ss", () => {
 
 test("cueLink builds the player deep-link", () => {
   expect(cueLink("abc123", 9)).toBe("#/play/abc123@9");
+});
+
+// --- RU-language search helpers --------------------------------------------
+
+test("normalizeQueryRu: lowercases + trims, no kana folding", () => {
+  expect(normalizeQueryRu("  Привет  ")).toBe("привет");
+  expect(normalizeQueryRu("КНИГА")).toBe("книга");
+  // katakana is NOT folded to hiragana (RU normalization is JA-agnostic)
+  expect(normalizeQueryRu("カ")).toBe("カ");
+});
+
+test("highlightSplitRu: highlights matched RU substring (case-insensitive)", () => {
+  expect(highlightSplitRu("Иду в библиотеку", "библиотек")).toEqual([
+    { text: "Иду в ", match: false },
+    { text: "библиотек", match: true },
+    { text: "у", match: false },
+  ]);
+  // case-insensitive, original casing preserved in the slice
+  expect(highlightSplitRu("Книга", "книг")).toEqual([
+    { text: "Книг", match: true },
+    { text: "а", match: false },
+  ]);
+});
+
+test("highlightSplitRu: no kana folding (katakana query won't match hiragana)", () => {
+  expect(highlightSplitRu("ともだち", "トモ")).toEqual([
+    { text: "ともだち", match: false },
+  ]);
+});
+
+test("highlightHit: JA match highlights JA line, RU line shown unhighlighted", () => {
+  const hit: SearchHit = {
+    mediaId: "m",
+    name: "ep",
+    start: 1,
+    text: "図書館へ行く",
+    ru: "Иду в библиотеку",
+    matchedLang: "ja",
+  };
+  const { ja, ru } = highlightHit(hit, "図書");
+  expect(ja).toEqual([
+    { text: "図書", match: true },
+    { text: "館へ行く", match: false },
+  ]);
+  expect(ru).toEqual([{ text: "Иду в библиотеку", match: false }]);
+});
+
+test("highlightHit: RU match highlights RU line, JA line shown unhighlighted", () => {
+  const hit: SearchHit = {
+    mediaId: "m",
+    name: "ep",
+    start: 1,
+    text: "図書館へ行く",
+    ru: "Иду в библиотеку",
+    matchedLang: "ru",
+  };
+  const { ja, ru } = highlightHit(hit, "библиотек");
+  expect(ja).toEqual([{ text: "図書館へ行く", match: false }]);
+  expect(ru).toEqual([
+    { text: "Иду в ", match: false },
+    { text: "библиотек", match: true },
+    { text: "у", match: false },
+  ]);
+});
+
+test("highlightHit: legacy JA-only hit (no ru / matchedLang) still highlights JA", () => {
+  const hit: SearchHit = { mediaId: "m", name: "ep", start: 1, text: "図書館" };
+  const { ja, ru } = highlightHit(hit, "図書");
+  expect(ja).toEqual([
+    { text: "図書", match: true },
+    { text: "館", match: false },
+  ]);
+  expect(ru).toBeNull();
 });
