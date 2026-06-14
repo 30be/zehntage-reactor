@@ -3,12 +3,47 @@
 // and popup state live in Player.tsx. Extracted from Player.tsx.
 
 import { useEffect } from "react";
-import type { EncounterHit, ExplainResult, WordLookup } from "../api.ts";
+import type {
+  EncounterHit,
+  ExplainResult,
+  WordHistory,
+  WordLookup,
+} from "../api.ts";
 import { AccentReading } from "../TokenLine.tsx";
 import { accentOf } from "../accent.ts";
 import { freqRankOf, freqTier } from "../freq.ts";
 import { type PopupState, type QaItem } from "./shared.ts";
 import { Encounters } from "./Encounters.tsx";
+
+// Compact, monochrome per-word history line for the lookup popup. Renders
+// nothing when there's no recorded history (never-seen word). Derived entirely
+// from the telemetry event log (see src/lib/telemetry.ts wordHistory).
+function fmtDate(ts: number): string {
+  const d = new Date(ts);
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+
+function WordHist({ hist }: { hist: WordHistory | null }) {
+  if (!hist) return null;
+  const parts: string[] = [];
+  if (hist.addedAt !== undefined) parts.push(`added ${fmtDate(hist.addedAt)}`);
+  if (hist.lookups > 0)
+    parts.push(`looked up ${hist.lookups}×`);
+  if (
+    hist.addedAt === undefined &&
+    hist.lookups === 0 &&
+    hist.firstSeenAt !== undefined
+  )
+    parts.push(`first seen ${fmtDate(hist.firstSeenAt)}`);
+  if (parts.length === 0) return null;
+  return (
+    <div className="whist" title="Your history with this word (from your study log)">
+      {parts.join(" · ")}
+    </div>
+  );
+}
 
 export function LookupPanel({
   popup,
@@ -30,6 +65,7 @@ export function LookupPanel({
   encHits,
   encOpen,
   onToggleEncounters,
+  wordHist,
   qa,
   askText,
   setAskText,
@@ -58,6 +94,7 @@ export function LookupPanel({
   encHits: EncounterHit[] | null;
   encOpen: boolean;
   onToggleEncounters: () => void;
+  wordHist: WordHistory | null;
   qa: QaItem[];
   askText: string;
   setAskText: (s: string) => void;
@@ -165,6 +202,7 @@ export function LookupPanel({
             open={encOpen}
             onToggle={onToggleEncounters}
           />
+          <WordHist hist={wordHist} />
         </>
       )}
 

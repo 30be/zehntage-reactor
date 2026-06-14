@@ -71,6 +71,7 @@ import {
   overview,
   toCsv,
   todaySummary,
+  wordHistoryFromFile,
   healthSummaryFromFile,
   type TelemetryEvent,
 } from "../lib/telemetry.ts";
@@ -1675,6 +1676,26 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       }
       if (req.method === "GET" && path === "/api/stats/today") {
         return json(await todaySummary());
+      }
+
+      // Per-word mining history for the lookup popup, derived from the raw
+      // event log (anki_add / lookup). Cheap: one events.jsonl read; the popup
+      // fetches it lazily on open. Pass the lemma plus the surface form so we
+      // match however the click was originally logged (events store `word`).
+      if (req.method === "GET" && path === "/api/word/history") {
+        const lemma = (url.searchParams.get("lemma") ?? "").trim();
+        const surface = (url.searchParams.get("surface") ?? "").trim();
+        const forms = [lemma, surface].filter(Boolean);
+        if (forms.length === 0) return err("lemma required", 400);
+        const h = await wordHistoryFromFile(forms);
+        const firstSeenName =
+          h.firstSeenMediaId !== undefined
+            ? (library.get(h.firstSeenMediaId)?.name ?? h.firstSeenMediaId)
+            : undefined;
+        return json({
+          ...h,
+          ...(firstSeenName !== undefined ? { firstSeenName } : {}),
+        });
       }
 
       // --- lemma index queries (lazy per-entry indexes, ja track) ---

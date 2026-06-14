@@ -14,6 +14,7 @@ import {
   type SubTrackInfo,
   type ExplainResult,
   type EncounterHit,
+  type WordHistory,
 } from "./api.ts";
 import { activeCueIndex, contextAround } from "./cues.ts";
 import { getTokenizer, isLexical, kataToHira, lemmaOf, type KToken } from "./tokenizer.ts";
@@ -583,6 +584,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   const [encHits, setEncHits] = useState<EncounterHit[] | null>(null);
   const [encOpen, setEncOpen] = useState(false);
   const encCache = useRef<Map<string, EncounterHit[]>>(new Map());
+  const [wordHist, setWordHist] = useState<WordHistory | null>(null);
+  const wordHistCache = useRef<Map<string, WordHistory>>(new Map());
 
   // sentence-structure explain panel state (same panel chrome as word lookups)
   const [explain, setExplain] = useState<ExplainResult | null>(null);
@@ -1489,6 +1492,36 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   });
   regenLookupRef.current = () => void onReload();
 
+  // fetch per-word mining history when a word popup opens (lazy, cached).
+  // Re-keyed on popupSaved so the line refreshes right after an add/delete.
+  useEffect(() => {
+    if (!popup || popup.kind !== "word") {
+      setWordHist(null);
+      return;
+    }
+    const lemma = popup.dictForm ?? popup.surface;
+    const key = `${lemma} ${popup.surface}`;
+    if (!popupSaved) {
+      const cached = wordHistCache.current.get(key);
+      if (cached) {
+        setWordHist(cached);
+        return;
+      }
+    }
+    setWordHist(null);
+    let cancelled = false;
+    void api
+      .wordHistory(lemma, popup.surface)
+      .then((h) => {
+        wordHistCache.current.set(key, h);
+        if (!cancelled) setWordHist(h);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [popup?.kind, popup?.surface, popup?.dictForm, popupSaved]);
+
   // Position the lookup panel: prefer above the word, flip below when there
   // isn't room, and clamp horizontally so it can never be cut off-screen.
   useLayoutEffect(() => {
@@ -2031,6 +2064,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           encHits={encHits}
           encOpen={encOpen}
           onToggleEncounters={() => setEncOpen((o) => !o)}
+          wordHist={wordHist}
           qa={qa}
           askText={askText}
           setAskText={setAskText}

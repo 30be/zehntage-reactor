@@ -229,3 +229,41 @@ test("after adding, fake Anki deck contains lemma-front entry for 勉強", async
   await page.keyboard.press("a");
   await expect(popup.locator(".word")).not.toHaveClass(/saved/);
 });
+
+// ---------------------------------------------------------------------------
+// 8. Per-word mining history line (.whist) appears after adding a word
+//    The add logs an anki_add telemetry event; /api/word/history surfaces it.
+// ---------------------------------------------------------------------------
+test("popup shows a .whist history line after the word is added", async ({
+  page,
+}) => {
+  await openPlayer(page, "clip.mp4");
+  await seekTo(page, 3);
+  await waitForTokens(page);
+
+  await page.locator(".sub-primary .tok").first().click();
+  const popup = page.locator(".lookup");
+  await expect(popup).toContainText("перевод(勉強)");
+
+  // Normalise to a clean (not-saved) starting state
+  const wordEl = popup.locator(".word");
+  if (
+    ((await wordEl.getAttribute("class")) ?? "").split(/\s+/).includes("saved")
+  ) {
+    await page.keyboard.press("a");
+    await expect(wordEl).not.toHaveClass(/saved/);
+  }
+
+  // Add — server logs anki_add; the history effect re-fetches on popupSaved.
+  await page.keyboard.press("a");
+  await expect(wordEl).toHaveClass(/saved/, { timeout: 5_000 });
+
+  // The compact history line shows the add date.
+  const whist = popup.locator(".whist");
+  await expect(whist).toBeVisible({ timeout: 8_000 });
+  await expect(whist).toContainText("added");
+
+  // Cleanup: remove the word so subsequent tests start with a clean deck
+  await page.keyboard.press("a");
+  await expect(wordEl).not.toHaveClass(/saved/);
+});

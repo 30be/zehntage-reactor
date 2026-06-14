@@ -234,6 +234,7 @@ a { color: inherit; }
 .lookup .reading { color: #a1a1aa; font-size: 14px; margin-left: 8px; }
 .lookup .translation { margin-top: 8px; font-size: 15px; }
 .lookup .notes { margin-top: 8px; color: #a1a1aa; font-size: 13px; line-height: 1.5; }
+.lookup .whist { margin-top: 8px; color: #71717a; font-size: 12px; letter-spacing: 0.02em; }
 .lookup .row { margin-top: 12px; display: flex; gap: 8px; }
 .lookup .btn { background: #fafafa; color: #18181b; border-color: #fafafa; }
 .lookup .btn:hover { background: #e4e4e7; }

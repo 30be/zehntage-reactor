@@ -670,3 +670,70 @@ export function healthSummary(
 export async function healthSummaryFromFile(now = Date.now()): Promise<HealthSummary> {
   return healthSummary(await readEvents(), now);
 }
+
+// --- per-word mining history (lookup popup) --------------------------------
+//
+// The lookup/anki_add events each carry a `word` field (the SURFACE word the
+// user clicked — not the lemma). To find a word's history we match that field
+// against the set of forms we know for it (lemma + surface). Everything here is
+// derived from the raw log — no extra storage:
+//   - addedAt:    ts of the FIRST anki_add for the word (when it was mined)
+//   - lookups:    count of lookup events for the word
+//   - firstSeenAt / firstSeenMediaId: the EARLIEST event (lookup or add),
+//     i.e. when/where the user first interacted with the word.
+// We deliberately do NOT claim "first appeared in episode N" — the event log
+// only records interactions, not passive on-screen appearances.
+
+export interface WordHistory {
+  /** epoch ms of the first anki_add for this word (undefined if never added). */
+  addedAt?: number;
+  /** number of lookup events for this word. */
+  lookups: number;
+  /** epoch ms of the earliest interaction (lookup or add) with this word. */
+  firstSeenAt?: number;
+  /** mediaId carried by that earliest interaction, when present. */
+  firstSeenMediaId?: string;
+}
+
+/**
+ * Aggregate a word's interaction history from the raw event log. `forms` is the
+ * set of surface/lemma strings that count as "this word"; an event matches when
+ * its `word` field equals any of them. Pure — testable on an in-memory array.
+ */
+export function wordHistory(
+  events: TelemetryEvent[],
+  forms: string[],
+): WordHistory {
+  const wanted = new Set(forms.map((f) => f.trim()).filter(Boolean));
+  let addedAt: number | undefined;
+  let lookups = 0;
+  let firstSeenAt: number | undefined;
+  let firstSeenMediaId: string | undefined;
+
+  for (const e of events) {
+    if (e.type !== "anki_add" && e.type !== "lookup") continue;
+    if (typeof e.word !== "string" || !wanted.has(e.word)) continue;
+    if (!Number.isFinite(e.ts)) continue;
+
+    if (firstSeenAt === undefined || e.ts < firstSeenAt) {
+      firstSeenAt = e.ts;
+      firstSeenMediaId = typeof e.mediaId === "string" ? e.mediaId : undefined;
+    }
+    if (e.type === "anki_add") {
+      if (addedAt === undefined || e.ts < addedAt) addedAt = e.ts;
+    } else {
+      lookups += 1;
+    }
+  }
+
+  return {
+    ...(addedAt !== undefined ? { addedAt } : {}),
+    lookups,
+    ...(firstSeenAt !== undefined ? { firstSeenAt } : {}),
+    ...(firstSeenMediaId !== undefined ? { firstSeenMediaId } : {}),
+  };
+}
+
+export async function wordHistoryFromFile(forms: string[]): Promise<WordHistory> {
+  return wordHistory(await readEvents(), forms);
+}

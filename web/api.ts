@@ -246,6 +246,16 @@ export interface TodayStats {
   active: boolean;
 }
 
+// Per-word mining history — mirrors src/lib/telemetry.ts WordHistory plus a
+// resolved firstSeenName from the server.
+export interface WordHistory {
+  addedAt?: number;
+  lookups: number;
+  firstSeenAt?: number;
+  firstSeenMediaId?: string;
+  firstSeenName?: string;
+}
+
 // --- lemma index queries ---
 
 export interface EncounterCue {
@@ -400,6 +410,14 @@ export const api = {
       `/api/index/encounters?lemma=${encodeURIComponent(lemma)}${
         mediaIds && mediaIds.length
           ? `&mediaIds=${encodeURIComponent(mediaIds.join(","))}`
+          : ""
+      }`,
+    ),
+  wordHistory: (lemma: string, surface?: string) =>
+    jget<WordHistory>(
+      `/api/word/history?lemma=${encodeURIComponent(lemma)}${
+        surface && surface !== lemma
+          ? `&surface=${encodeURIComponent(surface)}`
           : ""
       }`,
     ),
