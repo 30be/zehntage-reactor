@@ -7,8 +7,7 @@
 //   1 = Again   2 = Hard   3 = Good   4 = Easy   (R replays the answer audio)
 //
 // State machine:  loading → (offline | empty | reviewing) → done
-// Scope toggles between "zehntage cards only" and the whole deck, persisted to
-// localStorage so the choice sticks across sessions.
+// Queue scope is always "all" — reviews Anki's full due queue.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
@@ -16,19 +15,6 @@ import { api, type ReviewCard } from "./api.ts";
 import { sanitizeAnkiHtml } from "./ankihtml.ts";
 
 type Phase = "loading" | "offline" | "empty" | "question" | "answer" | "done";
-type Scope = "zehntage" | "all";
-
-const SCOPE_KEY = "zr.review.scope";
-
-function loadScope(): Scope {
-  try {
-    const v = localStorage.getItem(SCOPE_KEY);
-    if (v === "zehntage" || v === "all") return v;
-  } catch {
-    /* localStorage unavailable */
-  }
-  return "zehntage";
-}
 
 /** True while focus is in a text-entry control — we then ignore our hotkeys so
  *  typing (e.g. a future search box) never triggers grading. */
@@ -45,7 +31,6 @@ function isTextTarget(el: EventTarget | null): boolean {
 }
 
 export function Review({ go }: { go: (h: string) => void }) {
-  const [scope, setScope] = useState<Scope>(loadScope);
   const [queue, setQueue] = useState<ReviewCard[]>([]);
   const [pos, setPos] = useState(0);
   const [due, setDue] = useState(0);
@@ -60,12 +45,12 @@ export function Review({ go }: { go: (h: string) => void }) {
 
   const card: ReviewCard | undefined = queue[pos];
 
-  // Fetch the queue for the current scope and decide the entry phase.
+  // Fetch the queue and decide the entry phase.
   const load = useCallback(async () => {
     setPhase("loading");
     setErr(null);
     try {
-      const res = await api.reviewQueue(scope);
+      const res = await api.reviewQueue("all");
       if (!res.available) {
         setQueue([]);
         setDue(0);
@@ -86,20 +71,11 @@ export function Review({ go }: { go: (h: string) => void }) {
       setQueue([]);
       setPhase("offline");
     }
-  }, [scope]);
+  }, []);
 
   useEffect(() => {
     void load();
   }, [load]);
-
-  // persist the scope choice
-  useEffect(() => {
-    try {
-      localStorage.setItem(SCOPE_KEY, scope);
-    } catch {
-      /* ignore */
-    }
-  }, [scope]);
 
   // play the first <audio> in the revealed answer (call site is a user gesture)
   const playAnswerAudio = useCallback(() => {
@@ -142,7 +118,7 @@ export function Review({ go }: { go: (h: string) => void }) {
         // drained the batch — Anki may have surfaced more (learning steps).
         void (async () => {
           try {
-            const res = await api.reviewQueue(scope);
+            const res = await api.reviewQueue("all");
             if (res.available && res.cards.length > 0) {
               setQueue(res.cards);
               setDue(res.due);
@@ -161,7 +137,7 @@ export function Review({ go }: { go: (h: string) => void }) {
         })();
       }
     },
-    [phase, card, pos, queue.length, scope],
+    [phase, card, pos, queue.length],
   );
 
   // window keydown, mirroring QuizPanel's add/remove listener pattern.
@@ -203,17 +179,6 @@ export function Review({ go }: { go: (h: string) => void }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [phase, reveal, grade, playAnswerAudio]);
 
-  const scopeToggle = (
-    <label className="review-scope" title="Limit review to zehntage-tagged cards, or drill the whole deck">
-      <input
-        type="checkbox"
-        checked={scope === "zehntage"}
-        onChange={(e) => setScope(e.target.checked ? "zehntage" : "all")}
-      />
-      zehntage cards only
-    </label>
-  );
-
   // --- non-reviewing states ---
 
   if (phase === "loading")
@@ -240,7 +205,6 @@ export function Review({ go }: { go: (h: string) => void }) {
             Back to library
           </button>
         </div>
-        <div className="review-scope-row">{scopeToggle}</div>
       </div>
     );
 
@@ -259,7 +223,6 @@ export function Review({ go }: { go: (h: string) => void }) {
             Back to library
           </button>
         </div>
-        <div className="review-scope-row">{scopeToggle}</div>
       </div>
     );
 
@@ -278,7 +241,6 @@ export function Review({ go }: { go: (h: string) => void }) {
             Back to library
           </button>
         </div>
-        <div className="review-scope-row">{scopeToggle}</div>
       </div>
     );
 
@@ -298,7 +260,6 @@ export function Review({ go }: { go: (h: string) => void }) {
         <span className="muted review-reviewed">
           reviewed: {reviewed}
         </span>
-        {scopeToggle}
       </div>
 
       <div className="review-card">

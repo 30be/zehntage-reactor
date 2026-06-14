@@ -6,11 +6,13 @@
 // src/lib/ankidb.ts). When the DB is absent or unreadable, fall back to the
 // existing AnkiConnect path (which requires Anki to be open).
 //
-// IMPORTANT — refuse-to-write contract:
-//   This module performs NO writes to the user's collection. The answer
-//   write-back (`answerCardAuto`) routes ONLY to AnkiConnect. There is NO
-//   DB-write path here; DB write-back is a separate, future, approval-gated
-//   task. We never touch collection.anki2 for writes.
+// Write-back routing (`answerCardAuto`):
+//   - Anki OPEN  → route to AnkiConnect `answerCard`. The live scheduler is
+//     authoritative while the GUI holds the collection.
+//   - Anki CLOSED → route to `dbAnswerCard` (src/lib/ankidb.ts), the gated,
+//     backup-first, fail-closed windowless DB write. We rely on ankidb's own
+//     guards (Anki not running, schema understood, backup taken) to stay safe.
+//   - Neither    → refuse with a well-shaped {ok:false} result.
 //
 // This file owns the selector only. It imports anki.ts and ankidb.ts but keeps
 // them ignorant of each other; it does not modify either.
@@ -26,6 +28,7 @@ import {
   dbStatus,
   dbReviewQueue,
   dbDeckCounts,
+  dbAnswerCard,
   type DeckCounts,
 } from "./ankidb.ts";
 
@@ -38,8 +41,14 @@ export type ReviewBackend = "db" | "ankiconnect";
 // deterministic).
 const dbDirectEnabled = (): boolean => process.env.ANKI_FAKE !== "1";
 
-/** Refusal reason surfaced when grading cannot proceed. */
-export type RefuseReason = "anki-closed-db-write-not-enabled";
+/**
+ * Refusal reason surfaced when grading cannot proceed.
+ *
+ * `no-backend` — neither AnkiConnect nor the DB write path is available
+ * (Anki closed AND the collection is absent/unreadable/unsupported). Reasons
+ * other than these may also be forwarded verbatim from `dbAnswerCard`.
+ */
+export type RefuseReason = "no-backend" | (string & {});
 
 export interface ReviewQueueResult {
   available: boolean;
@@ -72,7 +81,7 @@ export interface ReviewStatus {
   schemaOk: boolean;
   /** A queue can be produced (DB read or AnkiConnect). */
   canQueue: boolean;
-  /** A grade can be written back (AnkiConnect only, for now). */
+  /** A grade can be written back (AnkiConnect, or windowless DB write). */
   canAnswer: boolean;
 }
 
@@ -151,25 +160,75 @@ export async function deckCountsAuto(
 }
 
 /**
- * Grade a card. For now this routes ONLY to AnkiConnect (the working path).
+ * Grade a card, windowless-capable.
  *
- * No DB-write path exists: if AnkiConnect is unavailable (Anki closed), we
- * return a refusal — we do NOT write to the collection. DB write-back is a
- * deferred, approval-gated task.
+ *   - Anki OPEN (AnkiConnect reachable) → route to AnkiConnect `answerCard`.
+ *     The live scheduler owns the collection while the GUI is up.
+ *   - Anki CLOSED → route to `dbAnswerCard`, the gated, backup-first,
+ *     fail-closed DB write. ankidb performs its own safety checks (Anki not
+ *     running, schema understood, backup taken) and is the authority on whether
+ *     the write may proceed; we forward its {ok, error?, reason?} verbatim.
+ *   - Neither    → refuse with {ok:false, reason:"no-backend"}.
+ *
+ * The DB-write path is suppressed in fake mode (ANKI_FAKE=1) so e2e never
+ * touches the real collection.anki2.
  */
 export async function answerCardAuto(
   cardId: number,
   ease: 1 | 2 | 3 | 4,
 ): Promise<AnswerResult> {
-  const r = await acAnswerCard(cardId, ease);
-  if (r.ok) {
-    return { ok: true, backend: "ankiconnect" };
+  // Fake/e2e mode: route to the in-memory fake AnkiConnect (records the grade,
+  // drains the fake queue). Never touches the real collection or the DB write.
+  if (process.env.ANKI_FAKE === "1") {
+    const r = await acAnswerCard(cardId, ease);
+    return { ok: r.ok, error: r.error, backend: "ankiconnect" };
   }
-  // AnkiConnect refused/unavailable. We do NOT fall back to a DB write.
+  // Is Anki up? If so, AnkiConnect is authoritative.
+  let ankiConnectUp = false;
+  try {
+    ankiConnectUp = await ankiLocalAvailable();
+  } catch {
+    ankiConnectUp = false;
+  }
+
+  if (ankiConnectUp) {
+    const r = await acAnswerCard(cardId, ease);
+    if (r.ok) {
+      return { ok: true, backend: "ankiconnect" };
+    }
+    return {
+      ok: false,
+      error: r.error ?? "AnkiConnect not available",
+      backend: "ankiconnect",
+    };
+  }
+
+  // Anki closed → windowless DB write (unless fake mode, which must not write).
+  if (dbDirectEnabled()) {
+    try {
+      // `await` tolerates either a sync result or a Promise, so this stays
+      // correct regardless of how ankidb finalizes dbAnswerCard's signature.
+      const r = await dbAnswerCard(cardId, ease);
+      return {
+        ok: r.ok,
+        error: r.error,
+        reason: r.reason,
+        backend: "db",
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+        backend: "db",
+      };
+    }
+  }
+
+  // No backend available (Anki closed and DB-direct disabled/unavailable).
   return {
     ok: false,
-    error: r.error ?? "AnkiConnect not available",
-    reason: "anki-closed-db-write-not-enabled",
+    error: "No grading backend available (Anki closed)",
+    reason: "no-backend",
     backend: "ankiconnect",
   };
 }
@@ -178,8 +237,10 @@ export async function answerCardAuto(
  * Combined read/write capability snapshot for the UI.
  *
  * `canQueue` is true when either the DB read or AnkiConnect can produce a
- * queue. `canAnswer` is true only when AnkiConnect is reachable (the sole
- * write path today).
+ * queue. `canAnswer` is true when EITHER AnkiConnect is reachable (Anki open)
+ * OR the DB write path is usable (Anki closed + collection present + schema
+ * understood) — grading now works windowless. The DB write path is gated off
+ * in fake mode (ANKI_FAKE=1).
  */
 export async function reviewStatus(): Promise<ReviewStatus> {
   let dbPresent = false;
@@ -202,6 +263,9 @@ export async function reviewStatus(): Promise<ReviewStatus> {
   }
 
   const canQueue = (dbPresent && schemaOk) || ankiConnectUp;
-  const canAnswer = ankiConnectUp; // AnkiConnect-only write path for now
+  // Windowless DB write is usable when Anki is closed, the collection is
+  // present with an understood schema, and we are not in fake mode.
+  const dbWritable = dbDirectEnabled() && dbPresent && schemaOk && !ankiOpen;
+  const canAnswer = ankiConnectUp || dbWritable;
   return { dbPresent, ankiOpen, schemaOk, canQueue, canAnswer };
 }

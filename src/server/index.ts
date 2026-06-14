@@ -2,6 +2,8 @@
 
 import { extname, join, dirname, basename, resolve } from "node:path";
 import { stat, readdir, rm, rename } from "node:fs/promises";
+import { homedir } from "node:os";
+import { timingSafeEqual } from "node:crypto";
 import {
   Library,
   subLangsFor,
@@ -53,7 +55,6 @@ import {
   getProgress,
   addCard,
   deleteCard,
-  uploadImage,
   uploadMedia,
   resolveMediaName,
   ankiLocalAvailable,
@@ -68,6 +69,7 @@ import {
   reviewStatus,
 } from "../lib/review.ts";
 import { readSettings, writeSettings } from "../lib/settings.ts";
+import { parseEnvText } from "../lib/env.ts";
 import {
   logEvent,
   logEvents,
@@ -125,6 +127,59 @@ function json(data: unknown, status = 200): Response {
 
 function err(message: string, status = 500): Response {
   return json({ error: message }, status);
+}
+
+// --- ZEHNTAGE_DB_TOKEN auth gate (for write-back endpoints) -----------------
+// Read once from ~/.env (parsed via env.ts) with a process-env fallback. When
+// the var is UNSET the gate is OPEN (returns null from requireDbToken) so we
+// never lock the user out before they opt in. When SET, requests must present
+// the token (Authorization: Bearer <t> or X-Zehntage-Token: <t>), compared in
+// constant time.
+let _dbToken: string | null | undefined; // undefined = not yet loaded
+async function dbToken(): Promise<string | null> {
+  if (_dbToken !== undefined) return _dbToken;
+  let fromFile: string | undefined;
+  try {
+    const vars = parseEnvText(await Bun.file(join(homedir(), ".env")).text());
+    fromFile = vars["ZEHNTAGE_DB_TOKEN"];
+  } catch {
+    // missing ~/.env is fine — fall back to process env
+  }
+  const tok = (fromFile ?? process.env.ZEHNTAGE_DB_TOKEN ?? "").trim();
+  _dbToken = tok.length > 0 ? tok : null;
+  return _dbToken;
+}
+
+/** Constant-time string compare that doesn't leak length via early return. */
+function safeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a, "utf8");
+  const bb = Buffer.from(b, "utf8");
+  if (ab.length !== bb.length) {
+    // Still run a compare against a same-length buffer to keep timing flat.
+    timingSafeEqual(ab, ab);
+    return false;
+  }
+  return timingSafeEqual(ab, bb);
+}
+
+/** Extract the presented token from Authorization: Bearer / X-Zehntage-Token. */
+function presentedToken(req: Request): string {
+  const auth = req.headers.get("authorization") ?? "";
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  if (m) return m[1]!.trim();
+  return (req.headers.get("x-zehntage-token") ?? "").trim();
+}
+
+/**
+ * Auth gate for write-back endpoints. Returns a 401 Response to short-circuit
+ * when a token IS configured but the request doesn't match; returns null (allow)
+ * when the gate is open (token unset) or the presented token is valid.
+ */
+async function requireDbToken(req: Request): Promise<Response | null> {
+  const want = await dbToken();
+  if (!want) return null; // gate open — don't lock the user out
+  if (safeEqual(presentedToken(req), want)) return null;
+  return err("unauthorized", 401);
 }
 
 async function subTracksFor(entry: LibraryEntry): Promise<SubTrack[]> {
@@ -1688,9 +1743,15 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
           name.includes("\0")
         ) return err("bad name", 400);
         // Positive extension allowlist (defense-in-depth, matches the client
-        // media regex). Notably excludes .svg — SVG is script-capable and must
-        // never be served same-origin from attacker-named media. 404 otherwise.
-        if (!/\.(jpe?g|png|gif|webp|mp3|ogg|wav|m4a|webm)$/i.test(name)) {
+        // media regex). Covers every image/audio extension Anki/this app can
+        // actually produce. Case-insensitive. Notably excludes .svg — SVG is
+        // script-capable and must never be served same-origin from
+        // attacker-named media. 404 otherwise.
+        if (
+          !/\.(jpe?g|png|gif|webp|avif|mp3|ogg|oga|wav|m4a|flac|opus|webm)$/i.test(
+            name,
+          )
+        ) {
           return err("media not found", 404);
         }
         let bytes = ankiMediaGet(name);
@@ -1706,12 +1767,16 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
           ".png": "image/png",
           ".gif": "image/gif",
           ".webp": "image/webp",
+          ".avif": "image/avif",
           // NOTE: .svg intentionally NOT mapped — it is script-capable and is
           // also rejected by the extension allowlist above.
           ".mp3": "audio/mpeg",
           ".ogg": "audio/ogg",
+          ".oga": "audio/ogg",
+          ".opus": "audio/ogg",
           ".wav": "audio/wav",
           ".m4a": "audio/mp4",
+          ".flac": "audio/flac",
           ".webm": "video/webm",
         };
         return new Response(bytes, {
@@ -1768,9 +1833,14 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
                 const name = await storeMedia(frame, `zr-${slug}-${stamp}.jpg`);
                 imgLine = `<img src="${name}">`;
               } else {
-                // Upload the frame as a real Anki media file instead of
-                // inlining a base64 JPEG into context.
-                image = await uploadImage(frame, "image/jpeg");
+                // Local AnkiConnect is unavailable, so a remote-uploaded media
+                // name (anki_*.jpg) can't be served back through the local media
+                // proxy (which reads the local collection only) → broken <img>.
+                // Inline the frame as a self-contained data: URI instead: it
+                // always renders regardless of which Anki backend stored the
+                // card (matches the older, still-working inline-image cards).
+                const b64 = Buffer.from(frame).toString("base64");
+                imgLine = `<img src="data:image/jpeg;base64,${b64}">`;
               }
             } catch {
               // no frame — card still goes through
@@ -2062,6 +2132,10 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       }
 
       if (req.method === "POST" && path === "/api/review/answer") {
+        // Safety gate for the upcoming windowless write-back. Open when
+        // ZEHNTAGE_DB_TOKEN is unset; constant-time check when set.
+        const denied = await requireDbToken(req);
+        if (denied) return denied;
         const body = (await req.json().catch(() => ({}))) as {
           cardId?: unknown;
           ease?: unknown;

@@ -47,7 +47,22 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 // Reuse the project's existing safety/openness helpers (read-only, never write).
-import { ankiRunning, readSchemaVer, schemaSupported } from "./ankilock.ts";
+import {
+  ankiRunning,
+  backupCollection,
+  canWrite,
+  readSchemaVer,
+  schemaSupported,
+} from "./ankilock.ts";
+
+// FSRS-6 scheduling kernel (pure math; phase-aware).
+import {
+  type CardPhase,
+  type CardState,
+  type FsrsParams,
+  type Grade,
+  schedule,
+} from "./fsrs.ts";
 
 // Card rendering is owned by ./ankirender.ts (see /tmp/wave18-card-render.md).
 import {
@@ -612,5 +627,454 @@ export function dbDeckCounts(scope: ReviewScope = "zehntage"): DeckCounts {
     return { new: 0, learning: 0, review: 0 };
   } finally {
     closeDb(h);
+  }
+}
+
+// ===========================================================================
+// WRITE-BACK — dbAnswerCard (windowless, offline-only). See:
+//   /tmp/wave18-fsrs-writeback.md  (exact mutation recipe, schema ver 18)
+//   /tmp/wave18-db-safety.md       (refuse-to-write / backup / atomicity)
+//
+// Fail-closed posture: this NEVER opens the real collection read-write unless
+// ankilock.canWrite() passes EVERY gate (Anki not running, no hot WAL/journal,
+// schema 18). A backup is taken before the first byte is written. All work
+// happens inside a single BEGIN IMMEDIATE transaction; any error rolls back.
+// ===========================================================================
+
+/** Map a card's (type, queue) to the FSRS phase the kernel needs. */
+function phaseOf(type: number, queue: number): CardPhase {
+  // type: 0=new 1=learning 2=review 3=relearning ; queue<0 means suspended/buried.
+  if (type === 0) return "new";
+  if (type === 1) return "learning";
+  if (type === 3) return "relearning";
+  return "review"; // type === 2
+}
+
+/** Decoded `cards.data` FSRS memory blob. */
+interface CardData {
+  pos?: number;
+  s?: number;
+  d?: number;
+  dr?: number;
+  decay?: number;
+  lrt?: number;
+  [k: string]: unknown;
+}
+
+function parseCardData(raw: unknown): CardData {
+  if (raw == null) return {};
+  let text: string;
+  if (typeof raw === "string") text = raw;
+  else if (raw instanceof Uint8Array) text = new TextDecoder().decode(raw);
+  else return {};
+  text = text.trim();
+  if (!text) return {};
+  try {
+    const o = JSON.parse(text);
+    return o && typeof o === "object" ? (o as CardData) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Deck FSRS params, with per-card dr/decay overriding deck defaults. */
+function deckFsrsParams(db: Database, data: CardData): FsrsParams {
+  const row = db.query("SELECT config FROM deck_config WHERE id = 1").get() as
+    | { config: Uint8Array }
+    | null;
+  if (!row) throw new Error("deck_config id=1 missing");
+  const dc = decodeDeckConfig(new Uint8Array(row.config)); // throws if weights != 21
+  const w = dc.weights;
+  // decay magnitude: per-card `decay` is the source of truth (= -w[20]); fall
+  // back to w[20] from the deck weight vector. Both should match (0.1 here).
+  const decay =
+    Number.isFinite(data.decay) && (data.decay as number) > 0
+      ? (data.decay as number)
+      : w[20];
+  if (!Number.isFinite(decay) || (decay as number) <= 0) {
+    throw new Error(`invalid decay ${decay}`);
+  }
+  // desiredRetention: per-card `dr` is canonical (spec §1.3 — the deck proto
+  // float for DR decoded implausibly). Fall back to deck DR if in (0,1], else 0.9.
+  let dr = Number.isFinite(data.dr) ? (data.dr as number) : NaN;
+  if (!(dr > 0 && dr <= 1)) {
+    dr = dc.desiredRetention > 0 && dc.desiredRetention <= 1 ? dc.desiredRetention : 0.9;
+  }
+  const maxInterval =
+    dc.maximumReviewInterval > 0 ? dc.maximumReviewInterval : 36500;
+  return {
+    w,
+    decay: decay as number,
+    desiredRetention: dr,
+    learningSteps: dc.learningSteps,
+    relearningSteps: dc.relearningSteps,
+    maxInterval,
+  };
+}
+
+/**
+ * Encode the learning `left` field: a*1000 + b where b = steps remaining to
+ * graduate and a = reps remaining today (we use b for both, matching Anki's
+ * fresh-step encoding closely enough for a windowless writer; spec §3.A note).
+ */
+function encodeLeft(stepsRemaining: number): number {
+  const b = Math.max(0, stepsRemaining);
+  return b * 1000 + b;
+}
+
+export interface AnswerResult {
+  ok: boolean;
+  error?: string;
+  reason?: string;
+}
+
+/**
+ * Grade a single card directly in the real collection (offline only).
+ *
+ * @param cardId the `cards.id` to answer.
+ * @param ease   button pressed: 1=Again, 2=Hard, 3=Good, 4=Easy.
+ * @returns {ok:true} on a committed, integrity-checked write; otherwise
+ *          {ok:false, reason} for a refused write (gate failed) or
+ *          {ok:false, error} for an operational failure (rolled back).
+ *
+ * SAFETY: refuses unless ankilock.canWrite() passes all gates (Anki closed,
+ * no hot WAL/journal, schema 18). Backs up before writing. One BEGIN IMMEDIATE
+ * transaction; rollback on any error; never touches col.scm; sets usn=-1.
+ */
+export async function dbAnswerCard(
+  cardId: number,
+  ease: 1 | 2 | 3 | 4,
+  // Test-only seam. Production code must NOT pass this. It lets the test suite
+  // (a) point at a TEMP COPY collection and (b) inject the write-gate / backup
+  // so the happy path can run against the copy while the real Anki is open and
+  // the real collection is never touched. Defaults wire the real, fail-closed
+  // implementations against the user's real collectionPath().
+  testHooks?: {
+    path?: string;
+    canWrite?: (p: string) => { ok: boolean; reason?: string };
+    backup?: (p: string) => Promise<unknown>;
+  },
+): Promise<AnswerResult> {
+  const path = testHooks?.path ?? collectionPath();
+  const gateFn = testHooks?.canWrite ?? ((p: string) => canWrite(p));
+  const backupFn = testHooks?.backup ?? ((p: string) => backupCollection(p));
+
+  // 1. REFUSE-TO-WRITE gates (fail-closed). NEVER proceed if Anki is open.
+  const gate = gateFn(path);
+  if (!gate.ok) return { ok: false, reason: gate.reason ?? "refused" };
+
+  // 2. Backup BEFORE any write.
+  try {
+    await backupFn(path);
+  } catch (e) {
+    return { ok: false, error: `backup failed: ${(e as Error).message}` };
+  }
+
+  // 3. Open the REAL collection read-WRITE only inside the write path.
+  let db: Database | null = null;
+  let began = false;
+  try {
+    db = new Database(path, { readwrite: true });
+    db.exec("PRAGMA busy_timeout = 1000");
+    db.exec("PRAGMA journal_mode = wal");
+    db.exec("PRAGMA synchronous = FULL");
+    // Register unicase so deck_config / any unicase-bearing PREPARE succeeds
+    // (mirrors the read path). Best-effort; deck_config query needs no collation.
+    tryRegisterUnicase(db);
+
+    // BEGIN IMMEDIATE — grab the write lock up front; abort on BUSY.
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      began = true;
+    } catch {
+      try {
+        db.close();
+      } catch {
+        /* ignore */
+      }
+      return { ok: false, reason: "locked" };
+    }
+
+    const card = db
+      .query(
+        "SELECT id, type, queue, due, ivl, factor, reps, lapses, left, data FROM cards WHERE id = ?",
+      )
+      .get(cardId) as
+      | {
+          id: number;
+          type: number;
+          queue: number;
+          due: number;
+          ivl: number;
+          factor: number;
+          reps: number;
+          lapses: number;
+          left: number;
+          data: unknown;
+        }
+      | null;
+    if (!card) {
+      db.exec("ROLLBACK");
+      began = false;
+      db.close();
+      return { ok: false, error: `card ${cardId} not found` };
+    }
+
+    const colRow = db.query("SELECT crt FROM col LIMIT 1").get() as { crt: number };
+    const crt = colRow.crt;
+    const rollover = readConfigInt(db, "rollover") ?? DEFAULT_ROLLOVER_HOUR;
+
+    const nowMs = Date.now();
+    const nowSec = Math.floor(nowMs / 1000);
+    const today = Math.floor((nowSec - crt - rollover * 3600) / 86400);
+
+    const data = parseCardData(card.data);
+    const params = deckFsrsParams(db, data);
+    const phase = phaseOf(card.type, card.queue);
+
+    // Elapsed days since last review (whole days, >= 0). New cards: 0.
+    const lrt = Number.isFinite(data.lrt) ? (data.lrt as number) : 0;
+    const elapsedDays =
+      lrt > 0 ? Math.max(0, Math.round((nowSec - lrt) / 86400)) : 0;
+
+    const state: CardState = {
+      stability: Number.isFinite(data.s) ? (data.s as number) : null,
+      difficulty: Number.isFinite(data.d) ? (data.d as number) : null,
+    };
+
+    const grade = ease as Grade;
+    const res = schedule(state, grade, elapsedDays, params, phase);
+
+    // -- Derive the new card row + revlog row per spec §3/§4/§5. --
+    const learnSteps =
+      params.learningSteps.length > 0 ? params.learningSteps : [1, 10];
+    const relearnSteps =
+      params.relearningSteps.length > 0 ? params.relearningSteps : [10];
+    const prevIvlDays = card.ivl; // pre-answer interval in days (column units)
+
+    let newType: number;
+    let newQueue: number;
+    let newDue: number;
+    let newIvl: number;
+    let newLeft = card.left;
+    let reps = card.reps + 1;
+    let lapses = card.lapses;
+    let revlogType: number; // 0 learn, 1 review, 2 relearn (pre-answer path)
+    let revlogIvl: number; // signed: negative=seconds, positive=days
+    let revlogLastIvl: number;
+
+    const wasReview = phase === "review";
+    const wasLearning = phase === "learning";
+    const wasRelearning = phase === "relearning";
+    const wasNew = phase === "new";
+
+    // revlog "type" follows the card's PRE-answer scheduling path.
+    revlogType = wasReview ? 1 : wasRelearning ? 2 : 0;
+
+    // lastIvl: what the interval was before this review (signed).
+    if (wasReview) {
+      revlogLastIvl = prevIvlDays; // days
+    } else if (wasLearning || wasRelearning) {
+      // intraday step: previous step length unknown precisely; use seconds of
+      // the current (about-to-leave) step horizon if due is epoch-sec, else 0.
+      revlogLastIvl =
+        card.queue === 1 && card.due > today
+          ? -Math.max(60, card.due - nowSec)
+          : 0;
+    } else {
+      revlogLastIvl = 0; // new card
+    }
+
+    const graduateToReview = () => {
+      newType = 2;
+      newQueue = 2;
+      newIvl = res.intervalDays;
+      newDue = today + newIvl;
+      newLeft = 0;
+      revlogIvl = newIvl; // positive days
+    };
+
+    const enterLearn = (steps: number[], stepIdx: number, relearn: boolean) => {
+      const stepMin = steps[Math.min(stepIdx, steps.length - 1)] ?? 1;
+      const stepSec = Math.round(stepMin * 60);
+      newType = relearn ? 3 : 1;
+      newQueue = 1;
+      newDue = nowSec + stepSec;
+      newIvl = 0;
+      newLeft = encodeLeft(steps.length - stepIdx);
+      revlogIvl = -stepSec; // negative seconds
+    };
+
+    if (wasNew) {
+      if (grade === 4) {
+        // Easy → graduate straight to review.
+        graduateToReview();
+      } else if (grade === 3) {
+        // Good → advance to the next learning step (or graduate if 1 step).
+        if (learnSteps.length <= 1) graduateToReview();
+        else enterLearn(learnSteps, 1, false);
+      } else {
+        // Again/Hard → first learning step.
+        enterLearn(learnSteps, 0, false);
+      }
+    } else if (wasLearning) {
+      if (grade === 1) {
+        enterLearn(learnSteps, 0, false); // back to step 0
+      } else if (grade === 4) {
+        graduateToReview();
+      } else {
+        // Good/Hard advance. Decode current step from `left`.
+        const stepsLeft = card.left % 1000; // b = steps remaining to graduate
+        const curIdx = Math.max(0, learnSteps.length - stepsLeft);
+        const nextIdx = grade === 3 ? curIdx + 1 : curIdx; // Hard repeats step
+        if (nextIdx >= learnSteps.length) graduateToReview();
+        else enterLearn(learnSteps, nextIdx, false);
+      }
+    } else if (wasRelearning) {
+      if (grade === 1) {
+        enterLearn(relearnSteps, 0, true); // restart relearn (no extra lapse)
+      } else if (grade === 4) {
+        graduateToReview();
+      } else {
+        const stepsLeft = card.left % 1000;
+        const curIdx = Math.max(0, relearnSteps.length - stepsLeft);
+        const nextIdx = grade === 3 ? curIdx + 1 : curIdx;
+        if (nextIdx >= relearnSteps.length) graduateToReview();
+        else enterLearn(relearnSteps, nextIdx, true);
+      }
+    } else {
+      // wasReview
+      if (grade === 1) {
+        // Lapse → enter relearning (or straight back to review if no steps).
+        lapses += 1;
+        if (relearnSteps.length > 0) {
+          enterLearn(relearnSteps, 0, true);
+          revlogType = 1; // the lapse review row is a review-type row
+        } else {
+          newType = 2;
+          newQueue = 2;
+          newIvl = res.intervalDays;
+          newDue = today + newIvl;
+          revlogIvl = newIvl;
+        }
+        revlogLastIvl = prevIvlDays;
+      } else {
+        // Hard/Good/Easy recall → stay review.
+        newType = 2;
+        newQueue = 2;
+        newIvl = res.intervalDays;
+        newDue = today + newIvl;
+        revlogIvl = newIvl;
+      }
+    }
+
+    // The closures assign through outer lets; assert all set.
+    // (TS can't prove definite assignment across closures, so coerce.)
+    const finalType = newType!;
+    const finalQueue = newQueue!;
+    const finalDue = newDue!;
+    const finalIvl = newIvl!;
+    const finalRevlogIvl = revlogIvl!;
+
+    // Updated FSRS memory state JSON. Preserve pos; refresh s/d/dr/decay/lrt.
+    const newData: CardData = {
+      ...data,
+      s: res.stability,
+      d: res.difficulty,
+      dr: params.desiredRetention,
+      decay: params.decay,
+      lrt: nowSec,
+    };
+    const dataJson = JSON.stringify(newData);
+
+    // 5a. UPDATE cards (usn=-1, mod in SECONDS). Leave factor/odue/odid as-is.
+    db.query(
+      `UPDATE cards SET type=?, queue=?, due=?, ivl=?, factor=?,
+          reps=?, lapses=?, left=?, data=?, mod=?, usn=-1
+       WHERE id=?`,
+    ).run(
+      finalType,
+      finalQueue,
+      finalDue,
+      finalIvl,
+      card.factor,
+      reps,
+      lapses,
+      newLeft,
+      dataJson,
+      nowSec,
+      cardId,
+    );
+
+    // 5b. INSERT revlog. id = epoch-ms (unique; bump on collision). usn=-1.
+    let revId = nowMs;
+    const exists = db.query("SELECT 1 FROM revlog WHERE id=? LIMIT 1");
+    while (exists.get(revId)) revId += 1;
+    db.query(
+      `INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type)
+       VALUES (?, ?, -1, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      revId,
+      cardId,
+      grade,
+      finalRevlogIvl,
+      revlogLastIvl,
+      card.factor,
+      0, // answer duration unknown in a windowless writer; 0ms
+      revlogType,
+    );
+
+    // 5c. col bookkeeping: bump col.mod (MS). NEVER touch col.scm or col.usn.
+    db.query("UPDATE col SET mod=?").run(nowMs);
+
+    // Pre-commit invariant + integrity check (still inside the txn).
+    const fk = db.query("PRAGMA foreign_key_check").all();
+    if (fk.length > 0) {
+      db.exec("ROLLBACK");
+      began = false;
+      db.close();
+      return { ok: false, error: "foreign_key_check failed" };
+    }
+
+    db.exec("COMMIT");
+    began = false;
+
+    // 5d. Fold WAL back, then verify integrity. Failure here = report (already
+    // committed; backup exists for manual recovery).
+    try {
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } catch {
+      /* non-fatal */
+    }
+    const ic = db.query("PRAGMA integrity_check").get() as
+      | { integrity_check?: string }
+      | Record<string, unknown>
+      | null;
+    const icVal =
+      ic && typeof ic === "object"
+        ? String((ic as Record<string, unknown>).integrity_check ?? Object.values(ic)[0] ?? "")
+        : "";
+    db.close();
+    db = null;
+    if (icVal && icVal !== "ok") {
+      return { ok: false, error: `integrity_check: ${icVal}` };
+    }
+    return { ok: true };
+  } catch (e) {
+    if (db) {
+      if (began) {
+        try {
+          db.exec("ROLLBACK");
+        } catch {
+          /* ignore */
+        }
+      }
+      try {
+        db.close();
+      } catch {
+        /* ignore */
+      }
+    }
+    return { ok: false, error: (e as Error).message };
   }
 }

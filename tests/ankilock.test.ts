@@ -5,9 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   backupCollection,
+  busyProbeLocked,
   canWrite,
   collectionLocked,
   listBackupDirs,
+  looksLikeAnkiForTest,
   pruneBackups,
   schemaSupported,
   timestampUtc,
@@ -35,7 +37,63 @@ describe("schemaSupported", () => {
   });
 });
 
+describe("looksLikeAnki (process detection)", () => {
+  test("matches native and snap Anki", () => {
+    expect(looksLikeAnkiForTest("/usr/bin/python /usr/bin/anki")).toBe(true);
+    expect(looksLikeAnkiForTest("/snap/anki/42/usr/bin/anki")).toBe(true);
+    expect(looksLikeAnkiForTest("/Applications/Anki.app/Contents/MacOS/anki")).toBe(true);
+    expect(looksLikeAnkiForTest("python -m aqt")).toBe(true);
+  });
+
+  test("matches FLATPAK Anki (net.ankiweb.Anki) — fix #1", () => {
+    // app-id passed to the flatpak/bwrap wrapper
+    expect(looksLikeAnkiForTest("/usr/bin/flatpak run net.ankiweb.Anki")).toBe(true);
+    // bwrap-wrapped real binary, app-id only in the per-app data dir
+    expect(
+      looksLikeAnkiForTest(
+        "bwrap --args 42 /app/bin/anki /home/u/.var/app/net.ankiweb.Anki/data",
+      ),
+    ).toBe(true);
+    // the app-id alone (the case the old regex missed: '.' before Anki)
+    expect(looksLikeAnkiForTest("net.ankiweb.Anki")).toBe(true);
+  });
+
+  test("does not match unrelated processes", () => {
+    expect(looksLikeAnkiForTest("/usr/bin/firefox")).toBe(false);
+    expect(looksLikeAnkiForTest("/usr/lib/systemd/systemd")).toBe(false);
+    expect(looksLikeAnkiForTest("node /home/u/dev/zehntage-reactor/server.ts")).toBe(false);
+  });
+});
+
+describe("busyProbeLocked temp-only guard (fix #2)", () => {
+  test("refuses a non-temp path (never opens real DB rwc)", () => {
+    // A path outside tmpdir must throw before any Database open.
+    expect(() => busyProbeLocked("/home/u/.local/share/Anki2/User 1/collection.anki2")).toThrow(
+      /not under the temp dir|refused/i,
+    );
+  });
+
+  test("allows a path under tmpdir (no throw on contract; result is boolean)", () => {
+    // col lives under tmpdir; it's fake bytes so the open/probe will fail and
+    // report "locked" (true), but crucially it does NOT throw the guard error.
+    const result = busyProbeLocked(col);
+    expect(typeof result).toBe("boolean");
+  });
+
+  test("collectionLocked({probe:true}) on a non-temp path throws via the guard", () => {
+    expect(() =>
+      collectionLocked("/home/u/.local/share/Anki2/User 1/collection.anki2", { probe: true }),
+    ).toThrow(/not under the temp dir|refused/i);
+  });
+});
+
 describe("collectionLocked", () => {
+  test("detects a -shm (live WAL connection) even with empty -wal — fix #3", async () => {
+    await writeFile(`${col}-wal`, ""); // empty -wal (truncate-checkpointed)
+    await writeFile(`${col}-shm`, "shm-index-bytes");
+    expect(collectionLocked(col)).toBe(true);
+  });
+
   test("false when no sidecar files exist", () => {
     expect(collectionLocked(col)).toBe(false);
   });

@@ -128,8 +128,9 @@ describe("learningColor retention decay", () => {
   });
 
   test("mature non-overdue word renders plain (null), unchanged", () => {
-    expect(learningColor(P(30))).toBeNull();
-    expect(learningColor(P(21))).toBeNull();
+    // maturity is now 60d (~2 months); intervals >= 60 render plain
+    expect(learningColor(P(60))).toBeNull();
+    expect(learningColor(P(90))).toBeNull();
   });
 
   test("overdue word mixes unknown-red into its base color", () => {

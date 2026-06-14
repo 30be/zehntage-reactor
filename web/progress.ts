@@ -129,8 +129,8 @@ export function progressBucket(intervalDays: number): number {
 // --- learning-word text color ------------------------------------------------
 //
 // Words in the deck render in BLUE that fades toward the ambient text color
-// as the SRS interval grows (OKLCH interpolation, hue-aware). At >= 21 days
-// (Anki "mature") the word is indistinguishable from plain text.
+// as the SRS interval grows (OKLCH interpolation, hue-aware). At >= 60 days
+// (~2 months interval) the word is indistinguishable from plain text.
 // Both the blue and the ambient are CSS custom properties resolved at the
 // token: `--learn-blue` is per-context (darker on light bg, lighter on the
 // dark overlay — see styles.css) so contrast clears AA in either place, and
@@ -141,8 +141,8 @@ export const LEARNING_BLUE = "oklch(0.65 0.15 250)";
 /** Fallback unknown-red hue intent (the per-context `--tok-unk` in styles.css
  *  resolves to AA-clearing literals: #9e2f3a on light, #f2a0a8 on dark). */
 export const UNKNOWN_RED = "#b35454";
-/** Interval (days) at which a learning word reaches the ambient color. */
-export const LEARNING_MATURE_DAYS = 21;
+/** Interval (days) at which a learning word reaches the ambient color (~2 months). */
+export const LEARNING_MATURE_DAYS = 60;
 /**
  * Max fraction (0..1) an overdue word's color is pulled back toward the
  * unknown-red. Kept SUBTLE so it reads as a tint, not a full red repaint.
@@ -183,7 +183,7 @@ export function decayFactor(p?: ProgressEntry): number {
  * Text color for a word IN the deck.
  *
  * Base: blue -> ambient as the SRS interval grows (OKLCH interpolation).
- * At/after maturity (>= 21d) the base is the ambient color (returns null
+ * At/after maturity (>= 60d / ~2 months) the base is the ambient color (returns null
  * only when there is NO decay to apply, so the token renders plain text).
  *
  * Retention decay: if the word is currently OVERDUE (`isDue`), the base

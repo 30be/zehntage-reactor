@@ -245,6 +245,61 @@ describe("same-day (elapsed 0) short-term path", () => {
   });
 });
 
+describe("phase gating of the same-day short-term path", () => {
+  // S=5, D=5, elapsed=0. Short-term values pinned in the block above:
+  //   Good (g=3) short-term S'_ss = 4.725686766522371.
+  // The long-term recall path at elapsed 0 (R = 1, so e^(w[10]*(1-R)) - 1 = 0)
+  // yields S'_r = max(S*(0+1), S+0.01) = S + 0.01 = 5.01 for any success grade.
+  const st: CardState = { stability: 5, difficulty: 5 };
+
+  test("learning phase at elapsed 0 uses short-term stability", () => {
+    const res = schedule(st, 3, 0, PARAMS, "learning");
+    approx(res.stability, 4.725686766522371, 1e-9);
+  });
+
+  test("relearning phase at elapsed 0 uses short-term stability", () => {
+    const res = schedule(st, 3, 0, PARAMS, "relearning");
+    approx(res.stability, 4.725686766522371, 1e-9);
+  });
+
+  test("review phase at elapsed 0 uses recall path (NOT short-term)", () => {
+    const res = schedule(st, 3, 0, PARAMS, "review");
+    // Recall path at R=1 collapses to the monotone-up clamp: S + 0.01.
+    approx(res.stability, 5.01, 1e-9);
+    // And it is distinctly different from the short-term value.
+    expect(Math.abs(res.stability - 4.725686766522371)).toBeGreaterThan(0.1);
+  });
+
+  test("review phase same-day differs across grades via recall clamp floor", () => {
+    // All success grades hit the S+0.01 floor at R=1, so they coincide here;
+    // the key assertion is that none of them equal the short-term values.
+    for (const g of [2, 3, 4] as Grade[]) {
+      const res = schedule(st, g, 0, PARAMS, "review");
+      approx(res.stability, 5.01, 1e-9);
+    }
+  });
+
+  test("omitted phase preserves legacy short-term behaviour at elapsed 0", () => {
+    // Backward compatibility: no phase => any same-day non-Again grade short-term.
+    approx(schedule(st, 3, 0, PARAMS).stability, 4.725686766522371, 1e-9);
+  });
+
+  test("phase has no effect when elapsedDays > 0 (long-term recall regardless)", () => {
+    const longTerm = schedule(st, 3, 10, PARAMS);
+    const longTermReview = schedule(st, 3, 10, PARAMS, "review");
+    const longTermLearning = schedule(st, 3, 10, PARAMS, "learning");
+    approx(longTermReview.stability, longTerm.stability, 1e-12);
+    approx(longTermLearning.stability, longTerm.stability, 1e-12);
+  });
+
+  test("Again at elapsed 0 uses lapse path regardless of phase", () => {
+    for (const p of ["learning", "relearning", "review"] as const) {
+      const r = schedule(st, 1, 0, PARAMS, p);
+      expect(r.stability).toBeLessThanOrEqual(5);
+    }
+  });
+});
+
 describe("user's real deck params (decay=0.1, w[20]=0.1)", () => {
   // Writeback §1.3: this deck uses decay magnitude 0.1, FACTOR ≈ 1.868.
   const userW = [

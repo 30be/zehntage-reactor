@@ -60,6 +60,22 @@ export interface ScheduleResult {
 
 export type Grade = 1 | 2 | 3 | 4; // 1=Again, 2=Hard, 3=Good, 4=Easy
 
+/**
+ * Card phase, derived by the caller from the Anki card's queue/type. Controls
+ * whether the same-day (intraday) short-term stability path is eligible:
+ *
+ *   - "new"        — never reviewed; takes the new-card S0/D0 branch.
+ *   - "learning"   — in the learning step queue (intraday short-term applies).
+ *   - "relearning" — in the relearning step queue (intraday short-term applies).
+ *   - "review"     — graduated review-state card; same-day re-grades MUST use
+ *                    the long-term recall path, NOT the short-term path.
+ *
+ * Per FSRS-6 the short-term formula S'_ss is scoped to learning/relearning
+ * intraday steps only. The write-path (ankidb dbAnswerCard) passes the real
+ * phase; see the `schedule` `phase` parameter.
+ */
+export type CardPhase = "new" | "learning" | "review" | "relearning";
+
 const DEFAULT_MAX_INTERVAL = 36500;
 
 function clamp(x: number, lo: number, hi: number): number {
@@ -256,8 +272,10 @@ function nextDifficulty(w: number[], difficulty: number, grade: Grade): number {
  *   R   = retrievability(elapsedDays, S, decay)
  *   Again (grade 1) → lapse stability S'_f, D'' (harder)
  *   Hard/Good/Easy  → recall stability S'_r, D'' (mean-reverting)
- *   When elapsedDays == 0 (same-day) the short-term S'_ss path is used for
- *   the non-lapse grades, matching Anki's learning-step behaviour.
+ *   When elapsedDays == 0 (same-day) AND the card is in a learning/relearning
+ *   phase, the short-term S'_ss path is used for the non-lapse grades, matching
+ *   Anki's learning-step behaviour. A same-day review-state card uses the normal
+ *   recall path (FSRS-6 scopes S'_ss to intraday learning/relearning only).
  *
  * The next interval is nextInterval(S', desiredRetention, decay), rounded to
  * the nearest whole day and clamped to [1, maxInterval].
@@ -266,12 +284,20 @@ function nextDifficulty(w: number[], difficulty: number, grade: Grade): number {
  * @param grade        1=Again, 2=Hard, 3=Good, 4=Easy
  * @param elapsedDays  whole days since last review (ignored for new cards)
  * @param params       deck FSRS-6 parameters
+ * @param phase        optional card phase from the caller (derived from the
+ *                     Anki queue/type). Gates the same-day short-term path so it
+ *                     applies ONLY for "learning"/"relearning". When omitted,
+ *                     behaviour is backward compatible: any same-day non-Again
+ *                     grade takes the short-term path (legacy callers). Pass the
+ *                     real phase (the write-path does) to get correct FSRS-6
+ *                     scoping for review-state cards.
  */
 export function schedule(
   state: CardState,
   grade: Grade,
   elapsedDays: number,
   params: FsrsParams,
+  phase?: CardPhase,
 ): ScheduleResult {
   const { w, decay, desiredRetention } = params;
   assertDecay(decay);
@@ -291,15 +317,19 @@ export function schedule(
     const d = state.difficulty as number;
     const retr = retrievability(elapsedDays, s, decay);
 
+    // Short-term (intraday) path is FSRS-6-scoped to learning/relearning only.
+    // When `phase` is omitted we preserve the legacy behaviour (any same-day
+    // non-Again grade takes short-term) for backward compatibility; when the
+    // caller supplies a phase, a "review" (or "new") phase same-day re-grade
+    // correctly falls through to the long-term recall path.
+    const shortTermEligible =
+      phase === undefined || phase === "learning" || phase === "relearning";
+
     if (grade === 1) {
       // Lapse.
       stability = lapseStability(w, d, s, retr);
-    } else if (elapsedDays <= 0) {
-      // Same-day success: short-term path.
-      // TODO(write-path): gate short-term path on learning/relearning phase —
-      // spec §2 scopes S'_ss to intraday learning/relearning steps only, not
-      // review-state cards. Schedule currently lacks phase info; fix in the
-      // write-back wave once the phase is threaded through from the caller.
+    } else if (elapsedDays <= 0 && shortTermEligible) {
+      // Same-day success in a learning/relearning step: short-term path.
       stability = shortTermStability(w, s, grade);
     } else {
       // Long-term recall.

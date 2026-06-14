@@ -1,83 +1,70 @@
-// review.e2e.ts — Flashcard Review (#/review) coverage.
+// review.e2e.ts — Flashcard Review (#/review) REAL flow coverage.
 //
-// The review client (web/ReviewRoute.tsx) was rewritten into a no-typing,
-// hotkey-graded client whose scheduling lives entirely in Anki: the server's
-// reviewQueue() returns { available: false } whenever real AnkiConnect is
-// absent. In e2e we run ANKI_FAKE mode, so AnkiConnect is "unavailable" and the
-// route deterministically renders the OFFLINE state. These tests therefore
-// assert the offline-state markup plus the scope toggle's localStorage
-// persistence — the only review behavior reachable without a live Anki. All
-// selectors are derived from web/ReviewRoute.tsx.
+// The review client (web/ReviewRoute.tsx) is a no-typing, hotkey-graded client
+// whose scheduling lives entirely in Anki. In e2e we run ANKI_FAKE mode: the
+// server's reviewQueue()/answerCard() now serve a small in-memory fake queue
+// (src/lib/anki.ts, ANKI_FAKE branch — two fixed seed cards), so the route
+// renders REAL review cards and we can drive the actual space→reveal→grade loop
+// all the way to the done state.
+//
+// The fake queue is a single shared deck that drains as cards are graded and is
+// NOT reseeded mid-process (so the done state is reachable). This spec therefore
+// runs as ONE test that exercises the whole flow in a single pass — it does not
+// rely on the queue being refilled between tests.
+//
+// The scope toggle was removed (scope is always "all"); this spec asserts its
+// absence along with the absence of any type-the-word input. All selectors
+// derive from web/ReviewRoute.tsx.
 
 import { test, expect } from "./helpers.ts";
 
-const SCOPE_KEY = "zr.review.scope";
-
-test.describe("Review mode (offline / fake-Anki)", () => {
-  test("renders the offline state, not a type-the-word input", async ({
+test.describe("Review mode (real flow / fake-Anki queue)", () => {
+  test("space→reveal→grade drives both seed cards through to All done", async ({
     page,
   }) => {
     await page.goto("/#/review");
 
-    // Offline state: ANKI_FAKE => reviewQueue available:false => phase "offline".
-    const empty = page.locator(".review-empty");
-    await expect(empty).toBeVisible();
-    await expect(empty).toContainText("Open Anki to review");
+    // --- first card: question phase --------------------------------------
+    const question = page.locator(".review-question");
+    await expect(question).toBeVisible();
+    await expect(question).not.toBeEmpty();
+    // answer not yet revealed; the hint prompts for Space.
+    await expect(page.locator(".review-answer")).toHaveCount(0);
+    await expect(page.locator(".review-hint")).toContainText("show answer");
 
-    // The "Try again" / "Back to library" actions of the offline state.
-    await expect(
-      page.locator(".review-actions .retry", { hasText: "Try again" }),
-    ).toBeVisible();
-
-    // The OLD type-the-word UI is gone: no input, no check/hint, no histogram.
-    await expect(page.locator(".review-input")).toHaveCount(0);
+    // No type-the-word UI and no scope toggle anywhere on the route.
+    await expect(page.locator(".review-scope")).toHaveCount(0);
+    await expect(page.locator("input[type='checkbox']")).toHaveCount(0);
     await expect(page.locator("input[type='text']")).toHaveCount(0);
+    await expect(page.locator("textarea")).toHaveCount(0);
+    await expect(page.locator(".review-input")).toHaveCount(0);
     await expect(page.locator(".review-prompt")).toHaveCount(0);
     await expect(page.locator(".forecast-histogram")).toHaveCount(0);
-    await expect(page.locator(".review-correct")).toHaveCount(0);
-    await expect(page.locator(".review-wrong")).toHaveCount(0);
-  });
 
-  test("scope toggle is present, clickable, and persists to localStorage", async ({
-    page,
-  }) => {
-    await page.goto("/#/review");
+    // --- Space reveals the answer ----------------------------------------
+    await page.locator("body").click(); // window focus for the keydown listener
+    await page.keyboard.press(" ");
+    await expect(page.locator(".review-answer")).toBeVisible();
+    await expect(page.locator(".review-grade")).toBeVisible();
 
-    const toggle = page.locator(".review-scope input[type='checkbox']");
-    await expect(toggle).toBeVisible();
-    await expect(
-      page.locator(".review-scope", { hasText: "zehntage cards only" }),
-    ).toBeVisible();
+    // --- grade the first card via the click path (Good) → next card -------
+    await page.locator(".review-good").click();
+    await expect(page.locator(".review-question")).toBeVisible();
+    await expect(page.locator(".review-answer")).toHaveCount(0);
 
-    // Default scope is "zehntage" => the checkbox is checked.
-    await expect(toggle).toBeChecked();
+    // --- reveal + grade the last card via hotkeys (Space, then 3) ---------
+    await page.keyboard.press(" ");
+    await expect(page.locator(".review-answer")).toBeVisible();
+    await page.keyboard.press("3");
 
-    // Unchecking switches scope to "all" and persists it.
-    await toggle.uncheck();
-    await expect(toggle).not.toBeChecked();
-    await expect
-      .poll(() => page.evaluate((k) => localStorage.getItem(k), SCOPE_KEY))
-      .toBe("all");
+    // --- drained the deck → All done state -------------------------------
+    const done = page.locator(".review-empty");
+    await expect(done).toBeVisible();
+    await expect(done).toContainText("All done");
+    await expect(done).toContainText("2 words reviewed");
 
-    // Re-checking switches back to "zehntage" and persists it.
-    await toggle.check();
-    await expect(toggle).toBeChecked();
-    await expect
-      .poll(() => page.evaluate((k) => localStorage.getItem(k), SCOPE_KEY))
-      .toBe("zehntage");
-  });
-
-  test("no forecast histogram and no type-the-word input anywhere on the route", async ({
-    page,
-  }) => {
-    await page.goto("/#/review");
-    await expect(page.locator(".review-empty")).toBeVisible();
-
-    // Belt-and-braces: nothing typed/forecast-shaped exists in the whole route.
-    await expect(page.locator("textarea")).toHaveCount(0);
+    // Still no type-the-word input / scope toggle on the done state.
     await expect(page.locator("input[type='text']")).toHaveCount(0);
-    await expect(page.locator(".review-input")).toHaveCount(0);
-    await expect(page.locator(".forecast-histogram")).toHaveCount(0);
-    await expect(page.locator(".forecast")).toHaveCount(0);
+    await expect(page.locator(".review-scope")).toHaveCount(0);
   });
 });

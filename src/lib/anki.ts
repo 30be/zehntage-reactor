@@ -22,6 +22,86 @@ export interface AnkiCard {
 const ankiFake = () => process.env.ANKI_FAKE === "1";
 const fakeCards = new Map<string, AnkiCard>();
 
+// --- ANKI_FAKE review queue (e2e only) -------------------------------------
+//
+// In fake mode the real review flow (queue → reveal → grade) has no AnkiConnect
+// to talk to, so we model a tiny in-memory FSRS-like queue. reviewQueue() serves
+// it (available:true) and answerCard() records the grade + drops the card. This
+// is ENTIRELY gated on ankiFake() — when ANKI_FAKE is unset every fake branch is
+// skipped and the real AnkiConnect paths run unchanged.
+//
+// The queue is seeded lazily (first reviewQueue() call) from the fake-Anki note
+// map if it carries any cards, else from a fixed couple of cards — so an e2e can
+// either seed via addCard()/POST /api/anki/add first, or just hit #/review cold.
+
+let fakeQueue: ReviewCard[] | null = null;
+// cardId → ease, kept for test inspection after grading.
+const fakeAnswers = new Map<number, number>();
+
+/** Build a ReviewCard from a fake-Anki note. A stable cardId is derived from
+ *  the note's noteId when present, else the front string's char codes. */
+function fakeCardFromNote(card: AnkiCard, idx: number): ReviewCard {
+  const front = typeof card.front === "string" ? card.front : `card-${idx}`;
+  const back = typeof card.back === "string" ? card.back : "";
+  const cardId =
+    typeof card.noteId === "number"
+      ? card.noteId
+      : 9_000_000 + idx; // deterministic, collision-free for the fixed seeds
+  return {
+    cardId,
+    question: `<div class="fake-q">${front}</div>`,
+    answer: `<div class="fake-q">${front}</div><hr><div class="fake-a">${back || front}</div>`,
+    front,
+  };
+}
+
+/** The two fixed cards used when no fake notes have been added. */
+function fakeSeedDefaults(): ReviewCard[] {
+  return [
+    {
+      cardId: 9_000_001,
+      question: `<div class="fake-q">勉強</div>`,
+      answer: `<div class="fake-q">勉強</div><hr><div class="fake-a">benkyō — study</div>`,
+      front: "勉強",
+    },
+    {
+      cardId: 9_000_002,
+      question: `<div class="fake-q">図書館</div>`,
+      answer: `<div class="fake-q">図書館</div><hr><div class="fake-a">toshokan — library</div>`,
+      front: "図書館",
+    },
+  ];
+}
+
+/**
+ * Lazily seed (once) and return the live fake queue. Seeds from the fake-Anki
+ * note map if any cards were added, else from a fixed couple of cards. Once
+ * built the SAME array instance is mutated by grading (answerCard splices),
+ * so a drained queue stays empty — which lets the client reach its done state
+ * on the post-batch refetch (no surprise reseed mid-session).
+ */
+function fakeQueueEnsure(): ReviewCard[] {
+  if (fakeQueue) return fakeQueue;
+  const notes = [...fakeCards.values()];
+  fakeQueue =
+    notes.length > 0
+      ? notes.map((c, i) => fakeCardFromNote(c, i))
+      : fakeSeedDefaults();
+  return fakeQueue;
+}
+
+/** Reset the fake review queue + recorded answers (e2e seeding helper). */
+export function fakeResetQueue(): void {
+  if (!ankiFake()) return;
+  fakeQueue = null;
+  fakeAnswers.clear();
+}
+
+/** Recorded grades so far (cardId → ease). e2e inspection only. */
+export function fakeGetAnswers(): Map<number, number> {
+  return new Map(fakeAnswers);
+}
+
 // --- local AnkiConnect (preferred when reachable) ---------------------------
 //
 // When a local Anki with AnkiConnect is running we talk to it DIRECTLY:
@@ -354,7 +434,15 @@ export async function reviewQueue(
   scope: "zehntage" | "all",
   limit = 50,
 ): Promise<{ available: boolean; due: number; cards: ReviewCard[] }> {
-  if (ankiFake() || !(await ankiLocalAvailable())) {
+  if (ankiFake()) {
+    // Serve the in-memory fake queue (real space→reveal→grade flow, no Anki).
+    // `scope` is honored only insofar as the queue is a single shared deck —
+    // the client always asks for "all" now (scope toggle removed).
+    const q = fakeQueueEnsure();
+    const cards = q.slice(0, limit);
+    return { available: true, due: q.length, cards };
+  }
+  if (!(await ankiLocalAvailable())) {
     return { available: false, due: 0, cards: [] };
   }
   try {
@@ -402,7 +490,17 @@ export async function answerCard(
   cardId: number,
   ease: 1 | 2 | 3 | 4,
 ): Promise<{ ok: boolean; error?: string }> {
-  if (ankiFake() || !(await ankiLocalAvailable())) {
+  if (ankiFake()) {
+    // Record the grade and drop the card from the fake queue, mirroring how a
+    // real grade removes the card from today's due set.
+    fakeAnswers.set(cardId, ease);
+    const q = fakeQueueEnsure();
+    const idx = q.findIndex((c) => c.cardId === cardId);
+    if (idx >= 0) q.splice(idx, 1);
+    bustListWordsCache();
+    return { ok: true };
+  }
+  if (!(await ankiLocalAvailable())) {
     return { ok: false, error: "AnkiConnect not available" };
   }
   try {

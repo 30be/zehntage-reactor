@@ -14,10 +14,11 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   statSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
 /** Schema versions (col.ver) we have tested and are willing to write to. */
@@ -60,7 +61,29 @@ function readProcCwd(pid: string): string | null {
 function looksLikeAnki(text: string): boolean {
   // Match the anki executable, the Anki.app, or a python process running aqt.
   // Be permissive — false positives just make us refuse, which is safe.
-  return /(^|[\\/\s])anki(\b|[\s/\\.-])/i.test(text) || /\baqt\b/i.test(text);
+  //
+  // Cases covered:
+  //  - native:  /usr/bin/anki, /usr/bin/python /usr/bin/anki  (prefix [\\/\s])
+  //  - snap:    /snap/anki/.../anki                            (prefix /)
+  //  - flatpak: net.ankiweb.Anki (app-id, "Anki" preceded by '.'),
+  //             the bwrap/flatpak wrapper cmdline, and the per-app dir
+  //             ~/.var/app/net.ankiweb.Anki/...                (matched below)
+  //  - python aqt module
+  return (
+    /(^|[\\/\s.])anki(\b|[\s/\\.-])/i.test(text) || // native/snap + flatpak app-id (.Anki)
+    /net\.ankiweb\.anki/i.test(text) || // flatpak app-id / per-app data dir, explicit
+    /\bankiweb\b/i.test(text) ||
+    /\baqt\b/i.test(text)
+  );
+}
+
+/**
+ * Test-only export of the cmdline/cwd matcher. Not part of the public runtime
+ * API (kept thin so the regression coverage for flatpak detection can pin it
+ * directly without scanning /proc).
+ */
+export function looksLikeAnkiForTest(text: string): boolean {
+  return looksLikeAnki(text);
 }
 
 /**
@@ -128,14 +151,47 @@ function fileNonEmpty(path: string): boolean {
 }
 
 /**
+ * True if `path` lives under the OS temp dir (a copy we are allowed to open
+ * read-write). Resolved/normalised on both sides to defeat trivial `..` or
+ * trailing-separator tricks; conservative — anything we cannot prove is under
+ * tmpdir is treated as NOT a temp path.
+ */
+function isUnderTmpdir(path: string): boolean {
+  try {
+    const tmp = realpathSync(tmpdir());
+    // Resolve the parent dir (the file itself may not exist yet) and re-join.
+    const resolvedDir = realpathSync(dirname(path));
+    const resolved = join(resolvedDir, basename(path));
+    const prefix = tmp.endsWith("/") ? tmp : `${tmp}/`;
+    return resolved === tmp || resolved.startsWith(prefix);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Attempt a BEGIN IMMEDIATE write-lock probe against a SQLite file. Returns
  * true if the lock could NOT be acquired (busy/locked) OR the open failed —
  * i.e. "locked / unsafe". Caller decides whether to run this against a copy.
  *
- * NEVER call this against the real collection: opening rwc can create -wal/-shm
- * and acquiring the lock is itself a write intent. Use it on a temp copy only.
+ * HARD GUARD: this opens the DB read-write (rwc), which can create -wal/-shm and
+ * is itself a write intent. It is therefore ONLY permitted against a temp copy.
+ * If `path` is not under the OS temp dir, this throws rather than touching it —
+ * so a future `collectionLocked(realPath, {probe:true})` can NEVER open the real
+ * collection read-write. Pass `allowTempOnly:false` only in dedicated unit
+ * tests that have constructed a throwaway file outside tmpdir.
  */
-export function busyProbeLocked(path: string): boolean {
+export function busyProbeLocked(
+  path: string,
+  opts: { allowTempOnly?: boolean } = {},
+): boolean {
+  const allowTempOnly = opts.allowTempOnly ?? true;
+  if (allowTempOnly && !isUnderTmpdir(path)) {
+    throw new Error(
+      `busyProbeLocked refused: ${path} is not under the temp dir. ` +
+        `This rwc-open probe may run ONLY against a temp copy, never the real collection.`,
+    );
+  }
   let db: Database | null = null;
   try {
     db = new Database(path, { readwrite: true });
@@ -155,26 +211,46 @@ export function busyProbeLocked(path: string): boolean {
 }
 
 /**
- * Is the collection locked / unsafe to write?
+ * Is the collection locked / unsafe to write?  (Conservative / fail-closed.)
  *
- * - true if a non-empty `<path>-wal` exists (uncheckpointed changes), or
- * - a hot `<path>-journal` exists, or
- * - (only when `opts.probe` is set, e.g. against a temp copy) a BEGIN IMMEDIATE
- *   busy-probe fails.
+ * For the REAL DB this is a READ-ONLY heuristic — it only inspects sidecar
+ * files, never opens the DB. It returns true if ANY of:
+ *   - a non-empty `<path>-wal` exists (uncheckpointed WAL changes), or
+ *   - a `<path>-shm` exists (a WAL shared-memory index — its presence means a
+ *     connection has the DB open in WAL mode; Anki can be open+idle with a
+ *     truncate-checkpointed *empty* -wal yet a lingering -shm), or
+ *   - a hot `<path>-journal` exists (rollback-journal mode), or
+ *   - (only when `opts.probe` is set, e.g. against a TEMP COPY) a BEGIN
+ *     IMMEDIATE busy-probe fails.
+ *
+ * IMPORTANT — this is NOT a real exclusive-lock guarantee. The sidecar checks
+ * are advisory and racy: files can appear/vanish between this call and a write.
+ * The ACTUAL exclusive-lock guarantee MUST be taken by the write module inside
+ * the real write transaction itself: open the real DB rwc ONCE, run
+ * `BEGIN IMMEDIATE`, and abort on SQLITE_BUSY. This function only cheaply rules
+ * out the obvious "Anki is clearly active" cases up front; never treat its
+ * `false` as proof the DB is free. Stay conservative — when in doubt, true.
  *
  * For the REAL DB we pass no probe option: we only inspect sidecar files and
- * never open it read-write.
+ * never open it read-write. `opts.probe` is for temp copies only and routes
+ * through busyProbeLocked, which itself refuses non-temp paths.
  */
 export function collectionLocked(
   collectionPath: string,
   opts: { probe?: boolean } = {},
 ): boolean {
   if (fileNonEmpty(`${collectionPath}-wal`)) return true;
+  // A -shm present at all implies a live WAL-mode connection (e.g. Anki open
+  // and idle after a truncate-checkpoint, which can leave -wal empty). Treat
+  // its mere existence as locked — fail-closed.
+  if (existsSync(`${collectionPath}-shm`)) return true;
   // A rollback journal is "hot" if it exists with non-zero size.
   if (existsSync(`${collectionPath}-journal`) && fileNonEmpty(`${collectionPath}-journal`)) {
     return true;
   }
   if (opts.probe) {
+    // busyProbeLocked enforces the temp-only contract itself (throws otherwise),
+    // so this branch can never open the real collection read-write.
     if (busyProbeLocked(collectionPath)) return true;
   }
   return false;

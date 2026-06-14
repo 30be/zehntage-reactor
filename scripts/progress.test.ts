@@ -53,7 +53,8 @@ test("learningColor fades blue -> ambient, null at maturity", () => {
   expect(mid).toContain("var(--learn-blue");
 
   // a smaller interval keeps MORE blue than a larger one
-  expect(learningColor(entry(1))).toContain("95%");
+  // (interval 1 at the 60-day maturity scale: 1 - 1/60 ≈ 98%)
+  expect(learningColor(entry(1))).toContain("98%");
 
   // at/after maturity -> null (render plain ambient text)
   expect(learningColor(entry(LEARNING_MATURE_DAYS))).toBeNull();
