@@ -112,10 +112,30 @@ async function jget<T>(path: string): Promise<T> {
   return (await r.json()) as T;
 }
 
-async function jpost<T>(path: string, body: unknown): Promise<T> {
+// localStorage key holding the optional write-back token. When present we send
+// it on /api/review/* writes as the `X-Zehntage-Token` header the server's
+// requireDbToken() reads (see src/server/index.ts presentedToken). When unset
+// we send nothing — the server's gate is open while ZEHNTAGE_DB_TOKEN is unset.
+const DB_TOKEN_KEY = "zr.dbToken";
+
+function dbTokenHeaders(): Record<string, string> {
+  try {
+    const t = localStorage.getItem(DB_TOKEN_KEY);
+    if (t && t.trim()) return { "X-Zehntage-Token": t.trim() };
+  } catch {
+    /* storage may be unavailable (private mode) — just send no token */
+  }
+  return {};
+}
+
+async function jpost<T>(
+  path: string,
+  body: unknown,
+  extraHeaders?: Record<string, string>,
+): Promise<T> {
   const r = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...extraHeaders },
     body: JSON.stringify(body),
   });
   if (!r.ok) {
@@ -489,14 +509,19 @@ export const api = {
     jget<ReviewQueueResponse>(`/api/review/queue?scope=${scope}`),
   // Grade a card against Anki's scheduler. ease: 1=Again 2=Hard 3=Good 4=Easy.
   reviewAnswer: (cardId: number, ease: number) =>
-    jpost<{ ok: boolean; error?: string }>("/api/review/answer", {
-      cardId,
-      ease,
-    }),
+    jpost<{ ok: boolean; error?: string }>(
+      "/api/review/answer",
+      { cardId, ease },
+      dbTokenHeaders(),
+    ),
   // Delete the note that owns cardId from Anki (DESTRUCTIVE — records graves
   // for sync). Routed: AnkiConnect when open, windowless DB write when closed.
   reviewDelete: (cardId: number) =>
-    jpost<{ ok: boolean; error?: string }>("/api/review/delete", { cardId }),
+    jpost<{ ok: boolean; error?: string }>(
+      "/api/review/delete",
+      { cardId },
+      dbTokenHeaders(),
+    ),
 };
 
 export function mediaUrl(id: string): string {

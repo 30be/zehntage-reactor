@@ -336,7 +336,6 @@ export function usePlayerHotkeys(ctx: PlayerHotkeyCtx): void {
           if (adding) c.sessKnownRef.current += 1;
           c.toggleKnown(key);
           tmEvent("mark_known", { word: key });
-          c.toast(adding ? `known: ${key}` : `unknown: ${key}`);
           break;
         }
         case "x": {
@@ -346,7 +345,6 @@ export function usePlayerHotkeys(ctx: PlayerHotkeyCtx): void {
           const adding = !c.blacklistRef.current.has(key);
           c.toggleBlacklist(key);
           tmEvent("blacklist", { word: key, on: adding });
-          c.toast(adding ? `blacklisted: ${key}` : `unblacklisted: ${key}`);
           break;
         }
         case "o":

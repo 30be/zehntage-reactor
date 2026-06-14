@@ -18,6 +18,26 @@ test("hover word opens popup with fake lookup; Escape closes", async ({ page }) 
   await expect(popup).toHaveCount(0);
 });
 
+test("pinned popup: k toggles the .known-flag 'known' chip (display↔write parity)", async ({
+  page,
+}) => {
+  await page.locator(".sub-primary .tok").first().click();
+  const popup = page.locator(".lookup.pinned");
+  await expect(popup).toBeVisible();
+  // Start clean: ensure not already marked known.
+  if ((await popup.locator(".known-flag", { hasText: /^known$/ }).count()) > 0) {
+    await page.keyboard.press("k");
+    await expect(popup.locator(".known-flag", { hasText: /^known$/ })).toHaveCount(0);
+  }
+  // k marks known → LookupPanel must render the chip (vocabKey-keyed display).
+  await page.keyboard.press("k");
+  await expect(popup.locator(".known-flag", { hasText: "known" })).toBeVisible();
+  // k again clears it.
+  await page.keyboard.press("k");
+  await expect(popup.locator(".known-flag", { hasText: /^known$/ })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+});
+
 test("click pins the popup; it survives hover-out, Escape closes", async ({ page }) => {
   await page.locator(".sub-primary .tok").first().click();
   const popup = page.locator(".lookup.pinned");

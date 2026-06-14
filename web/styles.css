@@ -565,6 +565,19 @@ textarea.prompt {
 }
 .prestudy-row .freq-tag { margin-left: auto; }
 .prestudy-row .ps-added { color: #a1a1aa; margin-left: 8px; }
+.known-flag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 5px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--tok-ambient, var(--muted));
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  vertical-align: middle;
+  white-space: nowrap;
+  opacity: 0.8;
+}
 
 /* ---- dialogue-density strip (above the native video controls) ---- */
 .density-strip {

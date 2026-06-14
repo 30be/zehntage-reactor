@@ -189,7 +189,7 @@ export function LookupPanel({
                 {freqTier(freqRankOf(freqMap, popup.surface, popup.dictForm))}
               </span>
             )}
-            {knownWords.has(popup.dictForm ?? popup.surface) && (
+            {knownWords.has(popup.vocabKey ?? popup.dictForm ?? popup.surface) && (
               <span
                 className="known-flag"
                 title="Marked as known — press k to toggle"
@@ -197,7 +197,7 @@ export function LookupPanel({
                 known
               </span>
             )}
-            {blacklist.has(popup.dictForm ?? popup.surface) && (
+            {blacklist.has(popup.vocabKey ?? popup.dictForm ?? popup.surface) && (
               <span
                 className="known-flag"
                 title="Blacklisted — never counted as unknown; press x to toggle"

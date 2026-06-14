@@ -1021,7 +1021,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     popupOpenRef.current = popup != null;
     popupKeyRef.current =
       popup && popup.kind === "word"
-        ? popup.dictForm ?? popup.surface
+        ? popup.vocabKey ?? popup.dictForm ?? popup.surface
         : null;
   }, [popup]);
 
@@ -1237,6 +1237,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         surface,
         reading: tok.reading,
         pos: tok.pos,
+        vocabKey: wordKey(tok),
         x: rect.left + rect.width / 2,
         y: rect.top,
         anchorBottom: rect.bottom,
@@ -1552,23 +1553,35 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       return;
     }
     const el = lookupRef.current;
-    if (!el) return;
+    const stage = stageRef.current;
+    if (!el || !stage) return;
     const margin = 8;
     const { width, height } = el.getBoundingClientRect();
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-
-    const spaceAbove = popup.y;
-    const spaceBelow = vh - popup.anchorBottom;
+    // Position RELATIVE TO THE STAGE (the popup's offset parent), so the panel
+    // stays anchored in fullscreen too: a fullscreen element is promoted to the
+    // top layer and becomes the containing block for position:fixed children,
+    // which would otherwise collapse the panel to the stage's top-left over the
+    // subtitle. The stage is position:relative in BOTH windowed & fullscreen,
+    // so absolute offsets work in both. popup.{x,y,anchorBottom} are viewport
+    // coords (captured via getBoundingClientRect); subtract the stage rect to
+    // convert to stage-local coords.
+    const s = stage.getBoundingClientRect();
+    // Available room measured against the visible STAGE box (matches fullscreen
+    // letterboxing as well as windowed layout).
+    const spaceAbove = popup.y - s.top;
+    const spaceBelow = s.bottom - popup.anchorBottom;
     const placeBelow = spaceAbove < height + margin && spaceBelow > spaceAbove;
 
+    // Anchor to the token: above by default (keeps the bottom subtitle clear),
+    // flip below only when there isn't room above.
     let top = placeBelow ? popup.anchorBottom + margin : popup.y - height - margin;
-    top = Math.max(margin, Math.min(top, vh - height - margin));
+    // Clamp within the stage box, then convert to stage-local coords.
+    top = Math.max(s.top + margin, Math.min(top, s.bottom - height - margin)) - s.top;
 
     let left = popup.x - width / 2;
-    left = Math.max(margin, Math.min(left, vw - width - margin));
+    left = Math.max(s.left + margin, Math.min(left, s.right - width - margin)) - s.left;
 
-    setPopupPos({ left, top, visibility: "visible" });
+    setPopupPos({ position: "absolute", left, top, visibility: "visible" });
   }, [popup, lookup, lookupLoading, explain, explainLoading, explainErr, qa]);
 
   const onAdd = useCallback(async () => {
@@ -1698,7 +1711,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     unmarkFrontOptimistic(front); // instant color flip back to unknown
     try {
       await api.ankiDelete(front);
-      toast("Removed from Anki");
       await refreshAnki();
     } catch (e) {
       markFrontOptimistic(front); // revert — the card is still there

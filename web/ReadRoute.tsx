@@ -16,7 +16,7 @@ import {
 import { Encounters } from "./player/Encounters.tsx";
 import { Read } from "./Read.tsx";
 import { clampPopupPos } from "./readlayout.ts";
-import { TokenLine, AccentReading } from "./TokenLine.tsx";
+import { TokenLine, AccentReading, wordKey } from "./TokenLine.tsx";
 import {
   buildWordIndex,
   matchFront,
@@ -41,6 +41,9 @@ interface ReadPopup {
   surface: string;
   reading?: string;
   pos?: string; // token 品詞 — POS-aware matchFront veto (popup/coloring agree)
+  /** homograph-aware vocabKey(tok) — canonical zr.known / zr.blacklist key,
+   *  identical to TokenLine's wordKey so popup marking matches token coloring. */
+  vocabKey?: string;
   dictForm?: string;
   context: string;
   /** RU translation of the paragraph (mining context), if present */
@@ -236,7 +239,7 @@ export function ReadRoute({
   // word (mirrors the player hotkeys; e.code = physical key, layout-proof)
   useEffect(() => {
     if (!popup) return;
-    const key = popup.dictForm ?? popup.surface;
+    const key = popup.vocabKey ?? popup.dictForm ?? popup.surface;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setPopup(null);
@@ -395,6 +398,7 @@ export function ReadRoute({
         surface: tok.surface_form,
         reading: tok.reading,
         pos: tok.pos,
+        vocabKey: wordKey(tok),
         dictForm:
           tok.basic_form && tok.basic_form !== "*" && tok.basic_form !== tok.surface_form
             ? tok.basic_form
@@ -558,7 +562,7 @@ export function ReadRoute({
     }
   }, [popup, askText, askBusy, lookup, entry]);
 
-  const popupKey = popup ? popup.dictForm ?? popup.surface : null;
+  const popupKey = popup ? popup.vocabKey ?? popup.dictForm ?? popup.surface : null;
   const readingNode = useMemo(() => {
     if (!popup) return null;
     const reading = lookup?.reading || popup.reading;

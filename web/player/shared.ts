@@ -14,6 +14,9 @@ export interface PopupState {
   context: string;
   secondary?: string; // RU cue text shown at the same time (sentence panels)
   dictForm?: string; // basic_form when it differs from the surface (e.g. 食べる)
+  /** homograph-aware vocabKey(tok) — the canonical zr.known / zr.blacklist key,
+   *  identical to TokenLine's wordKey so popup marking matches token coloring. */
+  vocabKey?: string;
   pos?: string; // the token's 品詞 (KToken.pos) — POS-aware matchFront veto, so
   // the popup's deck-match AGREES with the subtitle token coloring (a 名詞
   // mis-read on/kun like 色 inside バラ色 matches its single いろ card in both).

@@ -292,38 +292,45 @@ export function Review({
     if (phase !== "question" && phase !== "answer") return;
     const onKey = (e: KeyboardEvent) => {
       if (isTextTarget(e.target)) return;
+      // Layout-INDEPENDENT key matching via e.code (physical key), mirroring the
+      // player (web/Player.tsx / useHotkeys.ts) so letter hotkeys still fire on
+      // a non-Latin layout — e.g. on a Russian layout the physical R key reports
+      // e.key === "к", so we'd never match. e.code is "KeyR" regardless.
+      // Digit grades accept both the number row (Digit1..4) and numpad
+      // (Numpad1..4). Delete is already layout-independent but we read e.code too.
+      const gradeFor: Record<string, number> = {
+        Digit1: 1,
+        Numpad1: 1,
+        Digit2: 2,
+        Numpad2: 2,
+        Digit3: 3,
+        Numpad3: 3,
+        Digit4: 4,
+        Numpad4: 4,
+      };
       if (phase === "question") {
-        if (e.key === " " || e.key === "Spacebar") {
+        if (e.code === "Space") {
           e.preventDefault();
           reveal();
-        } else if (e.key === "Delete") {
+        } else if (e.code === "Delete") {
           e.preventDefault();
           deleteCard();
         }
         return;
       }
       // phase === "answer"
-      if (e.key === " " || e.key === "Spacebar") {
+      if (e.code === "Space") {
         // don't accidentally grade — space is consumed but does nothing.
         e.preventDefault();
         return;
       }
-      if (e.key === "Delete") {
+      if (e.code === "Delete") {
         e.preventDefault();
         deleteCard();
-      } else if (e.key === "1") {
+      } else if (e.code in gradeFor) {
         e.preventDefault();
-        grade(1);
-      } else if (e.key === "2") {
-        e.preventDefault();
-        grade(2);
-      } else if (e.key === "3") {
-        e.preventDefault();
-        grade(3);
-      } else if (e.key === "4") {
-        e.preventDefault();
-        grade(4);
-      } else if (e.key === "r" || e.key === "R") {
+        grade(gradeFor[e.code]!);
+      } else if (e.code === "KeyR") {
         e.preventDefault();
         playAnswerAudio();
       }
