@@ -566,10 +566,6 @@ export function wordsAddedPerDay(events: TelemetryEvent[]): GrowthPoint[] {
   return out;
 }
 
-export async function vocabGrowth(): Promise<GrowthPoint[]> {
-  return wordsAddedPerDay(await readEvents());
-}
-
 const CSV_HEADER = [
   "mediaId",
   "date",
