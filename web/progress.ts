@@ -149,25 +149,32 @@ export const LEARNING_MATURE_DAYS = 21;
  */
 export const MAX_DECAY = 0.55;
 /**
- * Interval (days) at which an overdue word reaches MAX_DECAY. A mature card
- * that has gone overdue is the strongest "I'm forgetting this" signal — the
- * longer you'd been retaining it, the more it should visibly rot. (We can't
- * read true days-overdue: the server leaves Anki's `due` column undecoded —
- * days-vs-epoch is queue-dependent — so isDue is the only reliable overdue
- * signal client-side; interval modulates HOW MUCH a due word rots.)
+ * Days-overdue at which an overdue word reaches MAX_DECAY. The longer a card
+ * has been sitting past its due date, the louder the "you're forgetting this"
+ * signal, so the rot ramps with true days-overdue (decoded server-side from
+ * last-review time + interval vs now — see decodeDaysOverdue in anki.ts).
+ * ~2 weeks overdue saturates the tint.
  */
-export const DECAY_FULL_DAYS = LEARNING_MATURE_DAYS;
+export const DECAY_FULL_DAYS = 14;
 
 /**
  * Retention-decay factor 0..1 for a deck word: how far its color is dragged
  * back toward the unknown-red. 0 unless the word is currently overdue
- * (`isDue`). For overdue words it scales with the card's interval (more
- * mature = more alarming rot), clamped to MAX_DECAY. Non-overdue words and
- * words with no progress entry never decay.
+ * (`isDue`). For overdue words it ramps with `daysOverdue` (the longer past
+ * due, the more alarming the rot), clamped to MAX_DECAY.
+ *
+ * `daysOverdue` is the precise signal (local AnkiConnect path). On the remote
+ * anki-mcp path it's absent, so we fall back to the card `interval` as the
+ * legacy magnitude proxy — preserving prior behavior rather than flat-lining.
+ * Non-overdue words and words with no progress entry never decay.
  */
 export function decayFactor(p?: ProgressEntry): number {
   if (!p || p.isDue !== true) return 0;
-  const days = Math.max(0, p.interval || 0);
+  const magnitude =
+    typeof p.daysOverdue === "number" && Number.isFinite(p.daysOverdue)
+      ? p.daysOverdue
+      : p.interval;
+  const days = Math.max(0, magnitude || 0);
   const t = Math.min(1, days / DECAY_FULL_DAYS);
   return t * MAX_DECAY;
 }

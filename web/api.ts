@@ -73,6 +73,12 @@ export interface ProgressEntry {
   type: number;
   /** Anki "is:due" right now (local AnkiConnect path; absent on remote). */
   isDue?: boolean;
+  /**
+   * Whole days a review card is overdue (>= 0), estimated from last-review
+   * time + interval vs now. 0 when not overdue / not a review card / unknown.
+   * Local AnkiConnect path only; absent on the remote anki-mcp path.
+   */
+  daysOverdue?: number;
 }
 
 export interface AnkiWordsResponse {

@@ -133,7 +133,58 @@ interface AcCardInfo {
   factor: number;
   queue: number;
   type: number;
+  /** Card modification time, epoch SECONDS (last review/edit). */
+  mod: number;
   fields: Record<string, { value: string; order: number }>;
+}
+
+/** Subset of AcCardInfo needed to estimate days-overdue. */
+export interface DaysOverdueCard {
+  interval: number;
+  queue: number;
+  mod: number;
+}
+
+/**
+ * Estimate how many whole days a review card is overdue (>= 0).
+ *
+ * Anki's `due` column is queue-dependent (a day-number for review cards, but
+ * epoch-seconds / position for learn/new), and AnkiConnect doesn't hand us the
+ * collection's "today" day-count to subtract against — so decoding `due`
+ * directly is ambiguous. Instead we use a queue-independent, self-contained
+ * signal: a review card (queue 2) was last reviewed at `mod` (epoch seconds)
+ * and its next due moment is `mod + interval*86400`. Days overdue is then
+ * `floor((now - nextDue) / 86400)`, clamped to >= 0.
+ *
+ * Defensive: returns 0 for non-review cards, missing/garbage `mod`/`interval`,
+ * or any non-finite result — so an undecidable card behaves like the old
+ * interval-proxy (never mis-colored as heavily rotten).
+ *
+ * @param now epoch MILLISECONDS reference (injectable for tests).
+ */
+export function decodeDaysOverdue(
+  card: DaysOverdueCard,
+  now: number = Date.now(),
+): number {
+  // Only review cards (queue 2) carry an interval-based due date we can trust.
+  if (card.queue !== 2) return 0;
+  const interval = card.interval;
+  const mod = card.mod;
+  if (
+    typeof interval !== "number" ||
+    typeof mod !== "number" ||
+    !Number.isFinite(interval) ||
+    !Number.isFinite(mod) ||
+    interval < 0 ||
+    mod <= 0
+  ) {
+    return 0;
+  }
+  const DAY_MS = 86_400_000;
+  const nextDueMs = mod * 1000 + interval * DAY_MS;
+  const overdue = Math.floor((now - nextDueMs) / DAY_MS);
+  if (!Number.isFinite(overdue) || overdue < 0) return 0;
+  return overdue;
 }
 
 async function acProgress(): Promise<Record<string, unknown>> {
@@ -162,6 +213,7 @@ async function acProgress(): Promise<Record<string, unknown>> {
       queue: c.queue,
       type: c.type,
       isDue: dueSet.has(c.cardId),
+      daysOverdue: decodeDaysOverdue(c),
     };
   }
   return out;
