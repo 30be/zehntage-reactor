@@ -81,6 +81,11 @@ import {
   importBundle,
 } from "../lib/datatransfer.ts";
 import {
+  listSnapshots,
+  readSnapshot,
+  maybeSnapshotOnStartup,
+} from "../lib/backup.ts";
+import {
   searchEntries,
   listFiles,
   downloadFile,
@@ -1987,6 +1992,38 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         }
       }
 
+      // --- auto-backup snapshots (see lib/backup.ts) ---
+      if (req.method === "GET" && path === "/api/snapshots") {
+        const snaps = await listSnapshots();
+        return json({
+          snapshots: snaps.map((s) => ({
+            name: s.name,
+            timestamp: new Date(s.mtimeMs).toISOString(),
+            size: s.size,
+          })),
+        });
+      }
+
+      if (req.method === "POST" && path === "/api/snapshots/restore") {
+        const body = (await req.json().catch(() => ({}))) as { name?: unknown };
+        if (typeof body.name !== "string" || !body.name) {
+          return err("missing snapshot `name`", 400);
+        }
+        let bundle: unknown;
+        try {
+          bundle = await readSnapshot(body.name);
+        } catch (e) {
+          return err(e instanceof Error ? e.message : "no such snapshot", 404);
+        }
+        // Restore through the SAME validated/rollback import path as /api/import.
+        // Snapshots are full self-exports, so restore their events too.
+        try {
+          return json(await importBundle(bundle, { importEvents: true }));
+        } catch (e) {
+          return err(e instanceof Error ? e.message : "restore failed", 400);
+        }
+      }
+
       // --- settings ---
       if (path === "/api/settings") {
         if (req.method === "GET") {
@@ -2049,6 +2086,13 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
   } catch {
     server = Bun.serve({ port: 0, idleTimeout: 0, maxRequestBodySize: MAX_BODY, fetch: fetchHandler });
   }
+
+  // Take a throttled auto-backup snapshot on startup (skipped if the most
+  // recent one is < 6h old, so frequent restarts don't spam snapshots). Rotation
+  // happens inside; failures are non-fatal — never block server startup.
+  void maybeSnapshotOnStartup().catch((e) => {
+    console.warn(`[snapshot] startup snapshot failed: ${e instanceof Error ? e.message : e}`);
+  });
 
   return {
     port: server.port ?? preferredPort,

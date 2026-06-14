@@ -285,6 +285,12 @@ export interface ImportResult {
   appVersion: string;
 }
 
+export interface SnapshotMeta {
+  name: string;
+  timestamp: string;
+  size: number;
+}
+
 export const api = {
   library: () => jget<LibraryEntry[]>("/api/library"),
   mediaInfo: (id: string) => jget<MediaInfo>(`/api/media/${id}/info`),
@@ -403,6 +409,12 @@ export const api = {
   // Apply a bundle. Events are skipped server-side by default.
   importData: (bundle: unknown) =>
     jpost<ImportResult>("/api/import", bundle),
+  // List available auto-backup snapshots, newest first.
+  listSnapshots: () =>
+    jget<{ snapshots: SnapshotMeta[] }>("/api/snapshots"),
+  // Roll back to a snapshot by name (overwrites current settings/state).
+  restoreSnapshot: (name: string) =>
+    jpost<ImportResult>("/api/snapshots/restore", { name }),
 };
 
 export function mediaUrl(id: string): string {

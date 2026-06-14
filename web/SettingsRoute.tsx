@@ -4,7 +4,13 @@
 // (behavior-preserving).
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "./api.ts";
+import { api, type SnapshotMeta } from "./api.ts";
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 export function Settings({
   settings,
@@ -463,6 +469,50 @@ function DataSection({
     }
   }, [pending, setSettings]);
 
+  // --- snapshots (auto-backup) ---
+  const [snapshots, setSnapshots] = useState<SnapshotMeta[]>([]);
+  const [snapConfirm, setSnapConfirm] = useState<string | null>(null);
+  const [snapBusy, setSnapBusy] = useState(false);
+
+  const loadSnapshots = useCallback(async () => {
+    try {
+      const res = await api.listSnapshots();
+      setSnapshots(res.snapshots);
+    } catch {
+      setSnapshots([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadSnapshots();
+  }, [loadSnapshots]);
+
+  const onRestoreSnapshot = useCallback(
+    async (name: string) => {
+      setSnapBusy(true);
+      setMsg(null);
+      try {
+        const res = await api.restoreSnapshot(name);
+        const next = await api.getSettings();
+        setSettings(next);
+        setSnapConfirm(null);
+        setMsg({
+          kind: "ok",
+          text: `Restored${res.settingsImported ? " settings," : ""} ${res.stateKeys} state keys. Reloading…`,
+        });
+        window.setTimeout(() => window.location.reload(), 800);
+      } catch (e) {
+        setMsg({
+          kind: "error",
+          text: `Restore failed: ${e instanceof Error ? e.message : e}`,
+        });
+      } finally {
+        setSnapBusy(false);
+      }
+    },
+    [setSettings],
+  );
+
   return (
     <section className="form-group">
       <h2 className="group-title">Data</h2>
@@ -524,6 +574,50 @@ function DataSection({
           >
             {msg.text}
           </div>
+        )}
+      </div>
+      <div className="field">
+        <label className="label">Snapshots</label>
+        <div className="hint">
+          Automatic local backups taken on startup (kept: last 10). Restoring
+          overwrites current settings and merges saved progress.
+        </div>
+        {snapshots.length === 0 ? (
+          <div className="hint">No snapshots yet.</div>
+        ) : (
+          snapshots.map((s) => (
+            <div className="field-row" key={s.name}>
+              <span>
+                {new Date(s.timestamp).toLocaleString()} · {formatBytes(s.size)}
+              </span>
+              {snapConfirm === s.name ? (
+                <>
+                  <button
+                    className="btn sm danger"
+                    disabled={snapBusy}
+                    onClick={() => void onRestoreSnapshot(s.name)}
+                  >
+                    {snapBusy ? "Restoring…" : "Confirm restore"}
+                  </button>
+                  <button
+                    className="btn sm ghost"
+                    disabled={snapBusy}
+                    onClick={() => setSnapConfirm(null)}
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <button
+                  className="btn sm danger"
+                  disabled={snapBusy}
+                  onClick={() => setSnapConfirm(s.name)}
+                >
+                  Restore
+                </button>
+              )}
+            </div>
+          ))
         )}
       </div>
     </section>

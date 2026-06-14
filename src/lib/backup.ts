@@ -21,6 +21,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, dirname, relative } from "node:path";
 import { mkdir, mkdtemp, readdir, rm, stat, cp, copyFile } from "node:fs/promises";
 import { eventsFilePath } from "./telemetry.ts";
+import { buildExportBundle, type ExportBundle } from "./datatransfer.ts";
 
 export const KEEP_BACKUPS = 10;
 
@@ -305,4 +306,159 @@ export async function listBackups(dir?: string): Promise<BackupInfo[]> {
     if (st) out.push({ path: join(d, name), name, size: st.size, mtimeMs: st.mtimeMs });
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Auto-backup snapshots (F9)
+//
+// A "snapshot" is a portable JSON export bundle (datatransfer.ts) written to a
+// dedicated snapshots dir with a timestamped name. The server takes one on
+// startup (throttled), keeps the newest KEEP_SNAPSHOTS, and lets the user roll
+// back via the existing importBundle path. Distinct from the tar `backups/`
+// dir above (which also captures subs/). Snapshots are lightweight + restorable.
+// ---------------------------------------------------------------------------
+
+export const KEEP_SNAPSHOTS = 10;
+/** Skip taking a startup snapshot if the most recent one is younger than this. */
+export const SNAPSHOT_THROTTLE_MS = 6 * 60 * 60 * 1000; // 6h
+
+/** Snapshot filename matcher: zr-snapshot-<ISO with :.→->.json */
+const SNAPSHOT_RE = /^zr-snapshot-.*\.json$/;
+
+export function defaultSnapshotDir(): string {
+  return join(homedir(), ".local", "share", "zehntage-reactor", "snapshots");
+}
+
+/** Build the timestamped snapshot filename for a given moment. */
+export function snapshotFileName(now: Date = new Date()): string {
+  return `zr-snapshot-${now.toISOString().replace(/[:.]/g, "-")}.json`;
+}
+
+export interface SnapshotInfo {
+  path: string;
+  name: string;
+  size: number;
+  mtimeMs: number;
+}
+
+/**
+ * Pure rotation logic: given a list of snapshot entries (name + mtimeMs), return
+ * the names that should be DELETED to keep only the newest `keep`. Newest =
+ * largest mtimeMs; ties broken by name (so the result is deterministic). Does no
+ * I/O — unit-testable. When there are <= keep entries, returns [].
+ */
+export function snapshotsToDelete(
+  entries: { name: string; mtimeMs: number }[],
+  keep = KEEP_SNAPSHOTS,
+): string[] {
+  if (keep < 0) keep = 0;
+  // Sort newest-first (desc mtime, then desc name as a stable tiebreak).
+  const sorted = [...entries].sort(
+    (a, b) => b.mtimeMs - a.mtimeMs || (a.name < b.name ? 1 : a.name > b.name ? -1 : 0),
+  );
+  return sorted.slice(keep).map((e) => e.name);
+}
+
+/**
+ * Pure throttle logic: should we take a new snapshot now, given the most recent
+ * existing snapshot's mtime (or null if none)? Skips when the latest snapshot is
+ * younger than `throttleMs`. No I/O — unit-testable.
+ */
+export function shouldSnapshot(
+  latestMtimeMs: number | null,
+  now: number = Date.now(),
+  throttleMs = SNAPSHOT_THROTTLE_MS,
+): boolean {
+  if (latestMtimeMs == null) return true;
+  return now - latestMtimeMs >= throttleMs;
+}
+
+/** List snapshot bundles in dir (default location), newest first. */
+export async function listSnapshots(dir?: string): Promise<SnapshotInfo[]> {
+  const d = dir ?? defaultSnapshotDir();
+  let names: string[];
+  try {
+    names = await readdir(d);
+  } catch {
+    return [];
+  }
+  const out: SnapshotInfo[] = [];
+  for (const name of names.filter((n) => SNAPSHOT_RE.test(n))) {
+    const st = await stat(join(d, name)).catch(() => null);
+    if (st) out.push({ path: join(d, name), name, size: st.size, mtimeMs: st.mtimeMs });
+  }
+  out.sort((a, b) => b.mtimeMs - a.mtimeMs || (a.name < b.name ? 1 : a.name > b.name ? -1 : 0));
+  return out;
+}
+
+/** Delete all but the newest `keep` snapshots in dir. Returns deleted paths. */
+export async function rotateSnapshots(dir?: string, keep = KEEP_SNAPSHOTS): Promise<string[]> {
+  const d = dir ?? defaultSnapshotDir();
+  const infos = await listSnapshots(d);
+  const doomed = snapshotsToDelete(infos, keep);
+  const deleted: string[] = [];
+  for (const name of doomed) {
+    try {
+      await rm(join(d, name));
+      deleted.push(join(d, name));
+    } catch {
+      // best effort
+    }
+  }
+  return deleted;
+}
+
+export interface SnapshotResult {
+  path: string;
+  name: string;
+  bundle: ExportBundle;
+}
+
+/** Write the current export bundle as a timestamped snapshot, then rotate. */
+export async function createSnapshot(
+  dir?: string,
+  keep = KEEP_SNAPSHOTS,
+): Promise<SnapshotResult> {
+  const d = dir ?? defaultSnapshotDir();
+  await mkdir(d, { recursive: true });
+  const bundle = await buildExportBundle();
+  const name = snapshotFileName(new Date(bundle.exportedAt));
+  const path = join(d, name);
+  await Bun.write(path, JSON.stringify(bundle, null, 2));
+  await rotateSnapshots(d, keep);
+  return { path, name, bundle };
+}
+
+/**
+ * Take a startup snapshot only if the newest existing one is older than the
+ * throttle window. Returns the result, or null when skipped.
+ */
+export async function maybeSnapshotOnStartup(
+  dir?: string,
+  keep = KEEP_SNAPSHOTS,
+  throttleMs = SNAPSHOT_THROTTLE_MS,
+): Promise<SnapshotResult | null> {
+  const d = dir ?? defaultSnapshotDir();
+  const existing = await listSnapshots(d);
+  const latest = existing.length > 0 ? existing[0]!.mtimeMs : null;
+  if (!shouldSnapshot(latest, Date.now(), throttleMs)) return null;
+  return createSnapshot(d, keep);
+}
+
+/** Resolve a snapshot name to its absolute path, guarding against traversal. */
+export function snapshotPath(name: string, dir?: string): string {
+  const d = dir ?? defaultSnapshotDir();
+  if (!SNAPSHOT_RE.test(name) || name.includes("/") || name.includes("\\")) {
+    throw new Error(`Invalid snapshot name: ${name}`);
+  }
+  return join(d, name);
+}
+
+/** Read + parse a snapshot bundle by name (for restore via importBundle). */
+export async function readSnapshot(name: string, dir?: string): Promise<unknown> {
+  const path = snapshotPath(name, dir);
+  if (!(await Bun.file(path).exists())) {
+    throw new Error(`No such snapshot: ${name}`);
+  }
+  return Bun.file(path).json();
 }
