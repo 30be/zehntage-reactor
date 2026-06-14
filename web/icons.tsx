@@ -18,6 +18,7 @@ import {
   Pause,
   Play,
   Repeat,
+  Search,
   Settings,
   Volume2,
   VolumeX,
@@ -52,5 +53,6 @@ export const ViewIcon = wrap(MonitorPlay, 17);
 export const CardsIcon = wrap(GalleryVerticalEnd, 17);
 export const ReviewIcon = wrap(Repeat, 17);
 export const StatsIcon = wrap(ChartNoAxesColumn, 17);
+export const SearchIcon = wrap(Search, 17);
 export const SettingsIcon = wrap(Settings, 17);
 export const HealthIcon = wrap(Activity, 17);

@@ -91,6 +91,15 @@ export interface MediaInfo {
   [k: string]: unknown;
 }
 
+// One cross-episode transcript hit from GET /api/search (JA text only; the
+// endpoint indexes each entry's best ja track and returns up to 100 hits).
+export interface SearchHit {
+  mediaId: string;
+  name: string;
+  start: number;
+  text: string;
+}
+
 async function jget<T>(path: string): Promise<T> {
   const r = await fetch(path);
   if (!r.ok) throw new Error(`${path} → ${r.status}`);
@@ -309,6 +318,11 @@ export interface SnapshotMeta {
 
 export const api = {
   library: () => jget<LibraryEntry[]>("/api/library"),
+  // Cross-episode subtitle search; empty/whitespace query short-circuits to [].
+  search: (q: string) =>
+    q.trim()
+      ? jget<SearchHit[]>(`/api/search?q=${encodeURIComponent(q.trim())}`)
+      : Promise.resolve<SearchHit[]>([]),
   mediaInfo: (id: string) => jget<MediaInfo>(`/api/media/${id}/info`),
   subs: (id: string) => jget<SubTrackInfo[]>(`/api/subs/${id}`),
   cues: (id: string, trackId: string) =>

@@ -11,6 +11,7 @@ import { Cards } from "./CardsRoute.tsx";
 import { Home } from "./HomeRoute.tsx";
 import { Library } from "./LibraryRoute.tsx";
 import { Stats } from "./StatsRoute.tsx";
+import { Search } from "./SearchRoute.tsx";
 import { Review } from "./ReviewRoute.tsx";
 import { Settings } from "./SettingsRoute.tsx";
 import { Palette } from "./Palette.tsx";
@@ -24,6 +25,7 @@ import {
   SettingsIcon,
   StatsIcon,
   ReviewIcon,
+  SearchIcon,
   ViewIcon,
 } from "./icons.tsx";
 
@@ -33,6 +35,7 @@ type Route =
   | { name: "read"; id: string }
   | { name: "settings" }
   | { name: "stats" }
+  | { name: "search" }
   | { name: "cards" }
   | { name: "review" }
   | { name: "home" }
@@ -51,6 +54,7 @@ function parseHash(): Route {
   if (h.startsWith("read/")) return { name: "read", id: h.slice("read/".length) };
   if (h === "settings") return { name: "settings" };
   if (h === "stats") return { name: "stats" };
+  if (h === "search") return { name: "search" };
   if (h === "cards") return { name: "cards" };
   if (h === "review") return { name: "review" };
   if (h === "home") return { name: "home" };
@@ -196,6 +200,7 @@ export function App() {
           )}
           {navItem("Cards", <CardsIcon />, "#/cards", route.name === "cards")}
           {navItem("Review", <ReviewIcon />, "#/review", route.name === "review")}
+          {navItem("Search", <SearchIcon />, "#/search", route.name === "search")}
           {navItem("Stats", <StatsIcon />, "#/stats", route.name === "stats")}
           {navItem("Settings", <SettingsIcon />, "#/settings", route.name === "settings")}
           {navItem("Health", <HealthIcon />, "#/health", route.name === "health")}
@@ -238,6 +243,7 @@ export function App() {
         {route.name === "home" && <Home go={go} />}
         {route.name === "library" && <Library go={go} toast={toast} />}
         {route.name === "stats" && <Stats go={go} />}
+        {route.name === "search" && <Search go={go} />}
         {route.name === "cards" && <Cards go={go} toast={toast} />}
         {route.name === "review" && <Review go={go} />}
         {route.name === "health" && <HealthRoute />}

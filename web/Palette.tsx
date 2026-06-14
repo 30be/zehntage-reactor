@@ -130,6 +130,11 @@ export function Palette({ go, toast, settings, setSettings }: Props) {
         title: "go: jump to episode (library)",
         run: () => go("#/"),
       },
+      {
+        id: "nav.search",
+        title: "search subtitles (jump to any line)",
+        run: () => go("#/search"),
+      },
       { id: "nav.cards", title: "go: cards", run: () => go("#/cards") },
       { id: "nav.review", title: "go: review due words", run: () => go("#/review") },
       { id: "nav.stats", title: "go: stats", run: () => go("#/stats") },
