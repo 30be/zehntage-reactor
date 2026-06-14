@@ -19,6 +19,16 @@ import { readKnownWords, useCoverage } from "./coverage.ts";
 import { kataToHira } from "./tokenizer.ts";
 import { fmtCueTime } from "./App.tsx";
 
+/** Enter/Space → activate, for role="button" containers (a11y). */
+function onActivateKey(handler: () => void) {
+  return (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      handler();
+    }
+  };
+}
+
 function fmtSize(n: number): string {
   if (n > 1e9) return `${(n / 1e9).toFixed(2)} GB`;
   if (n > 1e6) return `${(n / 1e6).toFixed(0)} MB`;
@@ -149,9 +159,11 @@ function RootChooser({
 
   return (
     <div className={`root-line${open ? " editing" : " muted"}`}>
-      <div
-        className="root-current"
+      <button
+        type="button"
+        className="a11y-rowbtn root-current"
         title="Click to change the library root"
+        aria-expanded={open}
         onClick={() => {
           if (open) {
             setOpen(false);
@@ -168,7 +180,7 @@ function RootChooser({
             {newWords.toLocaleString()} new words
           </span>
         ) : null}
-      </div>
+      </button>
       {open && (
         <div className="root-panel">
           <div className="root-manual">
@@ -192,21 +204,23 @@ function RootChooser({
           </div>
           <div className="root-dirs">
             {browse?.parent != null && (
-              <div
-                className="root-dir up"
+              <button
+                type="button"
+                className="a11y-rowbtn root-dir up"
                 onClick={() => void browseTo(browse.parent!)}
               >
                 ..
-              </div>
+              </button>
             )}
             {browse?.dirs.map((d) => (
-              <div
+              <button
                 key={d}
-                className="root-dir"
+                type="button"
+                className="a11y-rowbtn root-dir"
                 onClick={() => void browseTo(`${browse.path.replace(/\/$/, "")}/${d}`)}
               >
                 {d}/
-              </div>
+              </button>
             ))}
             {browse && browse.dirs.length === 0 && (
               <div className="root-dir muted none">no subfolders</div>
@@ -330,26 +344,33 @@ function JimakuFind({
 
   return (
     <span className="jimaku" onClick={(e) => e.stopPropagation()}>
-      <span
-        className="jimaku-link muted"
+      <button
+        type="button"
+        className="a11y-inlinebtn jimaku-link muted"
         title="Search jimaku.cc for subtitles"
+        aria-expanded={open}
         onClick={() => {
           setOpen((o) => !o);
           if (!open && results == null) void search();
         }}
       >
         find subs
-      </span>
+      </button>
       {open && (
         <span className="jimaku-panel">
           {busy && <span className="muted">…</span>}
           {error && <span className="jimaku-error">{error}</span>}
           {!picked &&
             results?.map((je) => (
-              <span key={je.id} className="jimaku-row" onClick={() => void pick(je)}>
+              <button
+                key={je.id}
+                type="button"
+                className="a11y-rowbtn jimaku-row"
+                onClick={() => void pick(je)}
+              >
                 {je.name}
                 {je.english_name ? ` · ${je.english_name}` : ""}
-              </span>
+              </button>
             ))}
           {!picked && results?.length === 0 && !busy && !error && (
             <span className="muted">no matches</span>
@@ -359,9 +380,14 @@ function JimakuFind({
           )}
           {picked &&
             files?.map((f) => (
-              <span key={f.url} className="jimaku-row" onClick={() => void download(f)}>
+              <button
+                key={f.url}
+                type="button"
+                className="a11y-rowbtn jimaku-row"
+                onClick={() => void download(f)}
+              >
                 {f.name} · {fmtSize(f.size)}
-              </span>
+              </button>
             ))}
           {picked && files?.length === 0 && !busy && (
             <span className="muted">
@@ -369,15 +395,16 @@ function JimakuFind({
             </span>
           )}
           {picked && (
-            <span
-              className="jimaku-row muted"
+            <button
+              type="button"
+              className="a11y-rowbtn jimaku-row muted"
               onClick={() => {
                 setPicked(null);
                 setFiles(null);
               }}
             >
               ← back
-            </span>
+            </button>
           )}
         </span>
       )}
@@ -650,16 +677,17 @@ export function Library({ go, toast }: { go: (h: string) => void; toast: (m: str
         <div className="search-results">
           {hits.length === 0 && <div className="muted">no matches</div>}
           {hits.map((h, i) => (
-            <div
+            <button
               key={`${h.mediaId}:${h.start}:${i}`}
-              className="search-hit"
+              type="button"
+              className="a11y-rowbtn search-hit"
               onClick={() => go(`#/play/${h.mediaId}@${h.start}`)}
             >
               <span className="search-meta">
                 {h.name.replace(/\.[^.]+$/, "")} · {fmtCueTime(h.start)}
               </span>{" "}
               {highlightMatch(h.text, query)}
-            </div>
+            </button>
           ))}
         </div>
       )}
@@ -688,7 +716,10 @@ export function Library({ go, toast }: { go: (h: string) => void; toast: (m: str
             <div
               key={e.id}
               className="card lib-row"
+              role="button"
+              tabIndex={0}
               onClick={() => go(`#/play/${e.id}`)}
+              onKeyDown={onActivateKey(() => go(`#/play/${e.id}`))}
             >
               <div className="lib-row-main">
                 <div className="name">{e.name}</div>

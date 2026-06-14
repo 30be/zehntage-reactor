@@ -14,6 +14,16 @@ import {
 import { readKnownWords, useCoverage } from "./coverage.ts";
 import { activityShade, fmtMin, localDateStr } from "./statsfmt.ts";
 
+/** Enter/Space → activate, for role="button" containers (a11y). */
+function onActivateKey(handler: () => void) {
+  return (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      handler();
+    }
+  };
+}
+
 // Maturity threshold for "known" in Anki terms (interval >= 21 days).
 const MATURE_INTERVAL = 21;
 
@@ -216,7 +226,10 @@ export function Stats({ go }: { go: (h: string) => void }) {
                   <div
                     key={m.mediaId}
                     className="daily-row media-row"
+                    role="button"
+                    tabIndex={0}
                     onClick={() => go(`#/play/${m.mediaId}`)}
+                    onKeyDown={onActivateKey(() => go(`#/play/${m.mediaId}`))}
                   >
                     <span className="daily-date ep-trunc" title={name}>
                       {name}
@@ -495,7 +508,10 @@ export function Stats({ go }: { go: (h: string) => void }) {
             <div
               key={e.id}
               className="stats-row"
+              role="button"
+              tabIndex={0}
               onClick={() => go(`#/play/${e.id}`)}
+              onKeyDown={onActivateKey(() => go(`#/play/${e.id}`))}
             >
               <span className="stats-name">{e.name.replace(/\.[^.]+$/, "")}</span>
               <span className="stats-bar">

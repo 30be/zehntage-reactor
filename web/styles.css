@@ -360,7 +360,9 @@ textarea.prompt {
   user-select: none;
 }
 .explain-q:hover,
-.explain-q:focus { opacity: 1; outline: none; box-shadow: none; }
+.explain-q:focus { opacity: 1; }
+/* Keep mouse-focus unobtrusive but show the keyboard ring (a11y M5). */
+.explain-q:focus:not(:focus-visible) { outline: none; box-shadow: none; }
 
 .lookup .sentence { font-size: 15px; font-weight: 600; line-height: 1.5; }
 .lookup .breakdown { white-space: pre-line; }
@@ -1907,6 +1909,59 @@ textarea.prompt {
 @keyframes zr-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
   .spinner { animation-duration: 2s; }
+  /* Neutralize ring fills, bar fills, heat/forecast heights, hover/opacity
+     and theme transitions for motion-sensitive users (a11y M2). */
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
+
+/* Button-reset for clickable rows converted from <div onClick> to real
+   <button> for keyboard operability (a11y H1/H2/H3/H4). Strips native button
+   chrome so layout is byte-identical to the original div; the actual layout
+   comes from the row's own class (e.g. .lib-row, .search-hit, .stats-row).
+   `display:contents`-free: we keep the element in flow and let the row class
+   own display/width, but force full-width + inherited text styling. */
+.a11y-rowbtn {
+  display: block;
+  width: 100%;
+  margin: 0;
+  border: 0;
+  background: none;
+  box-sizing: border-box;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  text-align: inherit;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.a11y-rowbtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+/* Inline variant for affordances that must stay inline (e.g. jimaku "find
+   subs" link) — same reset but keeps inline flow. */
+.a11y-inlinebtn {
+  display: inline;
+  margin: 0;
+  border: 0;
+  padding: 0;
+  background: none;
+  box-sizing: border-box;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  text-align: inherit;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.a11y-inlinebtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 /* System-wide focus ring — subtle, monochrome, keyboard-only. */

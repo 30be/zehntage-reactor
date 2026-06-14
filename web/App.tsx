@@ -266,8 +266,17 @@ export function App() {
 
       {toastMsg &&
         (fsEl
-          ? createPortal(<div className="toast">{toastMsg}</div>, fsEl)
-          : <div className="toast">{toastMsg}</div>)}
+          ? createPortal(
+              <div className="toast" role="status" aria-live="polite">
+                {toastMsg}
+              </div>,
+              fsEl,
+            )
+          : (
+            <div className="toast" role="status" aria-live="polite">
+              {toastMsg}
+            </div>
+          ))}
       <Palette go={go} toast={toast} settings={settings} setSettings={setSettings} />
     </div>
   );

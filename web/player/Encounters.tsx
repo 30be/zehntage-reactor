@@ -21,13 +21,15 @@ export function Encounters({
   if (!hits || hits.length === 0) return null;
   return (
     <div className="enc">
-      <div
-        className="enc-line"
+      <button
+        type="button"
+        className="a11y-rowbtn enc-line"
         title="Where else this word appears in the library"
+        aria-expanded={open}
         onClick={onToggle}
       >
         encounters: {hits.reduce((s, h) => s + h.count, 0)}
-      </div>
+      </button>
       {open && (
         <div className="enc-list">
           {hits
@@ -41,9 +43,10 @@ export function Encounters({
             )
             .slice(0, 20)
             .map((s, i) => (
-              <div
+              <button
                 key={`${s.mediaId}:${s.start}:${i}`}
-                className="enc-hit"
+                type="button"
+                className="a11y-rowbtn enc-hit"
                 onClick={() => {
                   window.location.hash = `#/play/${s.mediaId}@${s.start}`;
                 }}
@@ -52,7 +55,7 @@ export function Encounters({
                   {s.name.replace(/\.[^.]+$/, "")} · {fmtTime(s.start)}
                 </span>{" "}
                 {s.text}
-              </div>
+              </button>
             ))}
         </div>
       )}
