@@ -37,8 +37,9 @@ Dark theme:
 **Player**
 - Gemini word and sentence lookups: hover/click a word for reading + notes,
   sentence explanations, AI translation into a synced secondary (blurred) line
-- Seekbar cue tooltip: hover the progress bar to preview the subtitle line at
-  that position (Japanese + Russian), alongside the difficulty heat strip
+- Seekbar: hover the progress bar to preview the subtitle line at that position
+  (Japanese + Russian), alongside the difficulty heat strip; thin tick marks show
+  i+1 cues (neutral) and due-word cues (accent color) — the SRS heatmap
 - Shadowing loops, per-cue replay, smart autopause on lines with unknown words
 - Comprehension quiz (`q`) over the cues you just watched; end-of-episode prompt
   (toggle in Settings → Player behavior)
@@ -46,17 +47,34 @@ Dark theme:
 - Deep links: `#/play/<id>@<seconds>` jumps straight into an episode
 
 **Vocabulary & cards**
-- Word coloring by Anki interval: new words highlighted, learning words fade
-  from blue to ambient as the SRS interval grows; furigana on unknown kanji
+- Lemma-based vocabulary: clicking a conjugated form stores the dictionary lemma,
+  so all inflections of a word highlight once a card exists; homograph-aware —
+  辛い[からい] and 辛い[つらい] are keyed separately and never cross-match
+- Word coloring by Anki interval: new words highlighted, learning words fade from
+  blue to ambient as the SRS interval grows; furigana on unknown kanji
+- Retention-decay coloring: overdue deck words are visibly tinted back toward red,
+  ramping with true days-overdue (saturating ~2 weeks past due date)
+- Due-word jump (`d`): skip to the next cue containing a word that is currently
+  due for Anki review; "N due" indicator in the player HUD
 - Person-name tokenizer merge: consecutive name tokens (e.g. 折木 + 奉太郎) are
   treated as one word for lookup and card mining
 - Pre-study mode: bulk-add the unknown words of the upcoming minutes
 - Anki integration: local AnkiConnect when reachable, remote fallback otherwise;
   one-click cards with video frame and sentence audio
 
+**Review / Cram mode** (`#/review`)
+- Drills your currently-due Anki words as cloze prompts built from your own
+  watched cues; type the answer, check, see correct/wrong, advance with Space/→
+- Optional Russian translation hint; "watch in context" deep-link per card
+- Falls back to interval order when `is:due` is unavailable
+
 **UI**
 - Three themes (light/dark/system) switchable from the sidebar 日/月/◐ buttons
-- Read mode: full transcripts with the same lookups and hotkeys
+- Command palette (Ctrl+K): fuzzy-search navigation, settings toggles, and deep
+  player actions (copy cue, copy deep-link, generate/translate subtitles,
+  jump due, open read mode, condensed audio…)
+- Read mode: full transcripts with the same lookups, hotkeys, and encounter list
+  (player↔read parity for the encounters block)
 - Stats: activity grid, watch time, mining pace, per-episode coverage
 - Home "Today" panel: words mined, cues watched, minutes, quizzes, daily streak
 
@@ -112,6 +130,7 @@ Player scope:
 | o | session HUD overlay |
 | e | echo dictation mode |
 | j | jump to next i+1 cue |
+| d | jump to next due-word cue |
 
 Read scope:
 
@@ -129,6 +148,7 @@ Global scope:
 | Ctrl+K | command palette |
 | ? | hotkey cheatsheet |
 | Esc | close popups / panels |
+| Enter / Space | review: check / next card |
 
 ## Architecture
 
@@ -136,8 +156,12 @@ Global scope:
 - Sidecar subtitles: `subs/<base>.<lang>.srt` next to each video
 - Config + synced `zr.*` state: `~/.config/zehntage-reactor`
   (override with `ZR_CONFIG_DIR`)
-- Telemetry and backups: `~/.local/share/zehntage-reactor`
+- Telemetry, backups, and snapshots: `~/.local/share/zehntage-reactor`
 - Pure logic lives in `src/lib/` and `web/*.ts`, bun-testable without DOM
+- Web layer decomposed into focused route files (`HomeRoute`, `LibraryRoute`,
+  `CardsRoute`, `StatsRoute`, `SettingsRoute`, `ReviewRoute`, `ReadRoute`)
+  and player hooks (`useWordState`, `useLookup`, `useActiveCues`, `useAutoNext`,
+  `useEcho`, `useHotkeys`, `useSession`, `useSubControls`, …)
 
 ## Data export & import
 
@@ -151,6 +175,11 @@ The Settings page has **Export data (JSON)** (downloads a
 **Import data (JSON)** (merges settings + state via last-write-wins;
 events are skipped by default). Endpoints: `GET /api/export`,
 `POST /api/import`.
+
+**Auto-backup snapshots** are taken automatically on server startup (throttled to
+at most one per 6 hours) and stored as timestamped JSON files in
+`~/.local/share/zehntage-reactor/snapshots/`. Restore any snapshot via
+Settings → Snapshots picker or `POST /api/snapshots/restore`.
 
 ## Development
 

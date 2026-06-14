@@ -4,6 +4,54 @@ Newest first. Grouped by shipped wave or named work batch.
 
 ---
 
+## 2026-06-14 — Lemma vocab, Review mode, retention-decay, SRS heatmap
+
+### Added
+
+**Subtitles**
+- Dual-language jimaku extraction: all 22 Hyouka episodes now have both JA (human) and RU sidecar subtitles sourced from jimaku.cc in one pass.
+- `parseAss` strips interleaved Russian lines to yield clean Japanese-only tracks.
+
+**Vocabulary**
+- Lemma-based keying: clicking a conjugated form stores the dictionary lemma (`basic_form`), so all inflections (食べた, 食べる, 食べて…) highlight once a card exists.
+- Homograph disambiguation: cards with a reading bracket (辛い[からい] vs 辛い[つらい]) are keyed and matched separately — a token's kuromoji reading vetos wrong-homograph matches.
+- Retention-decay coloring: overdue deck words are tinted toward red, ramping with true days-overdue decoded server-side, saturating ~2 weeks past due. Non-overdue words are unaffected.
+- Due-word jump (`d`): skips to the next cue containing a currently-due Anki word. "N due" HUD indicator.
+
+**Seekbar SRS heatmap**
+- Tick marks on the seekbar: neutral ticks for i+1 cues, accent-colored ticks for due-word cues, positioned by cue start / duration. Pointer-events-none; scrubbing unaffected.
+
+**Review / Cram mode** (`#/review`)
+- New sidebar route. Drills due Anki words as cloze prompts from your own watched cues — blank the target word, type the answer, Enter to check, Space/→ for next.
+- Optional Russian hint per card; "watch in context" deep-link to source episode+timestamp.
+- Falls back to interval order (most overdue first) when `is:due` is unavailable.
+
+**Command palette deep actions**
+- Player commands via Ctrl+K: autopause, cue sidebar, pre-study, quiz, HUD, echo, fullscreen; i+1/due-word jump; next/prev episode; open read mode; copy cue text; copy deep-link; generate JA subs; translate → RU; condensed audio.
+- Global commands: navigate any route; toggle theme, furigana, pitch accent, autopause mode.
+
+**Auto-backup snapshots**
+- Server takes a portable JSON snapshot on startup (throttled: skipped if the most recent is < 6 hours old). Stored in `~/.local/share/zehntage-reactor/snapshots/`.
+- `GET /api/snapshots` lists available snapshots; `POST /api/snapshots/restore` restores one; Settings page exposes a picker UI.
+
+**Read mode**
+- Word-lookup popup now shows the same "encounters: N" collapsible block as the player popup, with deep-links to each occurrence (player↔read parity).
+
+### Fixed
+
+- Homograph identity fix: `vocabKey` is distinct from the bare display lemma so conjugated-form clicks don't create a wrong-keyed card.
+- Mega-sweep: Anki audio attachment, whisper snapshot handling, batch-add leak, `addNote` timeout.
+- `contentTypeFor` returns a safe default for extensionless paths.
+- Flaky timing-dependent e2e specs hardened with explicit waits.
+
+### Internal
+
+- Web decomposed: `App.tsx` → route files (`HomeRoute`, `LibraryRoute`, `CardsRoute`, `StatsRoute`, `SettingsRoute`, `ReviewRoute`, `ReadRoute`); `Player.tsx` → 8 focused hooks (`useWordState`, `useLookup`, `useActiveCues`, `useAutoNext`, `useEcho`, `useHotkeys`, `useSession`, `useSubControls`, …).
+- Test suite: 1109 unit tests + ~160 Playwright e2e specs; all pass without real API keys.
+- Dead CSS and unused `loadState` pruned.
+
+---
+
 ## Wave 18 — Auto-quiz prompt + Home "today" panel
 
 - End-of-episode auto-quiz affordance (`autoQuizPrompt` setting).
