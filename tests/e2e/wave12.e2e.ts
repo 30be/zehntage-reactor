@@ -16,7 +16,32 @@ async function deleteFront(page: import("@playwright/test").Page, front: string)
 }
 
 test("read mode: `a` mines the word with sentence context + source", async ({ page }) => {
-  await deleteFront(page, "勉強 [べんきょう]");
+  // A prior mining spec's fake-Anki add is genuinely SLOW server-side (real
+  // ffmpeg captureFrame + cutAudio, ~1s) and can land 勉強 into the shared deck
+  // AFTER a single deleteFront — which would make this test's `a` toggle the
+  // card OFF instead of ON. Delete-and-poll until 勉強 stays absent across a
+  // settle window that outlasts that straggler, so `a` reliably ADDS here.
+  const deckHas = async (): Promise<boolean> => {
+    const res = await page.request.get("/api/anki/words");
+    const { words } = (await res.json()) as { words: { front: string }[] };
+    return words.some((w) => w.front === "勉強 [べんきょう]");
+  };
+  // Each iteration: delete if present, wait out the ~1s straggler, recheck —
+  // only "clean" when 勉強 stays absent across the window.
+  await expect
+    .poll(
+      async () => {
+        if (await deckHas()) await deleteFront(page, "勉強 [べんきょう]");
+        await page.waitForTimeout(1300);
+        if (await deckHas()) {
+          await deleteFront(page, "勉強 [べんきょう]");
+          return "dirty";
+        }
+        return "clean";
+      },
+      { timeout: 20_000, intervals: Array(8).fill(200) },
+    )
+    .toBe("clean");
   await openRead(page);
   const tok = page.locator(".read-para .tok").first(); // 勉強
   await tok.waitFor({ timeout: 20_000 });
