@@ -47,6 +47,13 @@ function ActivityGrid({ byDate }: { byDate: Map<string, number> }) {
   );
 }
 
+// One point of the vocab-growth series from GET /api/stats/growth.
+interface GrowthPoint {
+  date: string;
+  count: number;
+  cumulative: number;
+}
+
 type LoadState = "loading" | "error" | "ok";
 
 function SectionLoad({
@@ -88,6 +95,9 @@ export function Stats({ go }: { go: (h: string) => void }) {
   >(null);
   const [compState, setCompState] = useState<LoadState>("loading");
 
+  const [growth, setGrowth] = useState<GrowthPoint[] | null>(null);
+  const [growthState, setGrowthState] = useState<LoadState>("loading");
+
   useEffect(() => {
     void api
       .statsSummary()
@@ -105,6 +115,11 @@ export function Stats({ go }: { go: (h: string) => void }) {
       .statsComprehension()
       .then((v) => { setComp(v); setCompState("ok"); })
       .catch(() => setCompState("error"));
+    // Vocab growth (G2): fetched directly like other Stats sections.
+    void fetch("/api/stats/growth")
+      .then((r) => (r.ok ? (r.json() as Promise<GrowthPoint[]>) : Promise.reject(r.status)))
+      .then((v) => { setGrowth(v); setGrowthState("ok"); })
+      .catch(() => setGrowthState("error"));
   }, []);
   // Per-episode coverage, computed in idle time (web/coverage.ts hook).
   const coverage = useCoverage(entries, anki);
@@ -404,6 +419,61 @@ export function Stats({ go }: { go: (h: string) => void }) {
             ))}
           </div>
         </>
+      )}
+
+      {growthState === "error" ? (
+        <>
+          <h2 className="h2">Vocabulary growth</h2>
+          <SectionLoad state="error" label="vocabulary growth" />
+        </>
+      ) : growthState === "loading" ? (
+        <>
+          <h2 className="h2">Vocabulary growth</h2>
+          <SectionLoad state="loading" label="vocabulary growth" />
+        </>
+      ) : (
+        growth && (
+          <>
+            <h2 className="h2">Vocabulary growth</h2>
+            <div className="section-intro muted">
+              Cumulative words mined over time (since tracking began) — each bar
+              is your total deck size on a day you added cards.
+            </div>
+            {growth.length === 0 ? (
+              <div className="empty">No words mined yet.</div>
+            ) : (
+              <>
+                <div className="stats-totals">
+                  <div className="stat">
+                    <span className="stat-num">
+                      {growth[growth.length - 1]!.cumulative}
+                    </span>
+                    words mined
+                  </div>
+                  <div className="stat">
+                    <span className="stat-num">{growth.length}</span>
+                    active days
+                  </div>
+                </div>
+                <div className="cum-chart">
+                  {(() => {
+                    const max = growth[growth.length - 1]!.cumulative || 1;
+                    return growth.map((p) => (
+                      <span
+                        key={p.date}
+                        className="cum-col"
+                        title={`${p.date}: ${p.cumulative} total (+${p.count})`}
+                        style={{
+                          height: `${Math.max(2, (p.cumulative / max) * 100)}%`,
+                        }}
+                      />
+                    ));
+                  })()}
+                </div>
+              </>
+            )}
+          </>
+        )
       )}
 
       <h2 className="h2">Coverage</h2>

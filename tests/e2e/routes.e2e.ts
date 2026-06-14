@@ -98,13 +98,13 @@ test.describe("Stats page", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto("/#/stats");
     // The stats-totals block is always rendered regardless of data availability
-    await expect(page.locator(".stats-totals")).toBeVisible();
+    await expect(page.locator(".stats-totals").first()).toBeVisible();
   });
 
   test("renders the totals block with 'known words' and 'cards added' labels", async ({
     page,
   }) => {
-    const totals = page.locator(".stats-totals");
+    const totals = page.locator(".stats-totals").first();
     await expect(totals).toContainText("known words");
     await expect(totals).toContainText("cards added");
   });
@@ -126,7 +126,7 @@ test.describe("Stats page", () => {
     await expect(page.locator(".h2", { hasText: "Activity" })).toBeVisible();
 
     // Confirm no unexpected crash by checking the main container stayed mounted
-    await expect(page.locator(".stats-totals")).toBeVisible();
+    await expect(page.locator(".stats-totals").first()).toBeVisible();
   });
 
   test("stats-list container renders for Coverage section", async ({
@@ -139,7 +139,7 @@ test.describe("Stats page", () => {
   test("stat-num spans inside totals show a value (not blank)", async ({
     page,
   }) => {
-    const nums = page.locator(".stats-totals .stat-num");
+    const nums = page.locator(".stats-totals").first().locator(".stat-num");
     const count = await nums.count();
     expect(count).toBeGreaterThanOrEqual(2);
     // Each .stat-num shows either a number or the loading ellipsis "…"

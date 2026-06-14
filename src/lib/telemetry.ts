@@ -530,6 +530,46 @@ export function overview(events: TelemetryEvent[], now = Date.now()): Overview {
   return { totals, last30Days, ankiCumulative };
 }
 
+// --- vocab growth: words-added-per-day + cumulative -------------------------
+//
+// G2: how the user's vocabulary has grown over time. Each anki_add event marks
+// one card mined; we bucket them by local day and accumulate a running total.
+// NOTE: only words mined SINCE telemetry began are counted — the event log is
+// the sole source, so cards added before tracking existed won't appear.
+
+export interface GrowthPoint {
+  date: string; // local "YYYY-MM-DD"
+  count: number; // anki_add events on this day
+  cumulative: number; // running total of cards up to & including this day
+}
+
+/**
+ * Words added per day (anki_add events) with a running cumulative total.
+ * Returns one point per day that had at least one add, sorted chronologically.
+ * Pure — testable on an in-memory array; tolerant of out-of-order events.
+ */
+export function wordsAddedPerDay(events: TelemetryEvent[]): GrowthPoint[] {
+  const perDay = new Map<string, number>();
+  for (const e of events) {
+    if (e.type !== "anki_add") continue;
+    if (!Number.isFinite(e.ts)) continue;
+    const date = localDate(e.ts);
+    perDay.set(date, (perDay.get(date) ?? 0) + 1);
+  }
+  const out: GrowthPoint[] = [];
+  let running = 0;
+  for (const date of [...perDay.keys()].sort()) {
+    const count = perDay.get(date)!;
+    running += count;
+    out.push({ date, count, cumulative: running });
+  }
+  return out;
+}
+
+export async function vocabGrowth(): Promise<GrowthPoint[]> {
+  return wordsAddedPerDay(await readEvents());
+}
+
 const CSV_HEADER = [
   "mediaId",
   "date",
@@ -734,6 +774,48 @@ export function wordHistory(
   };
 }
 
+// Bound for the word-history read: events.jsonl grows unbounded over months,
+// but word history only needs recent-ish events ("first added" is monotonic and,
+// for any realistically-used word, lands well within the most recent slice).
+// We cap to the last N PARSED events so a cold cache miss stays O(N) instead of
+// O(file size). Trade-off: a word whose ONLY interactions predate the last N
+// events would report no history — acceptable for a lookup-popup convenience.
+export const WORD_HISTORY_MAX_EVENTS = 50_000;
+
+/**
+ * Read at most the last `max` events from the log. Reads the whole file then
+ * slices the tail of the parsed array — bounding the EXPENSIVE parse/aggregate
+ * cost (the file read itself is cheap relative to JSON.parse per line) and
+ * keeping correctness for the common recent-word case. Documented bound:
+ * WORD_HISTORY_MAX_EVENTS.
+ */
+export async function readRecentEvents(
+  max = WORD_HISTORY_MAX_EVENTS,
+): Promise<TelemetryEvent[]> {
+  let text: string;
+  try {
+    text = await readFile(eventsFilePath(), "utf8");
+  } catch {
+    return [];
+  }
+  // Slice the last ~max non-empty lines before parsing, so the parse cost is
+  // bounded even as events.jsonl grows to many MB.
+  const lines = text.split("\n");
+  const start = Math.max(0, lines.length - max - 1); // -1 for trailing newline
+  const out: TelemetryEvent[] = [];
+  for (let i = start; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (!line.trim()) continue;
+    try {
+      const e = JSON.parse(line) as TelemetryEvent;
+      if (e && typeof e.ts === "number" && typeof e.type === "string") out.push(e);
+    } catch {
+      // skip torn/garbage lines
+    }
+  }
+  return out;
+}
+
 export async function wordHistoryFromFile(forms: string[]): Promise<WordHistory> {
-  return wordHistory(await readEvents(), forms);
+  return wordHistory(await readRecentEvents(), forms);
 }

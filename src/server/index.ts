@@ -69,6 +69,7 @@ import {
   readEvents,
   episodeSeries,
   overview,
+  wordsAddedPerDay,
   toCsv,
   todaySummary,
   wordHistoryFromFile,
@@ -1670,6 +1671,9 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       }
       if (req.method === "GET" && path === "/api/stats/overview") {
         return json(overview(await readEvents()));
+      }
+      if (req.method === "GET" && path === "/api/stats/growth") {
+        return json(wordsAddedPerDay(await readEvents()));
       }
       if (req.method === "GET" && path === "/api/stats/comprehension") {
         return json(await comprehensionSummary());
