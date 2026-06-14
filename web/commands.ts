@@ -63,7 +63,7 @@ export interface HotkeyRow {
   /** Which input mode owns the key. `player` and `read` can reuse the same
    *  physical key (e.g. j / k) with different meanings — the scope is what
    *  disambiguates them in the cheatsheet. */
-  scope: "player" | "read" | "global";
+  scope: "player" | "read" | "global" | "review";
 }
 
 export const HOTKEYS: HotkeyRow[] = [
@@ -85,7 +85,8 @@ export const HOTKEYS: HotkeyRow[] = [
   { keys: "l", what: "cue-list sidebar", scope: "player" },
   { keys: "w", what: "pre-study panel (upcoming words)", scope: "player" },
   { keys: "q", what: "comprehension quiz (watched cues)", scope: "player" },
-  { keys: "b / bb", what: "peek translation / toggle blur", scope: "player" },
+  { keys: "b (hold)", what: "peek secondary line while held", scope: "player" },
+  { keys: "b b", what: "toggle secondary blur for session", scope: "player" },
   { keys: "i", what: "picture-in-picture", scope: "player" },
   { keys: "k", what: "mark hovered word known", scope: "player" },
   { keys: "x", what: "blacklist hovered word", scope: "player" },
@@ -99,6 +100,11 @@ export const HOTKEYS: HotkeyRow[] = [
   { keys: "t", what: "toggle translation lines", scope: "read" },
   { keys: "Esc", what: "close popups / panels", scope: "global" },
   { keys: "Ctrl+K", what: "command palette", scope: "global" },
-  { keys: "Enter / Space", what: "review: check answer / next card", scope: "global" },
+  { keys: "Space", what: "show answer / next card", scope: "review" },
+  { keys: "1", what: "didn't know", scope: "review" },
+  { keys: "2", what: "hard", scope: "review" },
+  { keys: "3", what: "knew it", scope: "review" },
+  { keys: "4", what: "easy", scope: "review" },
+  { keys: "r", what: "replay audio", scope: "review" },
   { keys: "?", what: "hotkey cheatsheet", scope: "global" },
 ];

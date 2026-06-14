@@ -263,6 +263,133 @@ export async function storeMedia(bytes: Uint8Array, filename: string): Promise<s
   return stored || filename;
 }
 
+// --- Review client (Wave 14): due queue + grading via AnkiConnect ----------
+//
+// Scheduling is delegated ENTIRELY to Anki (the user's FSRS + deck limits).
+// We only surface the due cards (rendered HTML, media rewritten to the proxy)
+// and pipe the user's grade back through `answerCards`.
+
+export interface ReviewCard {
+  cardId: number;
+  question: string;
+  answer: string;
+  front: string;
+}
+
+/** Strip all HTML tags for a plain-text front label. */
+function stripHtml(html: string): string {
+  return html
+    .replace(/<[^>]*>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Rewrite bare Anki media references in rendered card HTML so the browser can
+ * load them through the existing `/api/anki/media/<name>` proxy:
+ *  - `src="FILENAME"` / `src='FILENAME'` on img/audio/source whose value is a
+ *    bare filename (not absolute, no http(s)/data scheme) → proxy URL.
+ *  - `[sound:FILENAME]` tokens → `<audio controls src="…proxy…"></audio>`.
+ * FILENAME is validated to contain no `/`, `\`, or `..` (skip rewrite if it
+ * does — matches the proxy's own name guard at server index.ts ~line 1680).
+ */
+function rewriteAnkiMedia(html: string): string {
+  const safe = (name: string) =>
+    !name.includes("/") && !name.includes("\\") && !name.includes("..");
+  let out = html.replace(
+    /(\bsrc\s*=\s*)(["'])([^"']+)\2/gi,
+    (m, pre: string, q: string, val: string) => {
+      // Leave absolute / scheme-qualified / data URIs untouched.
+      if (/^(?:[a-z][a-z0-9+.-]*:|\/\/|\/)/i.test(val)) return m;
+      if (!safe(val)) return m;
+      return `${pre}${q}/api/anki/media/${encodeURIComponent(val)}${q}`;
+    },
+  );
+  out = out.replace(/\[sound:([^\]]+)\]/gi, (m, name: string) => {
+    const trimmed = name.trim();
+    if (!safe(trimmed)) return m;
+    return `<audio controls src="/api/anki/media/${encodeURIComponent(trimmed)}"></audio>`;
+  });
+  return out;
+}
+
+interface AcReviewCardInfo {
+  cardId: number;
+  question: string;
+  answer: string;
+  fields: Record<string, { value: string; order: number }>;
+}
+
+/**
+ * Fetch the cards Anki considers due, rendered and proxy-rewritten.
+ *
+ * `is:due` reflects what Anki considers due now; it does NOT re-apply the
+ * *new-card* daily intro cap once the queue is built — acceptable for a cram
+ * client, and matches the existing isDue usage (see acProgress, ~line 196).
+ *
+ * Grading has no remote anki-mcp equivalent, so when only the remote fallback
+ * is reachable we report `available:false` (the client shows an offline state).
+ */
+export async function reviewQueue(
+  scope: "zehntage" | "all",
+  limit = 50,
+): Promise<{ available: boolean; due: number; cards: ReviewCard[] }> {
+  if (ankiFake() || !(await ankiLocalAvailable())) {
+    return { available: false, due: 0, cards: [] };
+  }
+  try {
+    const fm = await acFieldMap();
+    const query = scope === "zehntage" ? "tag:zehntage is:due" : "is:due";
+    const ids = await acRaw<number[]>("findCards", { query });
+    const due = ids.length;
+    if (due === 0) return { available: true, due: 0, cards: [] };
+    const wanted = ids.slice(0, limit);
+    const infos = await acRaw<AcReviewCardInfo[]>("cardsInfo", { cards: wanted });
+    const cards: ReviewCard[] = infos.map((c) => {
+      const frontRaw =
+        c.fields[fm.front]?.value ??
+        Object.values(c.fields).sort((a, b) => a.order - b.order)[0]?.value ??
+        "";
+      return {
+        cardId: c.cardId,
+        question: rewriteAnkiMedia(c.question ?? ""),
+        answer: rewriteAnkiMedia(c.answer ?? ""),
+        front: stripHtml(frontRaw),
+      };
+    });
+    return { available: true, due, cards };
+  } catch {
+    return { available: false, due: 0, cards: [] };
+  }
+}
+
+/**
+ * Grade a card through Anki's own scheduler (FSRS). The `answerCards` param
+ * key is "answers" — using "cards" throws. Busts the listWords/progress cache
+ * so due counts refresh on the next read.
+ */
+export async function answerCard(
+  cardId: number,
+  ease: 1 | 2 | 3 | 4,
+): Promise<{ ok: boolean; error?: string }> {
+  if (ankiFake() || !(await ankiLocalAvailable())) {
+    return { ok: false, error: "AnkiConnect not available" };
+  }
+  try {
+    const res = await acRaw<boolean[]>("answerCards", {
+      answers: [{ cardId, ease }],
+    });
+    bustListWordsCache();
+    if (Array.isArray(res) && res[0] === false) {
+      return { ok: false, error: "card not in review queue" };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 /** Raw bytes of a media file from the LOCAL Anki collection, or null. */
 export async function retrieveMedia(name: string): Promise<Uint8Array | null> {
   if (ankiFake() || !(await ankiLocalAvailable())) return null;

@@ -322,6 +322,23 @@ export interface SnapshotMeta {
   size: number;
 }
 
+// One due card from GET /api/review/queue. `question`/`answer` are rendered
+// Anki template HTML (media URLs already rewritten server-side to the
+// /api/anki/media proxy); `front` is the plain card label (e.g. "言葉 [ことば]").
+export type ReviewCard = {
+  cardId: number;
+  question: string;
+  answer: string;
+  front: string;
+};
+
+export interface ReviewQueueResponse {
+  // false ⇒ no grading backend (Anki offline / remote can't schedule).
+  available: boolean;
+  due: number;
+  cards: ReviewCard[];
+}
+
 export const api = {
   library: () => jget<LibraryEntry[]>("/api/library"),
   // Cross-episode subtitle search; empty/whitespace query short-circuits to [].
@@ -466,6 +483,16 @@ export const api = {
   // Roll back to a snapshot by name (overwrites current settings/state).
   restoreSnapshot: (name: string) =>
     jpost<ImportResult>("/api/snapshots/restore", { name }),
+  // The next batch of cards Anki considers due (scope = zehntage tag or whole
+  // deck). Anki's own scheduler decides what's due; we just render + grade.
+  reviewQueue: (scope: "zehntage" | "all") =>
+    jget<ReviewQueueResponse>(`/api/review/queue?scope=${scope}`),
+  // Grade a card against Anki's scheduler. ease: 1=Again 2=Hard 3=Good 4=Easy.
+  reviewAnswer: (cardId: number, ease: number) =>
+    jpost<{ ok: boolean; error?: string }>("/api/review/answer", {
+      cardId,
+      ease,
+    }),
 };
 
 export function mediaUrl(id: string): string {

@@ -115,9 +115,6 @@ export const SubOverlay = memo(function SubOverlay({
       {secondaryText && (
         <div
           className={`sub-secondary${secShow || secHold || blurOff ? " show" : ""}`}
-          role="region"
-          aria-label="Translation"
-          tabIndex={0}
           onMouseEnter={() => {
             secondaryHoveredRef.current = true;
             clearCloseTimer();
@@ -125,17 +122,6 @@ export const SubOverlay = memo(function SubOverlay({
             pauseForHover();
           }}
           onMouseLeave={() => {
-            secondaryHoveredRef.current = false;
-            setSecShow(false);
-            resumeFromHover();
-          }}
-          onFocus={() => {
-            secondaryHoveredRef.current = true;
-            clearCloseTimer();
-            setSecShow(true);
-            pauseForHover();
-          }}
-          onBlur={() => {
             secondaryHoveredRef.current = false;
             setSecShow(false);
             resumeFromHover();

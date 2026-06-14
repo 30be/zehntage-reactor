@@ -31,6 +31,9 @@ export function Settings({
   const [autoWhisper, setAutoWhisper] = useState(
     Boolean(settings.whisperAutoGenerate),
   );
+  const [blurSecondary, setBlurSecondary] = useState(
+    settings.blurSecondary !== false,
+  );
   const [furigana, setFurigana] = useState(settings.furigana !== false);
   const [pitchAccent, setPitchAccent] = useState(settings.pitchAccent !== false);
   const [autoQuizPrompt, setAutoQuizPrompt] = useState(
@@ -67,6 +70,7 @@ export function Settings({
     setPrimaryLang((settings.targetLang as string) || "ja");
     setSecondaryLang((settings.knownLang as string) || "ru");
     setAutoWhisper(Boolean(settings.whisperAutoGenerate));
+    setBlurSecondary(settings.blurSecondary !== false);
     setFurigana(settings.furigana !== false);
     setPitchAccent(settings.pitchAccent !== false);
     setAutoQuizPrompt(settings.autoQuizPrompt !== false);
@@ -89,6 +93,7 @@ export function Settings({
     primaryLang,
     secondaryLang,
     autoWhisper,
+    blurSecondary,
     furigana,
     pitchAccent,
     autoQuizPrompt,
@@ -104,6 +109,7 @@ export function Settings({
     primaryLang,
     secondaryLang,
     autoWhisper,
+    blurSecondary,
     furigana,
     pitchAccent,
     autoQuizPrompt,
@@ -127,6 +133,8 @@ export function Settings({
         targetLang: s.primaryLang,
         knownLang: s.secondaryLang,
         whisperAutoGenerate: s.autoWhisper,
+        // TODO(player): read settings.blurSecondary instead of useState(false)
+        blurSecondary: s.blurSecondary,
         furigana: s.furigana,
         pitchAccent: s.pitchAccent,
         autoQuizPrompt: s.autoQuizPrompt,
@@ -220,7 +228,26 @@ export function Settings({
                 scheduleSave();
               }}
             />
-            <label htmlFor="autoWhisper">Auto-generate Japanese subtitles</label>
+            <label htmlFor="autoWhisper">
+              Auto-generate Japanese subtitles{" "}
+              <span className="hint">(not yet enforced by server)</span>
+            </label>
+          </div>
+          <div
+            className="switch"
+            title="Blur the secondary (translation) subtitle track until hovered"
+          >
+            <input
+              type="checkbox"
+              id="blurSecondary"
+              checked={blurSecondary}
+              onChange={(e) => {
+                setBlurSecondary(e.target.checked);
+                scheduleSave();
+              }}
+            />
+            {/* TODO(player): read settings.blurSecondary instead of useState(false) */}
+            <label htmlFor="blurSecondary">Blur secondary subtitles until hovered</label>
           </div>
           <div
             className="switch"
@@ -385,7 +412,10 @@ export function Settings({
                 className="btn sm"
                 title="Restore the built-in lookup prompt"
                 onClick={() => {
-                  setLookupPrompt(promptDefault);
+                  // Set "" so gemini.ts treats it as "use built-in default"
+                  // (template && template.trim() check). Storing the full text
+                  // would snapshot the current default and miss future updates.
+                  setLookupPrompt("");
                   scheduleSave();
                 }}
               >
@@ -413,7 +443,10 @@ export function Settings({
                 className="btn sm"
                 title="Restore the built-in explanation prompt"
                 onClick={() => {
-                  setExplainPrompt(explainDefault);
+                  // Set "" so gemini.ts treats it as "use built-in default"
+                  // (template && template.trim() check). Storing the full text
+                  // would snapshot the current default and miss future updates.
+                  setExplainPrompt("");
                   scheduleSave();
                 }}
               >

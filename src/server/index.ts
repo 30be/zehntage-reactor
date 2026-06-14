@@ -60,6 +60,8 @@ import {
   storeMedia,
   retrieveMedia,
   bustListWordsCache,
+  reviewQueue,
+  answerCard,
 } from "../lib/anki.ts";
 import { readSettings, writeSettings } from "../lib/settings.ts";
 import {
@@ -1677,7 +1679,16 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       const ankiMedia = path.match(/^\/api\/anki\/media\/([^/]+)$/);
       if (req.method === "GET" && ankiMedia) {
         const name = decodeURIComponent(ankiMedia[1]!);
-        if (name.includes("/") || name.includes("..")) return err("bad name", 400);
+        if (
+          name.includes("/") || name.includes("\\") || name.includes("..") ||
+          name.includes("\0")
+        ) return err("bad name", 400);
+        // Positive extension allowlist (defense-in-depth, matches the client
+        // media regex). Notably excludes .svg — SVG is script-capable and must
+        // never be served same-origin from attacker-named media. 404 otherwise.
+        if (!/\.(jpe?g|png|gif|webp|mp3|ogg|wav|m4a|webm)$/i.test(name)) {
+          return err("media not found", 404);
+        }
         let bytes = ankiMediaGet(name);
         if (!bytes) {
           const fetched = await retrieveMedia(name);
@@ -1691,7 +1702,8 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
           ".png": "image/png",
           ".gif": "image/gif",
           ".webp": "image/webp",
-          ".svg": "image/svg+xml",
+          // NOTE: .svg intentionally NOT mapped — it is script-capable and is
+          // also rejected by the extension allowlist above.
           ".mp3": "audio/mpeg",
           ".ogg": "audio/ogg",
           ".wav": "audio/wav",
@@ -2015,97 +2027,34 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       // Prefers Anki is:due (acProgress.isDue); when no card carries that flag
       // (remote anki-mcp or fake mode), falls back to interval-based dueness
       // (smallest/most-overdue first) and reports source:"interval".
-      if (req.method === "GET" && path === "/api/review/due") {
-        // Reuse the cached anki/words payload (listWords + getProgress).
-        let c = ankiWordsCache;
-        if (!c) c = await refreshAnkiWordsCache();
-        else if (Date.now() - c.ts > ANKI_WORDS_TTL_MS)
-          void refreshAnkiWordsCache().catch(() => {});
-        const { words, progress } = JSON.parse(c.body) as {
-          words: { front: string; back: string }[];
-          progress: Record<
-            string,
-            { interval?: number; isDue?: boolean } | number
-          > | null;
+      // --- Review client (Wave 14): due queue, scheduled by Anki itself ---
+      if (req.method === "GET" && path === "/api/review/queue") {
+        const raw = url.searchParams.get("scope") ?? "zehntage";
+        if (raw !== "zehntage" && raw !== "all") {
+          return err("scope must be 'zehntage' or 'all'", 400);
+        }
+        const scope = raw as "zehntage" | "all";
+        const { available, due, cards } = await reviewQueue(scope);
+        return json({ scope, available, due, cards });
+      }
+
+      if (req.method === "POST" && path === "/api/review/answer") {
+        const body = (await req.json().catch(() => ({}))) as {
+          cardId?: unknown;
+          ease?: unknown;
         };
-        const prog = progress ?? {};
-        const limit = Math.min(
-          200,
-          Math.max(1, parseInt(url.searchParams.get("limit") ?? "50", 10) || 50),
-        );
-
-        // Detect whether is:due info is available at all.
-        const haveIsDue = Object.values(prog).some(
-          (p) => typeof p === "object" && p != null && "isDue" in p,
-        );
-        const source: "is:due" | "interval" = haveIsDue ? "is:due" : "interval";
-
-        interface DueRow {
-          front: string;
-          back: string;
-          interval: number;
-          isDue: boolean;
+        const cardId = body.cardId;
+        const ease = body.ease;
+        if (typeof cardId !== "number" || !Number.isFinite(cardId)) {
+          return err("cardId must be a number", 400);
         }
-        const due: DueRow[] = [];
-        for (const w of words) {
-          const p = prog[w.front];
-          const interval =
-            typeof p === "object" && p != null && typeof p.interval === "number"
-              ? p.interval
-              : typeof p === "number"
-                ? p
-                : 0;
-          const isDue =
-            typeof p === "object" && p != null && typeof p.isDue === "boolean"
-              ? p.isDue
-              : false;
-          if (haveIsDue) {
-            if (!isDue) continue; // is:due path: only truly-due cards
-          }
-          // interval path: everything is a candidate, ordered by interval below
-          due.push({ front: w.front, back: w.back, interval, isDue });
+        if (ease !== 1 && ease !== 2 && ease !== 3 && ease !== 4) {
+          return err("ease must be 1, 2, 3 or 4", 400);
         }
-        // most-overdue first: is:due cards lead, then ascending interval.
-        due.sort(
-          (a, b) =>
-            (a.isDue ? -1 : 0) - (b.isDue ? -1 : 0) ||
-            a.interval - b.interval ||
-            a.front.localeCompare(b.front),
-        );
-        const top = due.slice(0, limit);
-
-        // Join each due front's lemma with the encounter index. Front shape is
-        // "word" or "word [reading]"; the lemma index keys on the bare word.
-        const entries = library.list();
-        const indexes = await collectIndexes(entries, 30);
-        const names = new Map(entries.map((e) => [e.id, e.name]));
-        const out = top.map((d) => {
-          const m = /^(.*?)\s*(?:\[(.*)\])?\s*$/.exec(d.front);
-          const word = (m?.[1] ?? d.front).trim();
-          const reading = m?.[2]?.trim() || undefined;
-          const hits = encounters(word, indexes.values());
-          const cue = hits[0]?.cues[0];
-          const mediaId = hits[0]?.mediaId;
-          return {
-            front: d.front,
-            word,
-            ...(reading ? { reading } : {}),
-            back: d.back,
-            interval: d.interval,
-            isDue: d.isDue,
-            ...(cue && mediaId
-              ? {
-                  encounter: {
-                    mediaId,
-                    name: names.get(mediaId) ?? mediaId,
-                    start: cue.start,
-                    text: cue.text,
-                  },
-                }
-              : {}),
-          };
-        });
-        return json({ source, total: out.length, words: out });
+        const res = await answerCard(cardId, ease);
+        // A recorded grade changes due state — refresh words/cards caches.
+        if (res.ok) bustAnkiWordsCache();
+        return json(res);
       }
 
       // --- show-local lemma frequency (pre-study ordering) ---

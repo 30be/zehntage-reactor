@@ -31,34 +31,22 @@ export function embeddedCacheKey(absPath: string, size: number, mtimeMs: number)
   return `${absPath}|${size}|${mtimeMs}`;
 }
 
-// Cache of embedded subtitle-track langs, keyed by path+size+mtime so repeated
-// /api/library calls don't re-probe 22 files on every request.
-const embeddedLangCache = new Map<string, string[]>();
-
 /**
- * Languages of EMBEDDED subtitle tracks for a video file, cached by
- * path + size + mtime. Returns raw lang codes (e.g. "jpn"). On probe failure
- * (or non-probeable file) returns [] and caches that.
+ * Languages of EMBEDDED subtitle tracks for a video file. Returns raw lang
+ * codes (e.g. "jpn"). On probe failure (or non-probeable file) returns [].
+ *
+ * Derived from `listEmbeddedSubTracks`, which itself caches the (expensive)
+ * `ffprobe` result by path + size + mtime — so this no longer keeps a separate
+ * `embeddedLangCache`/ffprobe path. There is now exactly one probe per
+ * (file, size, mtime), shared with `subTracksFor`.
  */
 export async function embeddedSubLangs(absPath: string): Promise<string[]> {
-  let key: string;
   try {
-    const st = await stat(absPath);
-    key = embeddedCacheKey(absPath, st.size, st.mtimeMs);
+    const tracks = await listEmbeddedSubTracks(absPath);
+    return tracks.map((t) => t.lang);
   } catch {
     return [];
   }
-  const hit = embeddedLangCache.get(key);
-  if (hit) return hit;
-  let langs: string[] = [];
-  try {
-    const tracks = await listEmbeddedSubTracks(absPath);
-    langs = tracks.map((t) => t.lang);
-  } catch {
-    langs = [];
-  }
-  embeddedLangCache.set(key, langs);
-  return langs;
 }
 
 /** Sidecar + embedded sub languages for an entry (raw codes, deduped). */

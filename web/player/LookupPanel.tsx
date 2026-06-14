@@ -55,6 +55,8 @@ export function LookupPanel({
   onPanelLeave,
   explain,
   explainLoading,
+  explainErr,
+  onExplainRetry,
   lookup,
   lookupLoading,
   pitchOn,
@@ -84,6 +86,8 @@ export function LookupPanel({
   onPanelLeave: () => void;
   explain: ExplainResult | null;
   explainLoading: boolean;
+  explainErr: boolean;
+  onExplainRetry: () => void;
   lookup: WordLookup | null;
   lookupLoading: boolean;
   pitchOn: boolean;
@@ -132,6 +136,18 @@ export function LookupPanel({
             {popup.surface}
           </div>
           {explainLoading && <div className="spin">Explaining…</div>}
+          {explainErr && !explainLoading && (
+            <div className="explain-err notes">
+              Explanation unavailable.{" "}
+              <button
+                type="button"
+                className="link-btn explain-retry"
+                onClick={onExplainRetry}
+              >
+                Retry
+              </button>
+            </div>
+          )}
           {explain && (
             <>
               <div className="translation">{explain.translation}</div>

@@ -108,13 +108,32 @@ function TodayGoal({ value, streak }: { value: number; streak: number }) {
 // (hotkey data lives in web/commands.ts — shared with the `?` overlay)
 
 // Quiet summary of TODAY's study, from telemetry. Renders nothing until data
-// arrives and nothing at all on a day with no activity (no empty shell).
+// arrives; shows an inline offline note if AnkiConnect is unreachable; renders
+// the ring even on zero-activity days so new users see the goal.
 function TodayPanel() {
   const [today, setToday] = useState<import("./api.ts").TodayStats | null>(null);
+  const [ankiErr, setAnkiErr] = useState(false);
   useEffect(() => {
-    void api.statsToday().then(setToday).catch(() => {});
+    void api.statsToday().then((data) => {
+      setAnkiErr(false);
+      setToday(data);
+    }).catch(() => {
+      setAnkiErr(true);
+    });
   }, []);
-  if (!today || !today.active) return null;
+  if (ankiErr) {
+    return (
+      <section className="today-panel card">
+        <h2 className="h2">Today</h2>
+        <p className="muted" style={{ margin: "0.5rem 0" }}>
+          Anki offline — open Anki to see today's stats.
+        </p>
+      </section>
+    );
+  }
+  // Still loading
+  if (today === null) return null;
+  // Loaded: render ring even when inactive/zero so new users see the goal widget
   const tiles: { label: string; value: number }[] = [
     { label: "words mined", value: today.wordsMined },
     { label: "cues watched", value: today.cuesWatched },
@@ -125,6 +144,11 @@ function TodayPanel() {
     <section className="today-panel card">
       <h2 className="h2">Today</h2>
       <TodayGoal value={today.wordsMined} streak={today.streak} />
+      {today.wordsMined === 0 && (
+        <p className="muted" style={{ margin: "0.25rem 0 0.5rem", fontSize: "0.85em" }}>
+          Mine your first word today!
+        </p>
+      )}
       <div className="today-tiles">
         {tiles.map((t) => (
           <div key={t.label} className="stat">
@@ -144,6 +168,7 @@ function TodayPanel() {
 function WordOfDayCard({ go }: { go: (h: string) => void }) {
   const [pick, setPick] = useState<WordOfDay | null>(null);
   const [link, setLink] = useState<string | null>(null);
+  const [ankiErr, setAnkiErr] = useState(false);
   useEffect(() => {
     let alive = true;
     const day = localDateStr(new Date());
@@ -151,6 +176,7 @@ function WordOfDayCard({ go }: { go: (h: string) => void }) {
     if (cached) setPick(cached);
     void api.ankiWords().then((res) => {
       if (!alive) return;
+      setAnkiErr(false);
       // The deck may hold unrelated cards (chemistry, quantum-computing, …).
       // Keep only OURS — mirror the server-side /api/anki/cards filter: a card
       // qualifies if it carries the "zehntage" tag (local AnkiConnect path, not
@@ -168,7 +194,11 @@ function WordOfDayCard({ go }: { go: (h: string) => void }) {
       if (!chosen) return;
       setPick(chosen);
       saveCachedWordOfDay(day, chosen);
-    }).catch(() => {});
+    }).catch(() => {
+      if (!alive) return;
+      // Only set error if we have no cached word to show
+      if (!cached) setAnkiErr(true);
+    });
     return () => {
       alive = false;
     };
@@ -189,6 +219,16 @@ function WordOfDayCard({ go }: { go: (h: string) => void }) {
       alive = false;
     };
   }, [pick]);
+  if (ankiErr) {
+    return (
+      <section className="today-panel card wordday-card">
+        <h2 className="h2">Word of the day</h2>
+        <p className="muted" style={{ margin: "0.5rem 0" }}>
+          Anki offline — open Anki to see today's word.
+        </p>
+      </section>
+    );
+  }
   if (!pick) return null;
   return (
     <section className="today-panel card wordday-card">
@@ -196,7 +236,7 @@ function WordOfDayCard({ go }: { go: (h: string) => void }) {
       <div className="wordday-body">
         <span className="wordday-word" style={{ color: "var(--accent-known, #7aa2f7)" }}>
           {pick.word}
-          {pick.reading ? <span className="wordday-reading muted"> [{pick.reading}]</span> : null}
+          {pick.reading ? <span className="wordday-reading muted"> （{pick.reading}）</span> : null}
         </span>
         <span className="wordday-meaning">{pick.meaning}</span>
         {link
@@ -220,8 +260,14 @@ function WordOfDayCard({ go }: { go: (h: string) => void }) {
 
 export function Home({ go }: { go: (h: string) => void }) {
   const [root, setRoot] = useState<{ root: string; count: number } | null>(null);
+  const [rootErr, setRootErr] = useState(false);
   useEffect(() => {
-    void api.getRoot().then(setRoot).catch(() => {});
+    void api.getRoot().then((data) => {
+      setRootErr(false);
+      setRoot(data);
+    }).catch(() => {
+      setRootErr(true);
+    });
   }, []);
   return (
     <>
@@ -257,7 +303,8 @@ export function Home({ go }: { go: (h: string) => void }) {
           ))}
       </div>
       <div className="home-root muted">
-        Current library: {root ? `${root.root} · ${root.count} entries` : "…"}
+        Current library:{" "}
+        {rootErr ? "(unavailable)" : root ? `${root.root} · ${root.count} entries` : "…"}
       </div>
       <div className="home-attrib muted">
         Pitch accent data: Kanjium (Uros O.), CC BY-SA 4.0

@@ -591,6 +591,11 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   // sentence-structure explain panel state (same panel chrome as word lookups)
   const [explain, setExplain] = useState<ExplainResult | null>(null);
   const [explainLoading, setExplainLoading] = useState(false);
+  // wave15 #11: track /api/explain failures so the panel can show
+  // "Explanation unavailable." + Retry instead of an empty box.
+  const [explainErr, setExplainErr] = useState(false);
+  // bumped by the Retry affordance to re-run the explain effect
+  const [explainReload, setExplainReload] = useState(0);
 
   // follow-up Q/A inside the panel (cleared when the panel closes)
   const [qa, setQa] = useState<QaItem[]>([]);
@@ -1419,10 +1424,12 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   useEffect(() => {
     if (!popup || popup.kind !== "sentence") {
       setExplain(null);
+      setExplainErr(false);
       return;
     }
     let cancelled = false;
     setExplain(null);
+    setExplainErr(false);
     setExplainLoading(true);
     void api.explain({
       sentence: popup.surface,
@@ -1433,12 +1440,14 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       .then((res) => {
         if (!cancelled) setExplain(res);
       })
-      .catch(() => {})
+      .catch(() => {
+        if (!cancelled) setExplainErr(true);
+      })
       .finally(() => !cancelled && setExplainLoading(false));
     return () => {
       cancelled = true;
     };
-  }, [popup?.kind, popup?.surface, popup?.context, popup?.secondary]);
+  }, [popup?.kind, popup?.surface, popup?.context, popup?.secondary, explainReload]);
 
   // fetch encounter history when a word popup opens (lazy, cached per lemma)
   useEffect(() => {
@@ -1491,6 +1500,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     subOffsetRef,
     sessLookupsRef,
     entryName: entry.name,
+    mediaId: entry.id,
     tmEvent,
     toast,
   });
@@ -1551,7 +1561,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     left = Math.max(margin, Math.min(left, vw - width - margin));
 
     setPopupPos({ left, top, visibility: "visible" });
-  }, [popup, lookup, lookupLoading, explain, explainLoading, qa]);
+  }, [popup, lookup, lookupLoading, explain, explainLoading, explainErr, qa]);
 
   const onAdd = useCallback(async () => {
     if (!popup || !lookup || !popupFront) return;
@@ -1956,14 +1966,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         <button
           className="btn icon ep-nav export-frame"
           title="export frame (shift+click: export cue audio)"
-          aria-label="Export current frame (shift: export cue audio)"
+          aria-label="Export current frame"
           onClick={(e) => exportCurrent(e.shiftKey ? "clip" : "frame")}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              exportCurrent(e.shiftKey ? "clip" : "frame");
-            }
-          }}
         >
           <CameraGlyph />
         </button>
@@ -1988,7 +1992,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           ref={videoRef}
           src={mediaUrl(entry.id)}
           onClick={togglePlay}
-          aria-label={`Episode video: ${entry.name.replace(/\.[^.]+$/, "")}`}
         />
         <SubOverlay
           subScale={subScale}
@@ -2017,6 +2020,14 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           secHold={secHold}
           blurOff={blurOff}
         />
+        {/* wave15 #10: dim, non-intrusive hint when this episode has no
+            subtitle tracks at all and nothing is being generated. Suppressed
+            while whisper runs or once any cues exist (live or primary). */}
+        {tracks.length === 0 && !whisperBusy && displayCues.length === 0 && (
+          <div className="no-subs-hint" aria-hidden="true">
+            No subtitles — press G to generate, or pick a track via CC ▸
+          </div>
+        )}
         <Vbar
           videoRef={videoRef}
           mediaKey={entry.id}
@@ -2048,7 +2059,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             className="skip-pill"
             onClick={onSkipGap}
             title="No dialogue here — jump to the next line"
-            aria-label="Skip silent gap — jump to the next line"
           >
             Skip →
           </button>
@@ -2064,7 +2074,6 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             style={{ top: 14, bottom: "auto", right: 14 }}
             onClick={seekNextDue}
             title="Jump to the next cue with a due deck word"
-            aria-label={`${dueCount} due words — jump to next`}
           >
             {dueCount} due
           </button>
@@ -2110,6 +2119,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           onPanelLeave={onPanelLeave}
           explain={explain}
           explainLoading={explainLoading}
+          explainErr={explainErr}
+          onExplainRetry={() => setExplainReload((n) => n + 1)}
           lookup={lookup}
           lookupLoading={lookupLoading}
           pitchOn={pitchOn}

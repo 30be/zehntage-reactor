@@ -89,7 +89,9 @@ test.describe("Home today panel", () => {
     expect(res.ok()).toBe(true);
 
     await page.goto("/#/home");
-    const panel = page.locator(".today-panel");
+    // `.today-panel` is now ambiguous — WordOfDayCard also carries it (as
+    // `.today-panel.wordday-card`). Target the TodayPanel specifically.
+    const panel = page.locator(".today-panel:not(.wordday-card)");
     await expect(panel).toBeVisible();
     await expect(panel.locator(".h2")).toHaveText("Today");
     // tiles exist and at least one carries a non-zero count

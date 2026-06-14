@@ -12,7 +12,16 @@ const MATURE_FRONT = "勉強 [べんきょう]";
 
 const WORDS_PAYLOAD = JSON.stringify({
   words: [
-    { front: MATURE_FRONT, back: "учёба", reading: "べんきょう", notes: "" },
+    // The card must qualify as "ours" (zehntage): WordOfDayCard filters the deck
+    // to cards carrying the "zehntage" tag OR a source-line context
+    // ("<episode>.mkv|mp4 @ mm:ss"). Give it a matching context so it is picked.
+    {
+      front: MATURE_FRONT,
+      back: "учёба",
+      reading: "べんきょう",
+      notes: "",
+      context: "clip.mp4 @ 0:42",
+    },
   ],
   progress: {
     [MATURE_FRONT]: { interval: 60, reps: 10, lapses: 0, queue: 2, type: 2 },
@@ -63,7 +72,8 @@ test.describe("G5 word of the day", () => {
     await expect(card).toBeVisible();
     await expect(card.locator(".h2")).toContainText("Word of the day");
     await expect(card.locator(".wordday-word")).toContainText("勉強");
-    await expect(card.locator(".wordday-reading")).toContainText("べんきょう");
+    // Reading now renders inside full-width parens: " （べんきょう）".
+    await expect(card.locator(".wordday-reading")).toContainText("（べんきょう）");
     await expect(card.locator(".wordday-meaning")).toContainText("учёба");
 
     const link = card.locator(".wordday-link");

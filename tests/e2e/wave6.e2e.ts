@@ -6,10 +6,11 @@ import { openPlayer, playVideo, seekTo, entryId } from "./helpers.ts";
 
 const MEDIA = "w6mediaw6media";
 
-// Local noon today: the seeded events span ~32s and the rows group by local
-// calendar day, so anchoring at noon keeps them on ONE day even when the
-// suite runs across midnight (Date.now() would split the row and flake).
-const NOON = new Date().setHours(12, 0, 0, 0);
+// Local noon of a FIXED far-past day: the seeded events span ~32s and rows
+// group by local calendar day, so anchoring at local noon keeps them on ONE
+// day. Using a fixed date (not Date.now()) makes the timestamps fully
+// deterministic — never influenced by wall-clock or a midnight crossing.
+const NOON = new Date(2023, 0, 15, 12, 0, 0, 0).getTime();
 
 test("/api/stats/episodes returns per-(media,day) rows; CSV + overview work", async ({ page }) => {
   const now = NOON;
@@ -108,7 +109,7 @@ test("session summary overlay appears on ended and a key dismisses it", async ({
   await expect(summary).toBeVisible({ timeout: 15_000 });
   await expect(summary).toContainText("min");
   await expect(summary).toContainText("cues");
-  await expect(summary).toContainText("next episode in 5s");
+  await expect(summary).toContainText("Next episode in 5 s — press any key to stay");
   // any key cancels the auto-next AND dismisses the summary
   await page.keyboard.press("x");
   await expect(summary).toHaveCount(0);

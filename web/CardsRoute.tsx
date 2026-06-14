@@ -216,10 +216,33 @@ export function Cards({ go, toast }: { go: (h: string) => void; toast: (m: strin
         </div>
       )}
       {cards != null && cardsErr == null && frameCards.length === 0 && (
-        <div className="empty">No cards with frames yet.</div>
+        <div className="state empty">
+          <p>No cards with frames yet.</p>
+          <p className="muted">
+            Cards are mined while watching — open an episode in the player,
+            look up a word, and add it to Anki. Each card captures a frame
+            from the scene for context.
+          </p>
+          <button className="btn sm" onClick={() => go("#/library")}>
+            Go to library
+          </button>
+        </div>
       )}
       {cards != null && frameCards.length > 0 && filtered.length === 0 && (
-        <div className="empty">No cards match the filters.</div>
+        <div className="state empty">
+          <p>No cards match these filters.</p>
+          <button
+            className="btn sm"
+            onClick={() => {
+              setQ("");
+              setRange("all");
+              setStage("all");
+              setRarity("all");
+            }}
+          >
+            Clear filters
+          </button>
+        </div>
       )}
       <div className="cards-grid">
         {filtered.slice(0, visible).map((c) => {

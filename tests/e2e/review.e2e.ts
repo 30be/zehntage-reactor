@@ -1,103 +1,83 @@
-// review.e2e.ts — Review / Cram mode (#/review) coverage.
+// review.e2e.ts — Flashcard Review (#/review) coverage.
 //
-// Uses the shared fake-Anki deck (ANKI_FAKE=1) seeded via /api/anki/add, the
-// same fixture pattern as interactions.e2e.ts. The seeded word 勉強 appears in
-// the clip.ja.srt cue "勉強します。", so the server's /api/review/due joins it
-// with that watched cue to build a cloze. All selectors are derived from
-// web/ReviewRoute.tsx.
+// The review client (web/ReviewRoute.tsx) was rewritten into a no-typing,
+// hotkey-graded client whose scheduling lives entirely in Anki: the server's
+// reviewQueue() returns { available: false } whenever real AnkiConnect is
+// absent. In e2e we run ANKI_FAKE mode, so AnkiConnect is "unavailable" and the
+// route deterministically renders the OFFLINE state. These tests therefore
+// assert the offline-state markup plus the scope toggle's localStorage
+// persistence — the only review behavior reachable without a live Anki. All
+// selectors are derived from web/ReviewRoute.tsx.
 
 import { test, expect } from "./helpers.ts";
-import { entryId } from "./helpers.ts";
 
-test.describe("Review mode", () => {
-  test("empty deck → empty state", async ({ page }) => {
-    // Clean the shared fake deck first (other specs may have seeded cards).
-    const res = await page.request.get("/api/review/due");
-    const data = (await res.json()) as { words: { front: string }[] };
-    for (const w of data.words) {
-      await page.request.post("/api/anki/delete", { data: { front: w.front } });
-    }
-    await page.goto("/#/review");
-    await expect(page.locator(".review-empty")).toBeVisible();
-    await expect(page.locator(".review-empty")).toContainText("Nothing due");
-  });
+const SCOPE_KEY = "zr.review.scope";
 
-  test("seeded due word renders a cloze; Enter scores; next advances", async ({
+test.describe("Review mode (offline / fake-Anki)", () => {
+  test("renders the offline state, not a type-the-word input", async ({
     page,
   }) => {
-    await page.goto("/");
-    const id = await entryId(page, "clip.mp4");
-
-    // Seed a due deck word that appears in a watched cue.
-    const seed = await page.request.post("/api/anki/add", {
-      data: {
-        word: "勉強",
-        reading: "べんきょう",
-        translation: "учёба",
-        notes: "",
-        context: "勉強します。",
-        mediaId: id,
-        timestamp: 2,
-      },
-    });
-    expect(seed.ok()).toBe(true);
-
     await page.goto("/#/review");
 
-    // A card renders with a progress counter.
-    const card = page.locator(".review-card");
-    await expect(card).toBeVisible();
-    await expect(page.locator(".review-count")).toContainText("/");
+    // Offline state: ANKI_FAKE => reviewQueue available:false => phase "offline".
+    const empty = page.locator(".review-empty");
+    await expect(empty).toBeVisible();
+    await expect(empty).toContainText("Open Anki to review");
 
-    // The cloze prompt is a watched cue with the word blanked out.
-    const prompt = page.locator(".review-prompt");
-    await expect(prompt).toBeVisible();
-    await expect(prompt).toContainText("します");
-    await expect(prompt).not.toContainText("勉強");
+    // The "Try again" / "Back to library" actions of the offline state.
+    await expect(
+      page.locator(".review-actions .retry", { hasText: "Try again" }),
+    ).toBeVisible();
 
-    // A "watch in context" deep-link is offered for the encounter.
-    await expect(page.locator(".review-watch")).toBeVisible();
-
-    // Type the answer + Enter → scored correct (monochrome ink).
-    const input = page.locator(".review-input");
-    await input.fill("勉強");
-    await input.press("Enter");
-    await expect(page.locator(".review-correct")).toBeVisible();
-    await expect(page.locator(".review-correct")).toContainText("correct");
-
-    // Next (Space) advances past the only card → review-complete empty state.
-    await page.locator(".review-card .btn", { hasText: "next" }).click();
-    await expect(page.locator(".review-empty")).toContainText("complete");
-
-    // Cleanup so the shared fake deck stays empty for other specs.
-    await page.request.post("/api/anki/delete", {
-      data: { front: "勉強 [べんきょう]" },
-    });
+    // The OLD type-the-word UI is gone: no input, no check/hint, no histogram.
+    await expect(page.locator(".review-input")).toHaveCount(0);
+    await expect(page.locator("input[type='text']")).toHaveCount(0);
+    await expect(page.locator(".review-prompt")).toHaveCount(0);
+    await expect(page.locator(".forecast-histogram")).toHaveCount(0);
+    await expect(page.locator(".review-correct")).toHaveCount(0);
+    await expect(page.locator(".review-wrong")).toHaveCount(0);
   });
 
-  test("wrong answer is flagged with established-red", async ({ page }) => {
-    const id = await entryId(page, "clip.mp4");
-    await page.request.post("/api/anki/add", {
-      data: {
-        word: "図書館",
-        reading: "としょかん",
-        translation: "библиотека",
-        notes: "",
-        context: "図書館へ行きます。",
-        mediaId: id,
-        timestamp: 6,
-      },
-    });
-
+  test("scope toggle is present, clickable, and persists to localStorage", async ({
+    page,
+  }) => {
     await page.goto("/#/review");
-    const input = page.locator(".review-input");
-    await expect(input).toBeVisible();
-    await input.fill("まちがい");
-    await input.press("Enter");
-    await expect(page.locator(".review-wrong")).toContainText("wrong");
 
-    await page.request.post("/api/anki/delete", {
-      data: { front: "図書館 [としょかん]" },
-    });
+    const toggle = page.locator(".review-scope input[type='checkbox']");
+    await expect(toggle).toBeVisible();
+    await expect(
+      page.locator(".review-scope", { hasText: "zehntage cards only" }),
+    ).toBeVisible();
+
+    // Default scope is "zehntage" => the checkbox is checked.
+    await expect(toggle).toBeChecked();
+
+    // Unchecking switches scope to "all" and persists it.
+    await toggle.uncheck();
+    await expect(toggle).not.toBeChecked();
+    await expect
+      .poll(() => page.evaluate((k) => localStorage.getItem(k), SCOPE_KEY))
+      .toBe("all");
+
+    // Re-checking switches back to "zehntage" and persists it.
+    await toggle.check();
+    await expect(toggle).toBeChecked();
+    await expect
+      .poll(() => page.evaluate((k) => localStorage.getItem(k), SCOPE_KEY))
+      .toBe("zehntage");
+  });
+
+  test("no forecast histogram and no type-the-word input anywhere on the route", async ({
+    page,
+  }) => {
+    await page.goto("/#/review");
+    await expect(page.locator(".review-empty")).toBeVisible();
+
+    // Belt-and-braces: nothing typed/forecast-shaped exists in the whole route.
+    await expect(page.locator("textarea")).toHaveCount(0);
+    await expect(page.locator("input[type='text']")).toHaveCount(0);
+    await expect(page.locator(".review-input")).toHaveCount(0);
+    await expect(page.locator(".forecast-histogram")).toHaveCount(0);
+    await expect(page.locator(".forecast")).toHaveCount(0);
   });
 });

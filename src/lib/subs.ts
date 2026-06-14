@@ -686,7 +686,37 @@ export async function probeStreams(file: string): Promise<FfprobeStream[]> {
   return data.streams ?? [];
 }
 
+// In-memory cache of probed embedded sub-track lists, keyed by path+size+mtime
+// — `ffprobe` costs ~100ms per call and /api/subs probes on every request.
+// Invalidated automatically when the file's size or mtime changes (new key).
+// Mirrors the `extractCache` scheme below and `embeddedLangCache` in library.ts.
+const embeddedTracksCache = new Map<string, SubTrack[]>();
+const EMBEDDED_TRACKS_CACHE_MAX = 64;
+
 export async function listEmbeddedSubTracks(file: string): Promise<SubTrack[]> {
+  let key: string | null = null;
+  try {
+    const st = await stat(file);
+    key = `${file}:${st.size}:${st.mtimeMs}`;
+    const hit = embeddedTracksCache.get(key);
+    if (hit !== undefined) return hit;
+  } catch {
+    // unstatable — probe uncached (probeStreams throws on a real failure,
+    // matching the previous always-probe behavior).
+  }
+  const tracks = await listEmbeddedSubTracksUncached(file);
+  if (key != null) {
+    while (embeddedTracksCache.size >= EMBEDDED_TRACKS_CACHE_MAX) {
+      const oldest = embeddedTracksCache.keys().next().value;
+      if (oldest === undefined) break;
+      embeddedTracksCache.delete(oldest);
+    }
+    embeddedTracksCache.set(key, tracks);
+  }
+  return tracks;
+}
+
+async function listEmbeddedSubTracksUncached(file: string): Promise<SubTrack[]> {
   const streams = await probeStreams(file);
   return streams
     .filter((s) => s.codec_type === "subtitle")

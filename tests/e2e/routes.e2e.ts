@@ -75,8 +75,9 @@ test.describe("Settings page", () => {
     const before = await cb.isChecked();
     await cb.click();
     const after = !before;
-    // Wait for the debounced autosave (600ms) + network round-trip
-    await page.waitForTimeout(1200);
+    // Wait for the observable save side-effect (debounced autosave + round-trip)
+    // rather than a wall-clock budget.
+    await expect(page.locator(".toast")).toContainText("saved");
 
     // Reload and navigate back to settings
     await page.goto("/#/settings");
@@ -88,7 +89,7 @@ test.describe("Settings page", () => {
 
     // Restore original value so other tests start clean
     await reloaded.click();
-    await page.waitForTimeout(1200);
+    await expect(page.locator(".toast")).toContainText("saved");
   });
 });
 
@@ -101,12 +102,12 @@ test.describe("Stats page", () => {
     await expect(page.locator(".stats-totals").first()).toBeVisible();
   });
 
-  test("renders the totals block with 'known words' and 'cards added' labels", async ({
+  test("renders the totals block with 'words known' and 'words added' labels", async ({
     page,
   }) => {
     const totals = page.locator(".stats-totals").first();
-    await expect(totals).toContainText("known words");
-    await expect(totals).toContainText("cards added");
+    await expect(totals).toContainText("words known");
+    await expect(totals).toContainText("words added");
   });
 
   test("Activity section heading is present", async ({ page }) => {

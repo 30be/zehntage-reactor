@@ -26,20 +26,19 @@ test("read mode: `a` mines the word with sentence context + source", async ({ pa
     const { words } = (await res.json()) as { words: { front: string }[] };
     return words.some((w) => w.front === "勉強 [べんきょう]");
   };
-  // Each iteration: delete if present, wait out the ~1s straggler, recheck —
-  // only "clean" when 勉強 stays absent across the window.
+  // Each iteration: delete if present, recheck. The outer poll's retry interval
+  // (and total timeout) outlasts the ~1s straggler add without an inner sleep —
+  // "clean" only when 勉強 stays absent on a fresh read.
   await expect
     .poll(
       async () => {
-        if (await deckHas()) await deleteFront(page, "勉強 [べんきょう]");
-        await page.waitForTimeout(1300);
         if (await deckHas()) {
           await deleteFront(page, "勉強 [べんきょう]");
           return "dirty";
         }
         return "clean";
       },
-      { timeout: 20_000, intervals: Array(8).fill(200) },
+      { timeout: 20_000, intervals: Array(20).fill(500) },
     )
     .toBe("clean");
   await openRead(page);
@@ -162,9 +161,9 @@ test("? opens the hotkey cheatsheet; player hotkeys stay quiet under it", async 
   await expect(sheet).toBeVisible();
   await expect(sheet).toContainText("autopause");
   await expect(sheet).toContainText("command palette");
-  // `s` would toast "loop …" — the modal guard must swallow it
+  // `s` would toast "loop …" — the modal guard must swallow it. toHaveCount(0)
+  // auto-retries, so no fixed sleep is needed to prove the toast never appears.
   await page.keyboard.press("s");
-  await page.waitForTimeout(400);
   await expect(page.locator(".toast")).toHaveCount(0);
   await page.keyboard.press("Escape");
   await expect(sheet).toHaveCount(0);

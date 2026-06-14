@@ -4,10 +4,19 @@
 // autoscroll for a few seconds. Cheap virtualization: only ±WINDOW cues around
 // the active one are rendered, with spacer divs standing in for the rest.
 
-import { useEffect, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { Cue } from "./api.ts";
 import { activeCueIndex } from "./cues.ts";
 import { getTokenizer, type KToken } from "./tokenizer.ts";
+import { cueTokensGet, cueTokensPut } from "./player/shared.ts";
 import type { WordIndex } from "./progress.ts";
 import { TokenLine } from "./TokenLine.tsx";
 
@@ -26,26 +35,35 @@ interface RowProps {
   cue: Cue;
   secondary: string;
   active: boolean;
-  tokenCache: Map<string, KToken[]>;
-  onSeek: () => void;
+  // Stable Player seek handler + the current offset; CueRow binds cue.start
+  // once per cue so the click handler stays referentially stable.
+  onSeek: (videoTime: number) => void;
+  subOffset: number;
   wordIndex: WordIndex;
   knownWords: Set<string>;
   blacklist?: Set<string>;
   furiganaOn: boolean;
   accents?: Map<string, number> | null;
   pitchAccentOn?: boolean;
+  // Stable (useCallback) handlers from the Player. The cue text is the lookup
+  // context; CueRow binds it once per cue so the closures stay referentially
+  // stable across re-renders and don't defeat TokenLine's memo.
   onWordEnter: (tok: KToken, e: React.MouseEvent, ctx: string) => void;
   onWordLeave: () => void;
   onWordClick: (tok: KToken, e: React.MouseEvent, ctx: string) => void;
   rowRef?: React.Ref<HTMLDivElement>;
 }
 
-function CueRow({
+// Memoized: only the row whose props actually change (e.g. its active flag
+// flips on a cue transition, or its coloring inputs change) re-renders. All the
+// handler props are stable (Player useCallbacks; per-cue binders below are
+// useCallback-keyed on cue.text), so a plain shallow compare is safe.
+function CueRowInner({
   cue,
   secondary,
   active,
-  tokenCache,
   onSeek,
+  subOffset,
   wordIndex,
   knownWords,
   blacklist,
@@ -58,14 +76,14 @@ function CueRow({
   rowRef,
 }: RowProps) {
   const [tokens, setTokens] = useState<KToken[] | null>(
-    () => tokenCache.get(cue.text) ?? null,
+    () => cueTokensGet(cue.text) ?? null,
   );
   // RU translation: hidden by default. A small (?) shows up while the row is
   // hovered; the translation text renders ONLY while the (?) itself is
   // hovered — inline, reserving no vertical space otherwise.
   const [secShown, setSecShown] = useState(false);
   useEffect(() => {
-    const cached = tokenCache.get(cue.text);
+    const cached = cueTokensGet(cue.text);
     if (cached) {
       setTokens(cached);
       return;
@@ -75,14 +93,29 @@ function CueRow({
       .then((tok) => {
         if (cancelled) return;
         const ts = tok.tokenize(cue.text);
-        tokenCache.set(cue.text, ts);
+        cueTokensPut(cue.text, ts);
         setTokens(ts);
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [cue.text, tokenCache]);
+  }, [cue.text]);
+
+  // Per-cue handler binders: stable as long as the underlying Player handler
+  // and this cue's text are stable, so TokenLine's memo isn't defeated.
+  const handleWordEnter = useCallback(
+    (tok: KToken, e: React.MouseEvent) => onWordEnter(tok, e, cue.text),
+    [onWordEnter, cue.text],
+  );
+  const handleWordClick = useCallback(
+    (tok: KToken, e: React.MouseEvent) => onWordClick(tok, e, cue.text),
+    [onWordClick, cue.text],
+  );
+  const handleSeek = useCallback(
+    () => onSeek(Math.max(0, cue.start + subOffset)),
+    [onSeek, cue.start, subOffset],
+  );
 
   return (
     <div ref={rowRef} className={`cue-row${active ? " active" : ""}`}>
@@ -90,7 +123,7 @@ function CueRow({
         type="button"
         className="cue-time"
         aria-label={`Jump to ${fmtTime(cue.start)}`}
-        onClick={onSeek}
+        onClick={handleSeek}
       >
         {fmtTime(cue.start)}
       </button>
@@ -105,9 +138,9 @@ function CueRow({
             furiganaOn={furiganaOn}
             accents={accents}
             pitchAccentOn={pitchAccentOn}
-            onWordEnter={(tok, e) => onWordEnter(tok, e, cue.text)}
+            onWordEnter={handleWordEnter}
             onWordLeave={onWordLeave}
-            onWordClick={(tok, e) => onWordClick(tok, e, cue.text)}
+            onWordClick={handleWordClick}
           />
           {secondary && (
             <button
@@ -128,6 +161,8 @@ function CueRow({
     </div>
   );
 }
+
+const CueRow = memo(CueRowInner);
 
 export interface SidebarProps {
   cues: Cue[];
@@ -162,7 +197,6 @@ export function Sidebar({
   onWordLeave,
   onWordClick,
 }: SidebarProps) {
-  const tokenCache = useRef<Map<string, KToken[]>>(new Map());
   const activeRowRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   // last position we centered the window on, kept while between cues
@@ -198,7 +232,30 @@ export function Sidebar({
     else merged.push([r[0], r[1]]);
   }
 
-  const updateScrollWindow = () => {
+  // Precompute the secondary-cue index for every primary cue we're about to
+  // render, ONCE per render. Previously each CueRow ran activeCueIndex() (a
+  // binary search) per render — ~80×/cue change. Memoized on the inputs that
+  // actually change the mapping (the cue/secondary lists, the offset, and which
+  // window slices are visible) so cue transitions don't recompute it.
+  const secByIndex = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const [s, e] of merged) {
+      for (let i = s; i < e; i++) {
+        const cue = cues[i]!;
+        // RU line shown at the cue's midpoint; secondary cues live in raw
+        // video time, primary cues in track time (hence + subOffset).
+        const mid = (cue.start + cue.end) / 2 + subOffset;
+        const si = activeCueIndex(secondaryCues, mid);
+        map.set(i, si >= 0 ? secondaryCues[si]!.text : "");
+      }
+    }
+    return map;
+    // merged is rebuilt each render; key on its serialized bounds instead so we
+    // only recompute when the visible window or inputs truly change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cues, secondaryCues, subOffset, JSON.stringify(merged)]);
+
+  const updateScrollWindow = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
     const est = estRowRef.current;
@@ -207,13 +264,18 @@ export function Sidebar({
     setScrollWin((p) =>
       p && p.first === first && p.last === last ? p : { first, last },
     );
-  };
+  }, []);
 
-  // measure a real row once rendered to refine the row-height estimate
-  useEffect(() => {
+  // Measure a real row to refine the row-height estimate. Done in a layout
+  // effect (after commit) and only written when the measurement actually
+  // changes, so it never forces a synchronous layout read on every render.
+  useLayoutEffect(() => {
     const row = containerRef.current?.querySelector<HTMLElement>(".cue-row");
-    if (row && row.offsetHeight > 0) estRowRef.current = row.offsetHeight;
-  });
+    if (row) {
+      const h = row.offsetHeight;
+      if (h > 0 && h !== estRowRef.current) estRowRef.current = h;
+    }
+  }, [cues.length, activeIdx]);
 
   // keep the scroll window in sync on mount / cue list changes
   useEffect(() => {
@@ -237,47 +299,42 @@ export function Sidebar({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeIdx]);
 
-  const onScroll = () => {
+  const onScroll = useCallback(() => {
     if (!programmaticRef.current) {
       userScrollUntilRef.current = Date.now() + USER_SCROLL_PAUSE_MS;
     }
     updateScrollWindow();
-  };
+  }, [updateScrollWindow]);
 
   if (cues.length === 0) {
     return (
       <div className="cue-sidebar empty-list">
-        <span className="muted">no subtitles</span>
+        <span className="muted">No subtitles loaded</span>
+        <span className="muted hint">Pick a subtitle track to see the cue list.</span>
       </div>
     );
   }
 
-  const renderRow = (cue: Cue, i: number) => {
-    // RU line shown at the cue's midpoint; secondary cues live in raw
-    // video time, primary cues in track time (hence + subOffset).
-    const mid = (cue.start + cue.end) / 2 + subOffset;
-    const si = activeCueIndex(secondaryCues, mid);
-    return (
-      <CueRow
-        key={`${i}:${cue.start}`}
-        cue={cue}
-        secondary={si >= 0 ? secondaryCues[si]!.text : ""}
-        active={i === activeIdx}
-        tokenCache={tokenCache.current}
-        onSeek={() => onSeek(Math.max(0, cue.start + subOffset))}
-        wordIndex={wordIndex}
-        knownWords={knownWords}
-        blacklist={blacklist}
-        furiganaOn={furiganaOn}
-        accents={accents}
-        pitchAccentOn={pitchAccentOn}
-        onWordEnter={onWordEnter}
-        onWordLeave={onWordLeave}
-        onWordClick={onWordClick}
-        rowRef={i === activeIdx ? activeRowRef : undefined}
-      />
-    );
-  };
+  const renderRow = (cue: Cue, i: number) => (
+    <CueRow
+      key={`${i}:${cue.start}`}
+      cue={cue}
+      secondary={secByIndex.get(i) ?? ""}
+      active={i === activeIdx}
+      onSeek={onSeek}
+      subOffset={subOffset}
+      wordIndex={wordIndex}
+      knownWords={knownWords}
+      blacklist={blacklist}
+      furiganaOn={furiganaOn}
+      accents={accents}
+      pitchAccentOn={pitchAccentOn}
+      onWordEnter={onWordEnter}
+      onWordLeave={onWordLeave}
+      onWordClick={onWordClick}
+      rowRef={i === activeIdx ? activeRowRef : undefined}
+    />
+  );
 
   const est = estRowRef.current;
   const parts: React.ReactNode[] = [];

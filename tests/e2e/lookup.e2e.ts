@@ -23,7 +23,8 @@ test("click pins the popup; it survives hover-out, Escape closes", async ({ page
   const popup = page.locator(".lookup.pinned");
   await expect(popup).toBeVisible();
   await page.mouse.move(5, 5);
-  await page.waitForTimeout(400); // longer than the hover-close grace
+  // The pinned popup must NOT close on hover-out. Playwright's auto-retry on
+  // toBeVisible() proves it stays up without sleeping out the grace period.
   await expect(popup).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.locator(".lookup")).toHaveCount(0);

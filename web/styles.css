@@ -11,12 +11,10 @@
   --accent-fg: #fafafa;
   --radius: 8px;
   --c-warn: #b35454;
-  --c-err:  #9e2f3a;
 }
 
 /* ---- dark theme (white/black/system) ---- */
 :root { color-scheme: light; }
-:root[data-theme="light"], :root[data-theme="system"] { color-scheme: light; }
 
 :root[data-theme="dark"] {
   --bg: #0a0a0a;
@@ -91,7 +89,7 @@ a { color: inherit; }
 .btn.ghost:hover { background: var(--muted-bg); }
 .btn.sm { padding: 5px 9px; font-size: 13px; }
 .btn.active { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
-.btn.danger { color: #b35454; border-color: var(--border); background: transparent; }
+.btn.danger { color: var(--c-warn); border-color: var(--border); background: transparent; }
 .btn.danger:hover { background: var(--muted-bg); }
 
 /* ---- card / library grid ---- */
@@ -153,7 +151,8 @@ a { color: inherit; }
 .sub-primary, .sub-secondary { pointer-events: auto; text-align: center; }
 
 .sub-primary {
-  font-size: clamp(20px, 2.6vw, 30px);
+  /* font-size multiplied by --sub-scale (Shift+= / Shift+-, wave 12) */
+  font-size: calc(clamp(20px, 2.6vw, 30px) * var(--sub-scale, 1));
   font-weight: 600;
   color: #fff;
   text-shadow:
@@ -161,7 +160,9 @@ a { color: inherit; }
     0 0 10px rgba(0,0,0,0.95),
     0 0 4px rgba(0,0,0,1),
     0 1px 2px rgba(0,0,0,1);
-  line-height: 1.4;
+  /* tall enough for ruby annotations so furigana lines don't jump (wave: furigana) */
+  line-height: 1.9;
+  ruby-position: over;
 }
 .sub-secondary {
   font-size: clamp(13px, 1.6vw, 18px);
@@ -245,7 +246,6 @@ a { color: inherit; }
 .controls {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
   align-items: center;
 }
 select {
@@ -422,12 +422,7 @@ textarea.prompt {
 .lookup.pinned { border-color: #a1a1aa; }
 
 /* ---- furigana on unknown kanji (appended) ---- */
-/* Fixed line-height tall enough for ruby annotations so mixed lines
-   (with and without furigana) don't jump in height. */
-.sub-primary {
-  line-height: 1.9;
-  ruby-position: over;
-}
+/* (.sub-primary line-height/ruby-position merged into the base block above.) */
 .sub-primary rt {
   font-size: 0.45em;
   font-weight: 500;
@@ -525,10 +520,6 @@ textarea.prompt {
   margin-bottom: -6px; /* sit tight above the stage */
 }
 
-/* ---- local known-word indicator in the lookup popup (appended) ---- */
-/* .lookup .known-flag uses .badge + .lookup .badge override (S-12) */
-
-/* ---- frequency tag (popup + pre-study): tiny, dim, no new colors ---- */
 /* ---- pre-study panel (`w`): unknown lemmas in the next 10 minutes ---- */
 .lookup.prestudy {
   position: absolute;
@@ -604,7 +595,7 @@ textarea.prompt {
   border-radius: 0;
   outline: none;
 }
-.search-input:focus { border: none; outline: none; }
+/* keyboard focus ring comes from the global `input:focus-visible` rule */
 .search-results { display: flex; flex-direction: column; gap: 2px; margin: 0 0 18px; }
 .search-hit {
   padding: 6px 10px;
@@ -621,7 +612,6 @@ textarea.prompt {
 .skip-pill {
   position: absolute;
   right: 14px;
-  bottom: 56px;
   z-index: 4;
   padding: 4px 12px;
   font: inherit;
@@ -1032,7 +1022,7 @@ textarea.prompt {
   user-select: none;
 }
 .root-line:hover { color: var(--fg); }
-.root-line.editing { display: flex; gap: 8px; align-items: center; cursor: default; }
+.root-line.editing { gap: 8px; align-items: center; cursor: default; }
 .root-input {
   flex: 1;
   max-width: 480px;
@@ -1063,7 +1053,7 @@ textarea.prompt {
 .activity-cell.s4 { background: #18181b; }
 
 .daily-list { display: flex; flex-direction: column; gap: 2px; max-width: 560px; margin-bottom: 18px; }
-.daily-row { display: flex; gap: 14px; align-items: baseline; font-size: 13px; padding: 3px 0; }
+.daily-row { display: flex; gap: 14px; font-size: 13px; padding: 3px 0; }
 .daily-row .daily-date {
   flex: 0 1 220px;
   min-width: 90px;
@@ -1243,8 +1233,8 @@ textarea.prompt {
   cursor: pointer;
 }
 .card-play:hover { border-color: var(--accent); }
-.card-del { color: #b35454; }
-.card-del:hover { border-color: #b35454; }
+.card-del { color: var(--c-warn); }
+.card-del:hover { border-color: var(--c-warn); }
 
 /* viewport fit: stage + cue sidebar leave room for the controls row below
    (sidebar layout ~180px of chrome: title line + controls + paddings) */
@@ -1393,7 +1383,7 @@ textarea.prompt {
 }
 .echo-diff { font-size: 24px; line-height: 1.4; }
 .echo-ok { color: #fff; }
-.echo-bad { color: #b35454; }
+.echo-bad { color: var(--c-warn); }
 .echo-score {
   margin-top: 6px;
   font-size: 12px;
@@ -1421,7 +1411,8 @@ textarea.prompt {
 .episode-title-row {
   display: flex;
   align-items: center;
-  gap: 4px;
+  justify-content: center;
+  gap: 6px;
   margin-bottom: -6px; /* sit tight above the stage (was on .episode-title) */
 }
 .episode-title-row .episode-title { margin-bottom: 0; min-width: 0; }
@@ -1541,7 +1532,7 @@ textarea.prompt {
   white-space: nowrap;
 }
 .jimaku-row:hover { text-decoration: underline; }
-.jimaku-error { display: block; color: #b35454; }
+.jimaku-error { display: block; color: var(--c-warn); }
 
 .home-attrib { margin-top: 6px; font-size: 12px; }
 
@@ -1556,7 +1547,6 @@ textarea.prompt {
 .controls { gap: 8px; }
 
 /* episode title row: quiet one-liner */
-.episode-title-row { gap: 6px; }
 .ep-nav { opacity: 0.7; }
 .ep-nav:hover { opacity: 1; }
 
@@ -1730,7 +1720,6 @@ textarea.prompt {
 
 /* episode title row: centered title with chevrons either side, reading-mode
    icon at the end — one quiet line */
-.episode-title-row { justify-content: center; }
 .episode-title-row .episode-title {
   flex: 0 1 auto;
   text-align: center;
@@ -1782,7 +1771,6 @@ textarea.prompt {
 /* ---- wave 12: subtitle scale, due hints, palette/cheatsheet ---- */
 
 /* Shift+= / Shift+- multiply the overlay clamp() sizes (windowed + fullscreen) */
-.sub-primary { font-size: calc(clamp(20px, 2.6vw, 30px) * var(--sub-scale, 1)); }
 .sub-secondary { font-size: calc(clamp(13px, 1.6vw, 18px) * var(--sub-scale, 1)); }
 
 /* pre-study ranking badges */
@@ -1882,7 +1870,7 @@ textarea.prompt {
 .health-table tr:hover td { background: rgba(128,128,128,.08); }
 .health-type { opacity: .85; }
 .health-bar { font-family: monospace; letter-spacing: -.05em; opacity: .6; }
-.health-warn { color: var(--c-warn, #c80); }
+.health-warn { color: var(--c-warn); }
 .health-empty { font-size: .75rem; opacity: .4; padding: .3rem .6rem; }
 
 /* ===== wave 14 — design & UX polish (shared utilities; do not edit above) ===== */
@@ -1890,7 +1878,7 @@ textarea.prompt {
 /* Shared async-view states. `.empty` (above) is the laconic base; loading
    adds a spinner, error gets a subtle, visible (not silent) treatment. */
 .state { padding: 48px 0; text-align: center; color: var(--muted); }
-.state.error { color: #b35454; }
+.state.error { color: var(--c-warn); }
 .state .state-detail { display: block; margin-top: 6px; font-size: 12px; opacity: 0.8; word-break: break-word; }
 .state .retry { margin-top: 14px; }
 
@@ -2030,7 +2018,7 @@ textarea:focus-visible {
 .quiz-opt:hover:not(:disabled) { border-color: #71717a; }
 .quiz-opt.sel { border-color: #fafafa; }
 .quiz-opt.right { border-color: #fafafa; color: #fafafa; background: rgba(250,250,250,0.08); font-weight: 600; }
-.quiz-opt.wrong { border-color: #b35454; color: #b35454; }
+.quiz-opt.wrong { border-color: var(--c-warn); color: var(--c-warn); }
 .quiz-num {
   display: inline-flex;
   align-items: center;
@@ -2062,7 +2050,7 @@ textarea:focus-visible {
   font-size: 14px;
 }
 .quiz-verdict.ok { color: #fafafa; font-weight: 600; }
-.quiz-verdict.no { color: #b35454; }
+.quiz-verdict.no { color: var(--c-warn); }
 .quiz-end { text-align: center; }
 .quiz-score { font-size: 40px; font-weight: 700; }
 .quiz-sub { color: #a1a1aa; margin: 4px 0 16px; }
@@ -2073,7 +2061,6 @@ textarea:focus-visible {
 /* laconic cursor highlight — a left border accent, no background fight */
 .read-para.read-cursor {
   border-left: 2px solid var(--fg);
-  padding-left: calc(0rem);
   margin-left: -2px;
 }
 
@@ -2679,4 +2666,264 @@ textarea:focus-visible {
   line-height: 1.4;
   color: var(--muted);
   vertical-align: 1px;
+}
+
+/* ===================================================================== */
+/* wave 16 — responsive / touch (appended; NO desktop layout changes).    */
+/* All rules below are gated behind a max-width or hover:none media query  */
+/* so the desktop (fine-pointer, wide) experience is byte-identical.       */
+/* ===================================================================== */
+
+/* P1 #1 — very narrow phones: the 56px icon rail can still overflow next
+   to the content column. Hide it entirely below 480px. */
+@media (max-width: 480px) {
+  .sidebar { display: none; }
+}
+
+/* P1 #3 — stack the player stage + cue sidebar vertically on small screens
+   so the 340px sidebar never pushes the video off-screen. */
+@media (max-width: 700px) {
+  .stage-row { flex-direction: column; }
+  .cue-sidebar {
+    width: 100%;
+    max-height: 40vh;
+  }
+}
+
+/* P2 #4 / #5 — touch devices have no :hover, so the card play/delete overlay
+   is otherwise unreachable. Reveal it always and bump the tap targets to the
+   44x44 WCAG minimum. */
+@media (hover: none) {
+  .card-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .card-play,
+  .card-del {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+/* P2 #7 — expand the seekbar touch hit-zone without changing its visual
+   height, via a transparent pseudo-element overlay. .seekbar is already
+   position:relative. */
+/* Touch only, and only extend the hit area UPWARD into the empty video area —
+   never downward, or it overlays (and steals clicks from) the control-button
+   row directly below the seekbar (broke play/CC/fullscreen on desktop). */
+@media (hover: none) {
+  .seekbar::before {
+    content: "";
+    position: absolute;
+    inset: -14px 0 0 0;
+    z-index: 0;
+  }
+}
+
+/* P2 #8 — taller control row + bigger button padding on touch devices. */
+@media (hover: none) {
+  .vbar-row { height: 44px; }
+  .vbar-btn { padding: 10px 12px; }
+}
+
+/* P3 #9 — the 70x3px volume slider is unusable by touch; hide it on narrow
+   screens (the mute button suffices). */
+@media (max-width: 640px) {
+  .vbar-vol { display: none; }
+}
+
+/* P3 #11 — keep the absolute pre-study panel inside a narrow video. */
+@media (max-width: 500px) {
+  .lookup.prestudy {
+    width: min(300px, 90%);
+    right: 4px;
+  }
+}
+
+/* ---- review client + new-feature states ---- */
+
+/* The #/review flashcard client (web/ReviewRoute.tsx). It reuses some earlier
+   .review-* tokens (.review, .review-head, .review-count, .review-card,
+   .review-hint, .review-empty, .review-empty-sub, .review-actions) — those are
+   already styled above. The rules below cover the NEW class names that had no
+   styling: the scope toggle, header counters, Anki HTML panes, the prominent
+   grade-button row, and the empty/offline retry affordance. */
+
+/* scope toggle ("zehntage cards only") — quiet inline control in the header
+   and a calmer standalone row under the empty/offline states. */
+.review-scope {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.review-scope input { margin: 0; accent-color: var(--fg); }
+.review-head .review-scope { margin-left: auto; }
+.review-scope-row { margin-top: 16px; }
+
+/* header counters: due/reviewed sit as dim tabular figures next to the count */
+.review-due,
+.review-reviewed {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Anki-rendered question/answer HTML. Centered, comfortable reading size; we
+   only set type + spacing here and let the card's own markup (ruby, [sound:],
+   images) flow inside. lang="ja" on the element keeps CJK shaping correct. */
+.review-anki {
+  text-align: center;
+  line-height: 1.7;
+  word-break: break-word;
+}
+.review-anki img { max-width: 100%; height: auto; }
+.review-anki audio { display: none; } /* audio is gesture-played, not shown */
+.review-question {
+  font-size: 28px;
+  font-weight: 600;
+}
+.review-answer {
+  font-size: 20px;
+  font-weight: 400;
+  color: var(--fg);
+}
+/* thin divider between question and revealed answer */
+.review-divider {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 20px 0;
+}
+
+/* grade row: prominent, finger-friendly buttons. Again is warn-toned and Good
+   carries the accent ink so the two SRS poles read at a glance; Hard/Easy stay
+   as quieter .ghost siblings. min-height clears the ~48px touch target. */
+.review-grade {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-top: 24px;
+}
+.review-grade .btn {
+  min-height: 48px;
+  padding: 10px 18px;
+  font-size: 15px;
+}
+.review-grade .btn kbd {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  opacity: 0.75;
+  margin-right: 2px;
+}
+/* Again — "didn't know it": warn-red, high-contrast white text (≥4.5:1 on the
+   #b35454 base) so it's unmistakably the negative grade. */
+.review-grade .review-again {
+  background: var(--c-warn);
+  border-color: var(--c-warn);
+  color: #fff;
+}
+.review-grade .review-again:hover { background: #9e4646; border-color: #9e4646; }
+.review-grade .review-again kbd { opacity: 0.85; }
+/* Good — "knew it": the accent (ink) button, the affirmative grade. Inherits
+   .btn.primary-style contrast via --accent / --accent-fg. */
+.review-grade .review-good {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+.review-grade .review-good:hover { opacity: 0.9; }
+.review-grade .review-good kbd { opacity: 0.85; }
+/* dim "R replay" affordance trailing the grade buttons */
+.review-replay-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  margin-left: auto;
+}
+.review-replay-hint kbd,
+.review-hint kbd {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  background: none;
+}
+
+/* retry button in the offline state inherits .btn .sm; no extra rule needed,
+   but give the empty-state action cluster a touch of top breathing room. */
+.review-empty .review-actions { margin-top: 4px; }
+
+/* sentence-explain error + retry inside the lookup popup (web/player/
+   LookupPanel.tsx). The popup has a dark bg, so warn text uses the lighter
+   on-dark red hue already used by .lookup .btn.danger. */
+.explain-err {
+  color: #f2a0a8;
+  font-size: 13px;
+  line-height: 1.5;
+}
+/* a bare, inline text-button affordance ("retry") — no .link-btn rule existed,
+   so define a reusable inline link-style button and the retry placement. */
+.link-btn {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.link-btn:hover { opacity: 0.8; }
+.explain-retry {
+  margin-top: 4px;
+  font-size: 13px;
+  color: #fafafa;
+}
+
+/* Player: "no subtitles" overlay hint — dim, centered, non-intrusive, never
+   intercepts clicks on the video below it (web/Player.tsx). */
+.no-subs-hint {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  max-width: 80%;
+  text-align: center;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.55);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+  user-select: none;
+  z-index: 2;
+}
+
+/* global subtitle search route: error line + retry (web/SearchRoute.tsx).
+   Mirrors the .review error/retry treatment but on the app's light page bg. */
+.search-route-error { color: var(--c-warn); }
+.search-route-retry {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+/* wave 16 #2 (deferred): on touch/narrow screens, stack the review grade
+   buttons full-width so each is an easy, tall tap target. */
+@media (max-width: 768px) {
+  .review-grade {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .review-grade .btn {
+    flex: 1;
+    width: 100%;
+    min-height: 52px;
+  }
+  .review-replay-hint { margin-left: 0; justify-content: center; }
 }

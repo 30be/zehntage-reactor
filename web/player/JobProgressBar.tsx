@@ -37,17 +37,7 @@ export function JobProgressBar({
               {videoDuration > 0 ? ` / ${fmtTime(videoDuration)}` : ""}
               {whisperStatus && whisperStatus !== "running" ? ` (${whisperStatus})` : ""}
             </span>
-            <div
-              className="progress-track"
-              role="progressbar"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={videoDuration > 0 ? Math.round(whisperPct) : undefined}
-              aria-valuetext={
-                videoDuration > 0 ? `${Math.round(whisperPct)}%` : undefined
-              }
-              aria-label="Whisper transcription progress"
-            >
+            <div className="progress-track">
               <div
                 className="progress-fill"
                 style={{ width: `${whisperPct}%` }}

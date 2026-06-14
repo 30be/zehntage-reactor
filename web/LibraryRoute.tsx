@@ -530,11 +530,12 @@ export function Library({ go, toast }: { go: (h: string) => void; toast: (m: str
       const rows = await api.indexComprehensibility([...known]);
       setKnownPct(new Map(rows.map((r) => [r.mediaId, r.pctKnown])));
     } catch {
-      /* sort silently stays name-equivalent */
+      toast("Comprehensibility sort unavailable — Anki offline?");
+      setSortMode("name");
     } finally {
       setSortBusy(false);
     }
-  }, [sortMode, knownPct, sortBusy, ankiData]);
+  }, [sortMode, knownPct, sortBusy, ankiData, toast]);
 
   // SRS hint badges: due-word intersection per entry. Due info is BEST-EFFORT
   // approximated from Anki progress (interval > 0 && queue in {1,2}) because
@@ -697,7 +698,7 @@ export function Library({ go, toast }: { go: (h: string) => void; toast: (m: str
           title="Whisper-transcribe ja subs where missing, then translate to ru — for every entry"
           onClick={() => void onBatchAll()}
         >
-          Generate all (ja + ru)
+          Transcribe &amp; translate all
         </button>
         <button
           className="btn sm sort-toggle"
@@ -705,7 +706,7 @@ export function Library({ go, toast }: { go: (h: string) => void; toast: (m: str
           title="Sort by name or by comprehensibility (known-word %)"
           onClick={() => void toggleSort()}
         >
-          {sortBusy ? "sort: …" : `sort: ${sortMode === "name" ? "name" : "known%"}`}
+          {sortBusy ? "sort: …" : `sort: ${sortMode === "name" ? "name" : "known %"}`}
         </button>
       </div>
       <div className="grid">

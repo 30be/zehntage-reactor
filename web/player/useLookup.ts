@@ -47,6 +47,7 @@ export function useLookup(opts: {
   subOffsetRef: React.RefObject<number>;
   sessLookupsRef: React.RefObject<number>;
   entryName: string;
+  mediaId: string;
   tmEvent: (name: string, props?: Record<string, unknown>) => void;
   toast: (m: string) => void;
 }): {
@@ -68,6 +69,7 @@ export function useLookup(opts: {
     subOffsetRef,
     sessLookupsRef,
     entryName,
+    mediaId,
     tmEvent,
     toast,
   } = opts;
@@ -124,6 +126,7 @@ export function useLookup(opts: {
         word: surface,
         context: ctx,
         source: entryName,
+        mediaId,
         secondary: popup.secondary,
       })
         .then((res) => {
@@ -157,6 +160,7 @@ export function useLookup(opts: {
         context: popup.context,
         secondary: popup.secondary,
         source: entryName,
+        mediaId,
         noCache: true,
       });
       lookupCache.current.set(`${popup.surface} ${popup.context} :: ${popup.secondary ?? ""}`, res);

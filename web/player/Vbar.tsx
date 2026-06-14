@@ -278,35 +278,6 @@ export function Vbar({
       <div
         ref={seekRef}
         className="seekbar"
-        role="slider"
-        tabIndex={0}
-        aria-label="Seek"
-        aria-valuemin={0}
-        aria-valuemax={Math.round(videoDuration)}
-        aria-valuenow={Math.round(
-          videoRef.current?.currentTime ?? 0,
-        )}
-        aria-valuetext={`${fmtTime(videoRef.current?.currentTime ?? 0)} of ${fmtTime(videoDuration)}`}
-        onKeyDown={(e) => {
-          const v = videoRef.current;
-          if (!v || !(v.duration > 0)) return;
-          if (
-            e.key === "ArrowLeft" ||
-            e.key === "ArrowRight" ||
-            e.key === "Home" ||
-            e.key === "End" ||
-            e.key === "ArrowUp" ||
-            e.key === "ArrowDown"
-          ) {
-            e.preventDefault();
-            if (e.key === "ArrowLeft" || e.key === "ArrowDown")
-              v.currentTime = Math.max(0, v.currentTime - 5);
-            else if (e.key === "ArrowRight" || e.key === "ArrowUp")
-              v.currentTime = Math.min(v.duration, v.currentTime + 5);
-            else if (e.key === "Home") v.currentTime = 0;
-            else if (e.key === "End") v.currentTime = v.duration;
-          }
-        }}
         onPointerDown={onSeekDown}
         onPointerMove={onSeekMove}
         onPointerUp={onSeekUp}
@@ -372,6 +343,7 @@ export function Vbar({
       >
         <button
           className="vbar-btn vbar-play"
+          tabIndex={-1}
           onClick={togglePlay}
           title={isPaused ? "Play (space)" : "Pause (space)"}
           aria-label={isPaused ? "Play" : "Pause"}
@@ -385,6 +357,7 @@ export function Vbar({
         <button
           ref={ccBtnRef}
           className={`vbar-btn vbar-cc${ccOpen ? " on" : ""}`}
+          tabIndex={-1}
           onClick={() => setCcOpen((o) => !o)}
           title="Subtitle tracks"
           aria-label="Subtitle tracks"
@@ -393,6 +366,7 @@ export function Vbar({
         </button>
         <button
           className="vbar-btn vbar-mute"
+          tabIndex={-1}
           onClick={() => {
             const v = videoRef.current;
             if (v) v.muted = !v.muted;
@@ -409,6 +383,7 @@ export function Vbar({
           max={1}
           step={0.05}
           value={muted ? 0 : volume}
+          tabIndex={-1}
           aria-label="Volume"
           title="Volume (↑/↓)"
           onChange={(e) => {
@@ -420,6 +395,7 @@ export function Vbar({
         />
         <button
           className="vbar-btn vbar-fs"
+          tabIndex={-1}
           onClick={toggleFullscreen}
           title="Fullscreen (f)"
           aria-label="Fullscreen"

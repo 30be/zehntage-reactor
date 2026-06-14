@@ -91,6 +91,7 @@ function SectionLoad({
 export function Stats({ go }: { go: (h: string) => void }) {
   const [entries, setEntries] = useState<LibraryEntry[] | null>(null);
   const [anki, setAnki] = useState<AnkiWordsResponse | null>(null);
+  const [ankiErr, setAnkiErr] = useState(false);
   const [summary, setSummary] = useState<import("./api.ts").StatsSummary | null>(null);
   const [summaryState, setSummaryState] = useState<LoadState>("loading");
 
@@ -139,7 +140,7 @@ export function Stats({ go }: { go: (h: string) => void }) {
     void api
       .ankiWords()
       .then(setAnki)
-      .catch(() => setAnki({ words: [], progress: {} }));
+      .catch(() => { setAnki({ words: [], progress: {} }); setAnkiErr(true); });
   }, []);
 
   const localKnown = readKnownWords().size;
@@ -154,11 +155,19 @@ export function Stats({ go }: { go: (h: string) => void }) {
       <div className="stats-totals">
         <div className="stat">
           <span className="stat-num">{anki ? mature + localKnown : "…"}</span>
-          known words
+          words known{ankiErr && (
+            <span className="muted" style={{ fontSize: "0.75em", display: "block" }}>
+              (+Anki unavailable)
+            </span>
+          )}
         </div>
         <div className="stat">
           <span className="stat-num">{anki ? anki.words.length : "…"}</span>
-          cards added
+          words added{ankiErr && (
+            <span className="muted" style={{ fontSize: "0.75em", display: "block" }}>
+              (+Anki unavailable)
+            </span>
+          )}
         </div>
       </div>
 
@@ -168,6 +177,8 @@ export function Stats({ go }: { go: (h: string) => void }) {
       </div>
       {summaryState !== "ok" ? (
         <SectionLoad state={summaryState} label="activity" />
+      ) : (summary?.days ?? []).length === 0 ? (
+        <div className="empty">No watch activity yet — play an episode to start tracking.</div>
       ) : (
         <ActivityGrid
           byDate={

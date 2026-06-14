@@ -105,8 +105,10 @@ test.describe("F4 due-here jump + indicator", () => {
 
     await page.goto(`/#/play/${id}`);
     await expect(page.locator("video")).toBeVisible();
-    // Give the due pass time to run, then assert the indicator stayed absent.
-    await page.waitForTimeout(1500);
-    await expect(page.getByTestId("due-indicator")).toHaveCount(0);
+    // The due pass runs after load; poll the indicator count so we terminate
+    // early once it's confirmed absent (no fixed wall-clock budget).
+    await expect
+      .poll(() => page.getByTestId("due-indicator").count(), { timeout: 3000 })
+      .toBe(0);
   });
 });

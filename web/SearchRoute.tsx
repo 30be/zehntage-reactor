@@ -1,9 +1,15 @@
 // Global cross-episode subtitle search → jump to any line.
 // Consumes the existing GET /api/search?q=… endpoint ({mediaId,name,start,text},
-// JA-only, max 100 hits) and surfaces it as a real page: debounced query,
+// JA+RU, max 100 hits) and surfaces it as a real page: debounced query,
 // results grouped by episode, keyboard nav (↑/↓ move, Enter open, Esc clear),
 // click → deep-link into the player at the cue (#/play/<id>@<start>).
 // Monochrome/laconic; the matched substring is the only emphasized ink.
+//
+// TODO(server): #3 truncated flag — show "Showing first 100 results" warning when
+//   server returns truncated:true (requires server/index.ts change).
+// TODO(server): #4 skip/cache library.refresh() on search (server/index.ts).
+// TODO(server): #9 add .normalize("NFC") to searchNorm*/searchNormRu (server/index.ts).
+// TODO(server): #10 background preload of search index on startup (server/index.ts).
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type SearchHit } from "./api.ts";
@@ -28,8 +34,12 @@ export function Search({ go }: { go: (h: string) => void }) {
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[] | null>(null);
   const [loading, setLoading] = useState(false);
+  const [searchErr, setSearchErr] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
   const [sel, setSel] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  // #1: ref map from flat index → button element, used for scrollIntoView on arrow-key nav
+  const hitRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
 
   // autofocus the box on mount
   useEffect(() => {
@@ -39,13 +49,16 @@ export function Search({ go }: { go: (h: string) => void }) {
   // debounced query → /api/search (300ms, mirrors LibraryRoute's filter box)
   useEffect(() => {
     const q = query.trim();
-    if (!q) {
+    // #6: client-side min-length guard — don't fire request for very short queries
+    if (!q || q.length < 2) {
       setHits(null);
       setLoading(false);
+      setSearchErr(false);
       return;
     }
     let cancelled = false;
     setLoading(true);
+    setSearchErr(false);
     const t = window.setTimeout(() => {
       api
         .search(q)
@@ -57,7 +70,8 @@ export function Search({ go }: { go: (h: string) => void }) {
         })
         .catch(() => {
           if (cancelled) return;
-          setHits([]);
+          setSearchErr(true);
+          setHits(null);
           setLoading(false);
         });
     }, 300);
@@ -65,7 +79,7 @@ export function Search({ go }: { go: (h: string) => void }) {
       cancelled = true;
       window.clearTimeout(t);
     };
-  }, [query]);
+  }, [query, retryKey]);
 
   const groups = useMemo(() => groupByEpisode(hits ?? []), [hits]);
   const flat = useMemo(() => flatHits(groups), [groups]);
@@ -74,6 +88,11 @@ export function Search({ go }: { go: (h: string) => void }) {
   useEffect(() => {
     setSel((s) => Math.min(s, Math.max(0, flat.length - 1)));
   }, [flat.length]);
+
+  // #1: scroll selected row into view when sel changes via arrow keys
+  useEffect(() => {
+    hitRefs.current.get(sel)?.scrollIntoView({ block: "nearest" });
+  }, [sel]);
 
   const open = (h: SearchHit) => go(cueLink(h.mediaId, h.start));
 
@@ -108,7 +127,7 @@ export function Search({ go }: { go: (h: string) => void }) {
           ref={inputRef}
           className="search-route-input"
           type="text"
-          placeholder="find any line across every episode…"
+          placeholder="search subtitles (Japanese or Russian) across every episode…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={onKeyDown}
@@ -118,26 +137,46 @@ export function Search({ go }: { go: (h: string) => void }) {
 
       {query.trim() === "" && (
         <p className="search-route-empty muted">
-          Type to search every episode's Japanese transcript.
+          Type to search every episode's subtitles — Japanese or Russian.
         </p>
+      )}
+
+      {/* #6: gentle hint when query is non-empty but too short to search */}
+      {query.trim().length > 0 && query.trim().length < 2 && (
+        <p className="search-route-empty muted">type at least 2 characters to search</p>
       )}
 
       {query.trim() !== "" && loading && (
         <p className="search-route-status muted">searching…</p>
       )}
 
-      {query.trim() !== "" && !loading && hits != null && flat.length === 0 && (
+      {query.trim() !== "" && !loading && !searchErr && hits != null && flat.length === 0 && (
         <p className="search-route-status muted">no matches</p>
+      )}
+
+      {query.trim() !== "" && !loading && searchErr && (
+        <p className="search-route-status search-route-error">
+          Search failed — server may be unavailable.{" "}
+          <button
+            type="button"
+            className="search-route-retry"
+            onClick={() => setRetryKey((k) => k + 1)}
+          >
+            Retry
+          </button>
+        </p>
       )}
 
       {flat.length > 0 && (
         <div className="search-route-results">
           {groups.map((g) => (
             <section key={g.mediaId} className="search-route-group">
-              <h2 className="search-route-episode">{displayName(g.name)}</h2>
+              {/* #7: show hit count per episode */}
+              <h2 className="search-route-episode">{displayName(g.name)} ({g.hits.length})</h2>
               {g.hits.map((h) => {
                 flatIdx += 1;
                 const active = flatIdx === sel;
+                const myIdx = flatIdx; // capture for ref callback
                 const hl = highlightHit(h, query);
                 const ruMatch = h.matchedLang === "ru";
                 return (
@@ -145,6 +184,11 @@ export function Search({ go }: { go: (h: string) => void }) {
                     key={`${h.mediaId}:${h.start}`}
                     type="button"
                     className={`search-route-hit${active ? " sel" : ""}`}
+                    ref={(el) => {
+                      // #1: register/unregister button in hitRefs map for scrollIntoView
+                      if (el) hitRefs.current.set(myIdx, el);
+                      else hitRefs.current.delete(myIdx);
+                    }}
                     onMouseEnter={() => setSel(flat.indexOf(h))}
                     onClick={() => open(h)}
                   >

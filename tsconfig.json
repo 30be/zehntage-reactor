@@ -27,5 +27,8 @@
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
   },
-  "exclude": ["web"]
+  // tests/ankihtml.test.ts is excluded from tsc only: it imports jsdom (whose
+  // types force-load lib.dom and pollute the Bun server program's fetch/BodyInit
+  // globals). bun test still runs it by glob, with jsdom providing a runtime DOM.
+  "exclude": ["web", "tests/ankihtml.test.ts"]
 }

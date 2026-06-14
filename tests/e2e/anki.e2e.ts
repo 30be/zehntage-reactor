@@ -31,10 +31,29 @@ test("`a` adds the popup word to Anki and colors the token instantly", async ({ 
     .toContain("勉強 [べんきょう]");
 });
 
-test("`a` again deletes the matched card (toggle) and un-colors the token", async ({ page }) => {
-  await openPlayer(page, "clip.mp4");
-  await seekTo(page, 3); // 勉強します。 — 勉強 was added by the spec above
-  await waitForTokens(page);
+test.describe("`a` toggle delete", () => {
+  // Idempotently seed 勉強 into the deck so this test no longer depends on the
+  // "adds" spec above having run first (and succeeded). Re-running this test in
+  // isolation, or after a spec reorder, still finds the card already in-deck.
+  test.beforeEach(async ({ page }) => {
+    const FRONT = "勉強 [べんきょう]";
+    const has = async () => {
+      const res = await page.request.get("/api/anki/words");
+      const { words } = (await res.json()) as { words: { front: string }[] };
+      return words.some((w) => w.front === FRONT);
+    };
+    if (!(await has())) {
+      await page.request.post("/api/anki/add", {
+        data: { word: "勉強", reading: "べんきょう", translation: "учёба", notes: "" },
+      });
+    }
+    await expect.poll(has).toBe(true);
+  });
+
+  test("`a` again deletes the matched card (toggle) and un-colors the token", async ({ page }) => {
+    await openPlayer(page, "clip.mp4");
+    await seekTo(page, 3); // 勉強します。 — 勉強 seeded idempotently in beforeEach
+    await waitForTokens(page);
 
   await page.locator(".sub-primary .tok").first().click();
   const popup = page.locator(".lookup");
@@ -53,6 +72,7 @@ test("`a` again deletes the matched card (toggle) and un-colors the token", asyn
       return words.map((w) => w.front);
     })
     .not.toContain("勉強 [べんきょう]");
+  });
 });
 
 test("unknown words render with the muted-red .unk class, no underline border", async ({ page }) => {

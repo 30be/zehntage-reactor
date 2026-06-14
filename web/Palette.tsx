@@ -369,7 +369,7 @@ export function Palette({ go, toast, settings, setSettings }: Props) {
               </button>
             </div>
             <div className="cheat-cols">
-              {(["player", "read", "global"] as const).map((scope) => (
+              {(["player", "read", "global", "review"] as const).map((scope) => (
                 <div key={scope} className="cheat-col">
                   <div className="cheat-scope">{scope}</div>
                   {HOTKEYS.filter((h) => h.scope === scope).map((h) => (
