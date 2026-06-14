@@ -46,6 +46,37 @@ describe("buildWordPrompt template substitution", () => {
   });
 });
 
+describe("DEFAULT_LOOKUP_PROMPT quality instructions + contract", () => {
+  // OUTPUT CONTRACT: the four schema fields the client parses must stay named.
+  test("declares all four output fields the schema requires", () => {
+    expect(DEFAULT_LOOKUP_PROMPT).toContain("reading:");
+    expect(DEFAULT_LOOKUP_PROMPT).toContain("translation:");
+    expect(DEFAULT_LOOKUP_PROMPT).toContain("notes:");
+    expect(DEFAULT_LOOKUP_PROMPT).toContain("context:");
+  });
+
+  test("asks for the meaning AS USED, not an exhaustive dump", () => {
+    expect(DEFAULT_LOOKUP_PROMPT).toContain("AS USED HERE");
+    expect(DEFAULT_LOOKUP_PROMPT).toMatch(/exhaustive/i);
+  });
+
+  test("requests a natural Russian gloss, dictionary base form", () => {
+    expect(DEFAULT_LOOKUP_PROMPT).toContain("natural Russian gloss");
+    expect(DEFAULT_LOOKUP_PROMPT).toContain("dictionary base form");
+  });
+
+  test("embeds the shared Hyouka name glossary for consistent names", () => {
+    expect(DEFAULT_LOOKUP_PROMPT).toContain("Ореки Хотаро");
+    expect(DEFAULT_LOOKUP_PROMPT).toContain("Читанда Эру");
+    expect(DEFAULT_LOOKUP_PROMPT).toContain("Polivanov");
+  });
+
+  test("still keeps reading as kana and the <b> context-sentence rule", () => {
+    expect(DEFAULT_LOOKUP_PROMPT).toContain("base) form in kana");
+    expect(DEFAULT_LOOKUP_PROMPT).toContain("<b></b>");
+  });
+});
+
 describe("assertTranslationCount", () => {
   test("exact match does not throw", () => {
     expect(() => assertTranslationCount(["a", "b", "c"], 3)).not.toThrow();

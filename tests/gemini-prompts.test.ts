@@ -118,6 +118,24 @@ describe("buildExplainPrompt", () => {
     expect(DEFAULT_EXPLAIN_PROMPT).toContain("{context}");
   });
 
+  // OUTPUT CONTRACT: schema fields breakdown/idioms/translation must be named.
+  test("DEFAULT_EXPLAIN_PROMPT declares all three schema fields", () => {
+    expect(DEFAULT_EXPLAIN_PROMPT).toContain("breakdown:");
+    expect(DEFAULT_EXPLAIN_PROMPT).toContain("idioms:");
+    expect(DEFAULT_EXPLAIN_PROMPT).toContain("translation:");
+  });
+
+  test("DEFAULT_EXPLAIN_PROMPT asks for a learner-pitched Russian breakdown", () => {
+    expect(DEFAULT_EXPLAIN_PROMPT).toContain("in Russian");
+    expect(DEFAULT_EXPLAIN_PROMPT).toMatch(/not academic/i);
+    expect(DEFAULT_EXPLAIN_PROMPT).toContain("idiomatic Russian translation");
+  });
+
+  test("DEFAULT_EXPLAIN_PROMPT embeds the shared Hyouka name glossary", () => {
+    expect(DEFAULT_EXPLAIN_PROMPT).toContain("Ореки Хотаро");
+    expect(DEFAULT_EXPLAIN_PROMPT).toContain("Polivanov");
+  });
+
   test("context defaults to empty string when omitted", () => {
     const withoutCtx = buildExplainPrompt("文", "transl", "src");
     const withEmpty = buildExplainPrompt("文", "transl", "src", "");
@@ -190,5 +208,17 @@ describe("buildAskPrompt", () => {
     const out = buildAskPrompt({ question: "分かった？" });
     expect(out).toContain("Russian speaker");
     expect(out).toContain("分かった？");
+  });
+
+  test("instructs to answer in Russian, grounded in context", () => {
+    const out = buildAskPrompt({ question: "q" });
+    expect(out).toContain("Reply in Russian by default");
+    expect(out).toContain("grounded in");
+  });
+
+  test("embeds the shared Hyouka name glossary for consistent names", () => {
+    const out = buildAskPrompt({ question: "q" });
+    expect(out).toContain("Ореки Хотаро");
+    expect(out).toContain("Polivanov");
   });
 });

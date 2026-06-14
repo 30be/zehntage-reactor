@@ -185,22 +185,53 @@ async function callGemini(
 }
 
 /**
+ * HYOUKA (氷菓) cast/place glossary for consistent Japanese→Russian name
+ * transliteration. Surnames follow community-standard forms (Читанда), given
+ * names use a fused readable form; everything else is plain Polivanov. Reused
+ * across the translate batch prompt and the learner-facing lookup/explain/ask
+ * prompts so a name renders the SAME way everywhere. Kept deliberately short
+ * (main cast + a couple of places) so it doesn't bloat per-request token usage.
+ */
+const HYOUKA_RU_GLOSSARY = [
+  "折木奉太郎 → Ореки Хотаро",
+  "千反田 (фамилия) → Читанда; 千反田える → Читанда Эру (личное имя える = Эру). Когда в реплике только фамилия 千反田/チタンダ — это ВСЕГДА «Читанда», НИКОГДА не «Тиэру».",
+  "福部里志 → Фукубэ Сатоси",
+  "伊原摩耶花 → Ибара Маяка",
+  "古典部 → клуб классической литературы",
+  "神山高校 → старшая школа Камияма",
+  "Склоняй японские имена по правилам русского языка там, где это естественно (напр. «с Читандой», «у Ореки»), но никогда не меняй саму транслитерацию основы имени.",
+].join("\n");
+
+/**
+ * Shared note for the single-item learner prompts (lookup/explain/ask): these
+ * subtitles are from Hyouka, so render proper names consistently. We fold the
+ * cast glossary in only where names actually matter, keeping the DRY source of
+ * truth in HYOUKA_RU_GLOSSARY.
+ */
+const HYOUKA_NAME_NOTE = `These subtitles are from the anime "Hyouka" (氷菓). Keep character and place names CONSISTENT with this glossary; transliterate any OTHER Japanese proper name with standard Polivanov rules (do NOT anglicize or invent names):
+${HYOUKA_RU_GLOSSARY}`;
+
+/**
  * Built-in word-lookup prompt template. Placeholders {word} {context} {source}
  * are substituted. Exported so the settings page can prefill / restore it.
  */
 export const DEFAULT_LOOKUP_PROMPT = `The learner is a native Russian speaker, fluent in English, learning Japanese. They are studying the word "{word}", which appeared in the subtitle lines below. The line containing the word may be marked "(current)", with the surrounding "(prev)"/"(next)" lines included for context; a translation of the current line into a language the learner knows may also be included.
 
+${HYOUKA_NAME_NOTE}
+
 Important: the word may be a quoted loanword, a proper name, or wordplay rather than its ordinary dictionary sense (e.g. もっと quoted as the loanword "motto" = девиз). Use the surrounding lines and the known-language translation line to disambiguate. If the translation line conflicts with the dictionary meaning, prefer the contextual reading and note the dictionary meaning briefly.
 
+Give the most common meaning(s) of the word AS USED HERE — usually one, at most two senses. Do NOT dump an exhaustive list of every dictionary meaning. Keep every field concise and learner-useful; never produce word-salad.
+
 Provide four fields:
-- reading: if "{word}" is Japanese, its reading in kana (hiragana for native/Sino-Japanese words, katakana for loanwords). Otherwise an empty string.
-- translation: "{word}" translated into Russian — or into English if the word is itself Russian. Expand abbreviations using the text.
+- reading: if "{word}" is Japanese, the reading of its DICTIONARY (base) form in kana — hiragana for native/Sino-Japanese words, katakana for loanwords. Otherwise an empty string.
+- translation: a natural Russian gloss of "{word}" as used here (English if the word is itself Russian) — the dictionary base form, idiomatic, not a literal calque. Expand abbreviations using the text. Where it helps, prefix the part of speech briefly (e.g. "гл." / "сущ. — ").
 - notes: If the studied word is a proper noun naming a real person, place, work, or brand, give a one-sentence encyclopedic abstract — who or what it is and what it is best known for (max ~30 words). Otherwise a short explanation (max ~25 words) that makes the word stick: when the translation loses nuance say what it actually means, and add a memory hook — a kanji breakdown, a genuine cognate or known loanword, a sound-alike, or a vivid image. Never leave this empty.
 - context: the single sentence from the text below that best shows the word in use, trimmed to just that sentence, with the studied word wrapped in <b></b>. If the text below has no usable sentence, invent a short natural one.
 
 Examples:
-- "図書館" → reading: "としょかん", translation: "библиотека", notes: "図 (рисунок/план) + 書 (книга) + 館 (здание) — 'здание для книг и документов'."
-- "気になる" → reading: "きになる", translation: "беспокоить, интересовать", notes: "буквально 'становиться ки (духом/вниманием)' — что-то засело в голове, фирменная фраза Читанды из «Хёки»."
+- "図書館" → reading: "としょかん", translation: "сущ. — библиотека", notes: "図 (рисунок/план) + 書 (книга) + 館 (здание) — 'здание для книг и документов'."
+- "気になる" → reading: "きになる", translation: "гл. — беспокоить, интересовать", notes: "буквально 'становиться ки (духом/вниманием)' — что-то засело в голове, фирменная фраза Читанды из «Хёки»."
 
 Source: {source}
 
@@ -278,14 +309,16 @@ export interface ExplainResult {
  * {secondary} {source} are substituted. Exported so the settings page can
  * prefill / restore it (same pattern as DEFAULT_LOOKUP_PROMPT).
  */
-export const DEFAULT_EXPLAIN_PROMPT = `The learner is a native Russian speaker, fluent in English, learning Japanese. Explain the structure of this Japanese subtitle sentence for them. Be compact — no filler.
+export const DEFAULT_EXPLAIN_PROMPT = `The learner is a native Russian speaker, fluent in English, learning Japanese. Explain the structure of this Japanese subtitle sentence for them, in Russian. Pitch it at a learner — clear and concrete, not academic jargon. Be compact: no filler, no restating the obvious.
+
+${HYOUKA_NAME_NOTE}
 
 Note: words in the sentence may be quoted loanwords, names, or wordplay referenced from the surrounding lines — use the surrounding lines and any known-language translation to disambiguate; if the translation conflicts with a dictionary meaning, prefer the contextual reading and note the dictionary meaning briefly.
 
 Provide three fields:
-- breakdown: the sentence's grammar explained in short lines — grammar points, particle usage, conjugations and contractions (spell out what casual/contracted forms expand to, e.g. "〜ちゃった = 〜てしまった (completion/regret)"), plus a word gloss ONLY where non-obvious.
-- idioms: multiword idioms, set phrases, or collocations in the sentence with brief meanings; empty string if none.
-- translation: a natural Russian translation of the whole sentence.
+- breakdown: the sentence's grammar explained in Russian, in short lines — grammar points, particle usage (что делает каждая частица), conjugations and contractions (spell out what casual/contracted forms expand to, e.g. "〜ちゃった = 〜てしまった — завершённость/сожаление"), plus a word gloss ONLY where non-obvious. Walk through the sentence in order; keep each line to one point.
+- idioms: multiword idioms, set phrases, or collocations in the sentence with brief Russian meanings; empty string if none.
+- translation: a natural, idiomatic Russian translation of the whole sentence (not a word-for-word calque).
 
 Surrounding subtitle lines (the sentence is marked "(current)", may be empty):
 {context}
@@ -356,7 +389,9 @@ export function buildAskPrompt(p: AskParams): string {
   if (p.sentence) ctx.push(`Sentence: ${p.sentence}`);
   if (p.priorAnswer) ctx.push(`Explanation already shown to the learner:\n${p.priorAnswer}`);
   if (p.source) ctx.push(`Source: ${p.source}`);
-  return `The learner is a native Russian speaker, fluent in English, learning Japanese. They have a follow-up question about the material below. Answer concisely (a few sentences max), in the language the question was asked in.
+  return `The learner is a native Russian speaker, fluent in English, learning Japanese. They have a follow-up question about the material below. Answer concisely and naturally (a few sentences max), grounded in the given word and sentence context — do not drift off topic. Reply in Russian by default; if the question is clearly written in another language, reply in that language instead. When mentioning Japanese names, keep them consistent with the Hyouka glossary below.
+
+${HYOUKA_NAME_NOTE}
 
 ${ctx.join("\n")}
 
@@ -404,22 +439,6 @@ export function sanitizeCueLine(text: string): string {
     .replace(/\s+/g, " ")
     .trim();
 }
-
-/**
- * HYOUKA (氷菓) cast/place glossary for consistent Japanese→Russian name
- * transliteration. Surnames follow community-standard forms (Читанда), given
- * names use a fused readable form; everything else is plain Polivanov. Injected
- * only when the target language is Russian. Kept deliberately short (main cast +
- * a couple of places) so it doesn't bloat per-batch token usage.
- */
-const HYOUKA_RU_GLOSSARY = [
-  "折木奉太郎 → Ореки Хотаро",
-  "千反田える → Читанда Эру (имя — Эру; в обращении часто просто Тиэру)",
-  "福部里志 → Фукубэ Сатоси",
-  "伊原摩耶花 → Ибара Маяка",
-  "古典部 → клуб классической литературы",
-  "神山高校 → старшая школа Камияма",
-].join("\n");
 
 export function buildTranslateBatchPrompt(lines: string[], targetLang: string): string {
   const target = languageName(targetLang);
