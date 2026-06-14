@@ -5,6 +5,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type SnapshotMeta } from "./api.ts";
+import { clampMinutesGoal, loadMinutesGoal, saveMinutesGoal } from "./timer.ts";
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -55,6 +56,11 @@ export function Settings({
   const explainDefault = (settings.explainPromptDefault as string) || "";
   const [explainPrompt, setExplainPrompt] = useState(
     (settings.explainPrompt as string) || explainDefault,
+  );
+  // G4: daily immersion goal (minutes) — persisted to localStorage, not the
+  // server settings, mirroring the cards daily goal (web/timer.ts).
+  const [minutesGoal, setMinutesGoal] = useState<string>(() =>
+    String(loadMinutesGoal()),
   );
 
   useEffect(() => {
@@ -327,6 +333,28 @@ export function Settings({
                   scheduleSave();
                 }}
                 onBlur={onBlurSave}
+              />
+            </div>
+          </div>
+          <div className="field-row">
+            <div className="field">
+              <label htmlFor="minutesGoal">Daily immersion goal (minutes)</label>
+              <input
+                id="minutesGoal"
+                type="number"
+                min={1}
+                max={600}
+                title="Target focused watch time per day; shown in the player session HUD (o)."
+                value={minutesGoal}
+                onChange={(e) => {
+                  setMinutesGoal(e.target.value);
+                  saveMinutesGoal(clampMinutesGoal(Number(e.target.value)));
+                }}
+                onBlur={() => {
+                  const clamped = clampMinutesGoal(Number(minutesGoal));
+                  setMinutesGoal(String(clamped));
+                  saveMinutesGoal(clamped);
+                }}
               />
             </div>
           </div>
