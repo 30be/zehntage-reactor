@@ -7,7 +7,7 @@
 
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
-import { mkdir, appendFile, readFile } from "node:fs/promises";
+import { mkdir, appendFile, readFile, stat } from "node:fs/promises";
 
 export interface TelemetryEvent {
   ts: number;
@@ -52,13 +52,18 @@ export function logEvents(events: TelemetryEvent[]): Promise<void> {
   return writeChain;
 }
 
-export async function readEvents(): Promise<TelemetryEvent[]> {
-  let text: string;
-  try {
-    text = await readFile(eventsFilePath(), "utf8");
-  } catch {
-    return [];
-  }
+// In-process parse cache for the append-only events log. Keyed by the file's
+// mtime+size: appends bump mtime (and size), so a stale cache can never be
+// served. The cached array is treated as immutable by all readers (they only
+// iterate/aggregate), so returning the same reference is safe. Keyed by path
+// so a test pointing ZR_EVENTS_FILE elsewhere gets its own slot.
+interface EventsCacheSlot {
+  sig: string; // `${mtimeMs}:${size}`
+  events: TelemetryEvent[];
+}
+const eventsCache = new Map<string, EventsCacheSlot>();
+
+function parseEventsText(text: string): TelemetryEvent[] {
   const out: TelemetryEvent[] = [];
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
@@ -70,6 +75,30 @@ export async function readEvents(): Promise<TelemetryEvent[]> {
     }
   }
   return out;
+}
+
+export async function readEvents(): Promise<TelemetryEvent[]> {
+  const file = eventsFilePath();
+  let sig: string;
+  try {
+    const st = await stat(file);
+    sig = `${st.mtimeMs}:${st.size}`;
+  } catch {
+    eventsCache.delete(file);
+    return [];
+  }
+  const hit = eventsCache.get(file);
+  if (hit && hit.sig === sig) return hit.events;
+  let text: string;
+  try {
+    text = await readFile(file, "utf8");
+  } catch {
+    eventsCache.delete(file);
+    return [];
+  }
+  const events = parseEventsText(text);
+  eventsCache.set(file, { sig, events });
+  return events;
 }
 
 export interface DaySummary {

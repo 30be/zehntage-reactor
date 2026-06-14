@@ -47,6 +47,7 @@ import {
   qaCachePut,
   readSavedTracks,
   saveTracks,
+  tokenizeCue,
   type PopupState,
   type QaItem,
 } from "./player/shared.ts";
@@ -327,7 +328,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     const cueUnknownLemmas: string[][] = [];
     for (const cue of cues) {
       const unknowns: string[] = [];
-      for (const tk of tok.tokenize(cue.text)) {
+      for (const tk of tokenizeCue(tok, cue.text)) {
         if (!isLexical(tk)) continue;
         // particles/auxiliaries aren't study material
         if (tk.pos === "助詞" || tk.pos === "助動詞") continue;
@@ -416,7 +417,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       const s = sec.find((x) => x.start <= mid && x.end >= mid);
       const words: { surface: string; lemma: string }[] = [];
       if (tok) {
-        for (const tk of tok.tokenize(c.text)) {
+        for (const tk of tokenizeCue(tok, c.text)) {
           if (!isLexical(tk)) continue;
           if (tk.pos === "助詞" || tk.pos === "助動詞") continue;
           words.push({ surface: tk.surface_form, lemma: wordKey(tk) });
@@ -695,9 +696,12 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     void getTokenizer()
       .then((tok) => {
         if (cancelled) return;
+        // Route through the module cue-token cache: a wordIndex change (k/x
+        // mark, Anki revalidation) re-runs this effect but the per-cue tokens
+        // are reused instead of re-running kuromoji over the whole episode.
         const { counts, lemmas } = computeCueUnknowns(
           displayCues.map((c) => c.text),
-          tok,
+          { tokenize: (text) => tokenizeCue(tok, text) },
           { wordIndex, knownWords, blacklist },
         );
         if (!cancelled) {
@@ -735,7 +739,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         const hits: number[] = [];
         for (let i = 0; i < displayCues.length; i++) {
           let due = false;
-          for (const t of tok.tokenize(displayCues[i]!.text)) {
+          for (const t of tokenizeCue(tok, displayCues[i]!.text)) {
             if (!isLexical(t)) continue;
             if (t.pos === "助詞" || t.pos === "助動詞") continue;
             const front = matchFront(idx, t.surface_form, t.reading, t.basic_form);

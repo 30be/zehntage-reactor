@@ -47,6 +47,23 @@ export function cueTokensPut(text: string, toks: KToken[]): void {
   cueTokenCache.set(text, toks);
 }
 
+/**
+ * Tokenize a cue text via the module-level cache: returns the cached tokens for
+ * a repeated cue text, else tokenizes once and stores. Same FIFO cache the
+ * visible-overlay path uses — episode-wide passes (cueUnknowns / dueCue /
+ * coverage) reuse it instead of re-running kuromoji on every deck change.
+ */
+export function tokenizeCue(
+  tok: { tokenize: (text: string) => KToken[] },
+  text: string,
+): KToken[] {
+  const cached = cueTokensGet(text);
+  if (cached) return cached;
+  const toks = tok.tokenize(text);
+  cueTokensPut(text, toks);
+  return toks;
+}
+
 // Module-level Q/A history cache so the ask… thread survives popup close/
 // reopen, keyed by kind + word/sentence + context. FIFO-capped at ~100.
 const qaCache = new Map<string, QaItem[]>();

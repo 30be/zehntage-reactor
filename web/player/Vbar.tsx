@@ -111,12 +111,20 @@ export function Vbar({
     return () => ro.disconnect();
   }, [displayCues, videoDuration, hasDensity, cueUnknowns]);
 
+  // mm:ss readout written via direct DOM (textContent) in the same per-tick
+  // updater as the marker — no React state, so timeupdate (~4–60 Hz) no longer
+  // re-renders the whole Vbar just to repaint the clock.
+  const curTimeRef = useRef<HTMLSpanElement>(null);
+
   // current-position marker: cheap direct-DOM left% update, no React re-render
   useEffect(() => {
     const v = videoRef.current;
     const m = densityMarkerRef.current;
     if (!v || !m) return;
     const upd = () => {
+      // mm:ss readout updates even before duration is known (matches the old
+      // state-driven render, which painted fmtTime(currentTime) from t=0).
+      if (curTimeRef.current) curTimeRef.current.textContent = fmtTime(v.currentTime);
       if (!(v.duration > 0)) return;
       const pct = (v.currentTime / v.duration) * 100;
       m.style.left = `${pct}%`;
@@ -124,10 +132,12 @@ export function Vbar({
     };
     v.addEventListener("timeupdate", upd);
     v.addEventListener("seeking", upd);
+    v.addEventListener("seeked", upd);
     upd();
     return () => {
       v.removeEventListener("timeupdate", upd);
       v.removeEventListener("seeking", upd);
+      v.removeEventListener("seeked", upd);
     };
   }, [mediaKey]);
 
@@ -136,21 +146,6 @@ export function Vbar({
   const [seekHover, setSeekHover] = useState<{ x: number; t: number } | null>(
     null,
   );
-
-  // mm:ss readout — timeupdate fires ~4×/s, cheap enough for a state update
-  const [curTime, setCurTime] = useState(0);
-  useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    const upd = () => setCurTime(v.currentTime);
-    v.addEventListener("timeupdate", upd);
-    v.addEventListener("seeked", upd);
-    upd();
-    return () => {
-      v.removeEventListener("timeupdate", upd);
-      v.removeEventListener("seeked", upd);
-    };
-  }, [mediaKey]);
 
   // volume / mute mirrors (ArrowUp/Down hotkeys change v.volume directly)
   const [volume, setVolume] = useState(1);
@@ -356,7 +351,7 @@ export function Vbar({
           {isPaused ? <PlayIcon /> : <PauseIcon />}
         </button>
         <span className="vbar-time">
-          {fmtTime(curTime)} / {fmtTime(videoDuration)}
+          <span ref={curTimeRef}>{fmtTime(0)}</span> / {fmtTime(videoDuration)}
         </span>
         <span className="vbar-spacer" />
         <button

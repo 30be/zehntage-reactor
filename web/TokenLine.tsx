@@ -8,6 +8,7 @@
 //   in deck (learning)   -> blue fading to ambient as the interval grows
 //   in deck (mature)     -> plain ambient text
 
+import { memo } from "react";
 import { isLexical, kataToHira, vocabKey, type KToken } from "./tokenizer.ts";
 import {
   matchFront,
@@ -78,7 +79,14 @@ export interface TokenLineProps {
   onWordClick?: (tok: KToken, e: React.MouseEvent) => void;
 }
 
-export function TokenLine({
+// Memoized with the default shallow prop comparison: all coloring inputs are
+// props (tokens, wordIndex, knownWords, blacklist, accents, the toggles, the
+// handlers), so memo can never mask a genuine recolor — a deck/known change
+// arrives as a new wordIndex/knownWords reference. On the overlay path
+// (SubOverlay) the handlers are useCallback-stable, so memo skips re-renders
+// from unrelated Player state; on the sidebar/read paths handlers are inline
+// (memo is a harmless no-op there).
+function TokenLineInner({
   tokens,
   fallbackText,
   wordIndex,
@@ -169,3 +177,5 @@ export function TokenLine({
     </>
   );
 }
+
+export const TokenLine = memo(TokenLineInner);

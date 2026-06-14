@@ -158,6 +158,28 @@ async function subTracksFor(entry: LibraryEntry): Promise<SubTrack[]> {
   return tracks;
 }
 
+// Parsed-cue cache keyed by (entry id + track id) and fingerprinted by the
+// SOURCE file's mtime+size. The translation batch rewrites .ru.srt sidecars in
+// place, so keying on mtime is essential: a regenerated track changes mtime and
+// invalidates the slot, never serving a stale parse. Sidecars key on the sub
+// file; embedded tracks key on the media container (and so also avoid re-running
+// ffmpeg extraction on every request). Parsed cues are treated as immutable by
+// callers, so returning a shared reference is safe.
+interface CueCacheSlot {
+  sig: string; // `${mtimeMs}:${size}` of the source file
+  cues: Cue[];
+}
+const cueCache = new Map<string, CueCacheSlot>();
+
+async function fileSig(path: string): Promise<string> {
+  try {
+    const st = await stat(path);
+    return `${st.mtimeMs}:${st.size}`;
+  } catch {
+    return "gone";
+  }
+}
+
 async function cuesForTrack(entry: LibraryEntry, trackId: string): Promise<Cue[]> {
   const ref = parseSidecarTrackId(trackId);
   if (ref) {
@@ -169,11 +191,23 @@ async function cuesForTrack(entry: LibraryEntry, trackId: string): Promise<Cue[]
     // the first match for that language.
     const sub = ref.ext ? matches.find((s) => s.ext === `.${ref.ext}`) : matches[0];
     if (!sub) throw new Error(`no sidecar track ${ref.lang}`);
-    return parseSubtitleText(await Bun.file(sub.path).text(), sub.ext);
+    const cacheKey = `${entry.id}|${trackId}`;
+    const sig = await fileSig(sub.path);
+    const hit = cueCache.get(cacheKey);
+    if (hit && hit.sig === sig) return hit.cues;
+    const cues = parseSubtitleText(await Bun.file(sub.path).text(), sub.ext);
+    cueCache.set(cacheKey, { sig, cues });
+    return cues;
   }
   if (trackId.startsWith("embedded:")) {
     const index = parseInt(trackId.slice("embedded:".length), 10);
-    return parseSrt(await extractEmbeddedTrack(entry.absPath, index));
+    const cacheKey = `${entry.id}|${trackId}`;
+    const sig = await fileSig(entry.absPath);
+    const hit = cueCache.get(cacheKey);
+    if (hit && hit.sig === sig) return hit.cues;
+    const cues = parseSrt(await extractEmbeddedTrack(entry.absPath, index));
+    cueCache.set(cacheKey, { sig, cues });
+    return cues;
   }
   throw new Error(`bad track id: ${trackId}`);
 }

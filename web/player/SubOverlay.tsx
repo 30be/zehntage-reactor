@@ -4,11 +4,17 @@
 // renders the prepared values and wires the supplied callbacks/refs. Extracted
 // from Player.tsx.
 
+import { memo } from "react";
 import { TokenLine } from "../TokenLine.tsx";
 import type { KToken } from "../tokenizer.ts";
 import type { WordIndex } from "../progress.ts";
 
-export function SubOverlay({
+// Memoized: all callbacks/refs passed by Player are useCallback-wrapped or
+// stable refs, and the data props (tokens, wordIndex, knownWords, blacklist,
+// accents, the texts, the toggles) change identity only on a real change. So
+// memo skips re-renders driven purely by unrelated Player state (popup/HUD/
+// per-tick) without ever masking a genuine update.
+export const SubOverlay = memo(function SubOverlay({
   subScale,
   cuesLoading,
   primaryText,
@@ -126,4 +132,4 @@ export function SubOverlay({
       )}
     </div>
   );
-}
+});
