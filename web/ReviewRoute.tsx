@@ -9,12 +9,55 @@
 // State machine:  loading → (offline | empty | reviewing) → done
 // Queue scope is always "all" — reviews Anki's full due queue.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { api, type ReviewCard } from "./api.ts";
 import { sanitizeAnkiHtml } from "./ankihtml.ts";
 
 type Phase = "loading" | "offline" | "empty" | "question" | "answer" | "done";
+
+const TWOCOL_KEY = "zr.review.twocol";
+
+/** Split a sanitized Anki answer HTML into its main part (front + back + notes)
+ *  and the trailing CONTEXT block (the example sentence / image). The card
+ *  template is `{{FrontSide}}<hr id=answer>…<div …>{{context}}</div>`, so the
+ *  context is the LAST top-level <div>. We parse the string into a DOM fragment
+ *  and pull off the last element-level <div> child; if none exists we fall back
+ *  to splitting on the last <hr>. Returns the two HTML strings (right may be
+ *  empty, in which case callers should treat the card as single-column). */
+export function splitAnswerHtml(html: string): { left: string; right: string } {
+  if (typeof document !== "undefined") {
+    const tpl = document.createElement("template");
+    tpl.innerHTML = html;
+    const frag = tpl.content;
+    // last top-level element that is a <div>
+    let lastDiv: HTMLDivElement | null = null;
+    for (let i = frag.childNodes.length - 1; i >= 0; i--) {
+      const n = frag.childNodes[i];
+      if (n && n.nodeType === 1 && (n as Element).tagName === "DIV") {
+        lastDiv = n as HTMLDivElement;
+        break;
+      }
+    }
+    if (lastDiv) {
+      const right = lastDiv.outerHTML;
+      lastDiv.remove();
+      const left = tpl.innerHTML;
+      if (right.trim()) return { left, right };
+    }
+  }
+  // fallback: split on the last <hr …>, but only trust it when the right side
+  // actually contains a block element (img, div, figure, audio) — otherwise
+  // it's likely bare back-answer text and we leave it as single-column.
+  const m = html.match(/^([\s\S]*)<hr[^>]*>([\s\S]*)$/i);
+  if (m) {
+    const right = m[2] ?? "";
+    if (/<(img|div|figure|audio)[\s>]/i.test(right)) {
+      return { left: m[1] ?? html, right };
+    }
+  }
+  return { left: html, right: "" };
+}
 
 /** True while focus is in a text-entry control — we then ignore our hotkeys so
  *  typing (e.g. a future search box) never triggers grading. */
@@ -30,18 +73,45 @@ function isTextTarget(el: EventTarget | null): boolean {
   );
 }
 
-export function Review({ go }: { go: (h: string) => void }) {
+export function Review({
+  go,
+  toast,
+}: {
+  go: (h: string) => void;
+  toast?: (m: string) => void;
+}) {
   const [queue, setQueue] = useState<ReviewCard[]>([]);
   const [pos, setPos] = useState(0);
   const [due, setDue] = useState(0);
   const [phase, setPhase] = useState<Phase>("loading");
   const [reviewed, setReviewed] = useState(0);
   const [err, setErr] = useState<string | null>(null);
+  // visible banner shown when a grade can't be persisted (so we never silently
+  // loop on the same card). Cleared on the next successful action.
+  const [gradeErr, setGradeErr] = useState<string | null>(null);
+  // two-column layout toggle, persisted across sessions (default off).
+  const [twoCol, setTwoCol] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(TWOCOL_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleTwoCol = useCallback((next: boolean) => {
+    setTwoCol(next);
+    try {
+      localStorage.setItem(TWOCOL_KEY, next ? "1" : "0");
+    } catch {
+      /* storage may be unavailable (private mode) — toggle still works in-session */
+    }
+  }, []);
 
   const answerRef = useRef<HTMLDivElement>(null);
   // guards optimistic advance so a double key-press can't grade the same card
   // twice / skip a card before React re-renders the next one.
   const gradingRef = useRef(false);
+  // separate guard for Delete so a double Delete can't fire twice on the same card.
+  const deletingRef = useRef(false);
 
   const card: ReviewCard | undefined = queue[pos];
 
@@ -99,46 +169,123 @@ export function Review({ go }: { go: (h: string) => void }) {
       gradingRef.current = true;
       const gradedId = card.cardId;
 
-      // fire-and-forget; advance optimistically so grading feels instant. A
-      // failed grade isn't re-queued (avoids double-grading) — the card simply
-      // reappears next session if Anki didn't record it.
-      void api.reviewAnswer(gradedId, ease).catch((e) => {
-        console.error("reviewAnswer failed:", e);
-      });
+      // AWAIT the grade — only advance once Anki has actually recorded it.
+      // Previously this was fire-and-forget and advanced regardless, so a
+      // backend that couldn't persist (Anki unreachable) left the card in the
+      // queue forever → silent infinite loop. Now a failed grade surfaces a
+      // visible banner (+ toast if available) and we DON'T advance.
+      void (async () => {
+        const FAIL_MSG = "Couldn’t record grade — is Anki reachable?";
+        try {
+          const res = await api.reviewAnswer(gradedId, ease);
+          if (!res.ok) {
+            console.error("reviewAnswer not ok:", res.error);
+            setGradeErr(FAIL_MSG);
+            toast?.(FAIL_MSG);
+            gradingRef.current = false; // allow a retry on the same card
+            return;
+          }
+        } catch (e) {
+          console.error("reviewAnswer failed:", e);
+          setGradeErr(FAIL_MSG);
+          toast?.(FAIL_MSG);
+          gradingRef.current = false;
+          return;
+        }
 
-      setReviewed((n) => n + 1);
+        // success — clear any stale error and advance.
+        setGradeErr(null);
+        setReviewed((n) => n + 1);
+        setDue((d) => Math.max(0, d - 1));
+
+        const nextPos = pos + 1;
+        if (nextPos < queue.length) {
+          setPos(nextPos);
+          setPhase("question");
+          gradingRef.current = false;
+          return;
+        }
+        // drained the batch — Anki may have surfaced more (learning steps).
+        try {
+          const res = await api.reviewQueue("all");
+          if (res.available && res.cards.length > 0) {
+            setQueue(res.cards);
+            setDue(res.due);
+            setPos(0);
+            setPhase("question");
+          } else {
+            setDue(0);
+            setPhase("done");
+          }
+        } catch (e) {
+          console.error("reviewQueue refetch failed:", e);
+          setPhase("done");
+        } finally {
+          gradingRef.current = false;
+        }
+      })();
+    },
+    [phase, card, pos, queue.length, toast],
+  );
+
+  // Delete the current card's note from Anki (DESTRUCTIVE). Available on both
+  // question and answer phases so the user can discard a card without revealing.
+  const deleteCard = useCallback(() => {
+    if (!card || deletingRef.current || gradingRef.current) return;
+    deletingRef.current = true;
+    const deletedId = card.cardId;
+
+    void (async () => {
+      const FAIL_MSG = "Couldn't delete note — is Anki reachable?";
+      try {
+        const res = await api.reviewDelete(deletedId);
+        if (!res.ok) {
+          console.error("reviewDelete not ok:", res.error);
+          setGradeErr(FAIL_MSG);
+          toast?.(FAIL_MSG);
+          deletingRef.current = false;
+          return;
+        }
+      } catch (e) {
+        console.error("reviewDelete failed:", e);
+        setGradeErr(FAIL_MSG);
+        toast?.(FAIL_MSG);
+        deletingRef.current = false;
+        return;
+      }
+
+      // success — clear any stale error; advance without counting as reviewed
+      // (the card was deleted, not studied).
+      setGradeErr(null);
       setDue((d) => Math.max(0, d - 1));
 
       const nextPos = pos + 1;
       if (nextPos < queue.length) {
         setPos(nextPos);
         setPhase("question");
-        gradingRef.current = false;
-      } else {
-        // drained the batch — Anki may have surfaced more (learning steps).
-        void (async () => {
-          try {
-            const res = await api.reviewQueue("all");
-            if (res.available && res.cards.length > 0) {
-              setQueue(res.cards);
-              setDue(res.due);
-              setPos(0);
-              setPhase("question");
-            } else {
-              setDue(0);
-              setPhase("done");
-            }
-          } catch (e) {
-            console.error("reviewQueue refetch failed:", e);
-            setPhase("done");
-          } finally {
-            gradingRef.current = false;
-          }
-        })();
+        deletingRef.current = false;
+        return;
       }
-    },
-    [phase, card, pos, queue.length],
-  );
+      // drained the batch — refetch to catch any remaining learning steps.
+      try {
+        const res = await api.reviewQueue("all");
+        if (res.available && res.cards.length > 0) {
+          setQueue(res.cards);
+          setDue(res.due);
+          setPos(0);
+          setPhase("question");
+        } else {
+          setDue(0);
+          setPhase("done");
+        }
+      } catch (e) {
+        console.error("reviewQueue refetch failed after delete:", e);
+        setPhase("done");
+      } finally {
+        deletingRef.current = false;
+      }
+    })();
+  }, [card, pos, queue.length, toast]);
 
   // window keydown, mirroring QuizPanel's add/remove listener pattern.
   useEffect(() => {
@@ -149,6 +296,9 @@ export function Review({ go }: { go: (h: string) => void }) {
         if (e.key === " " || e.key === "Spacebar") {
           e.preventDefault();
           reveal();
+        } else if (e.key === "Delete") {
+          e.preventDefault();
+          deleteCard();
         }
         return;
       }
@@ -158,7 +308,10 @@ export function Review({ go }: { go: (h: string) => void }) {
         e.preventDefault();
         return;
       }
-      if (e.key === "1") {
+      if (e.key === "Delete") {
+        e.preventDefault();
+        deleteCard();
+      } else if (e.key === "1") {
         e.preventDefault();
         grade(1);
       } else if (e.key === "2") {
@@ -177,7 +330,17 @@ export function Review({ go }: { go: (h: string) => void }) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [phase, reveal, grade, playAnswerAudio]);
+  }, [phase, reveal, grade, playAnswerAudio, deleteCard]);
+
+  // Sanitize once per card. The answer HTML already contains the front
+  // (`{{FrontSide}}<hr>…`), so when revealed we render ONLY the answer (never
+  // the question div too — that's what doubled the front).
+  const answerHtml = useMemo(
+    () => (card ? sanitizeAnkiHtml(card.answer) : ""),
+    [card],
+  );
+  // For two-column mode, split off the trailing CONTEXT <div> (sentence/image).
+  const split = useMemo(() => splitAnswerHtml(answerHtml), [answerHtml]);
 
   // --- non-reviewing states ---
 
@@ -249,7 +412,7 @@ export function Review({ go }: { go: (h: string) => void }) {
   const left = Math.max(0, queue.length - pos);
 
   return (
-    <div className="review">
+    <div className={`review${twoCol ? " review-twocol-on" : ""}`}>
       <div className="review-head">
         <span className="review-count" aria-label="cards left in batch">
           {left} left
@@ -260,29 +423,63 @@ export function Review({ go }: { go: (h: string) => void }) {
         <span className="muted review-reviewed">
           reviewed: {reviewed}
         </span>
+        <label
+          className={`review-twocol-toggle${twoCol ? " active" : ""}`}
+          title="Lay the card out in two columns to avoid scrolling"
+        >
+          <input
+            type="checkbox"
+            checked={twoCol}
+            onChange={(e) => toggleTwoCol(e.target.checked)}
+          />
+          two-column
+        </label>
       </div>
 
-      <div className="review-card">
-        <div
-          className="review-anki review-question"
-          lang="ja"
-          dangerouslySetInnerHTML={{
-            __html: sanitizeAnkiHtml(card!.question),
-          }}
-        />
+      {gradeErr && (
+        <div className="review-error" role="alert">
+          {gradeErr}
+          <span className="muted review-empty-sub">
+            Open Anki (with AnkiConnect), then grade again to retry.
+          </span>
+        </div>
+      )}
 
-        {revealed && (
-          <>
-            <hr className="review-divider" aria-hidden />
+      <div className="review-card">
+        {!revealed ? (
+          // QUESTION phase: render only the question (front).
+          <div
+            className="review-anki review-question"
+            lang="ja"
+            dangerouslySetInnerHTML={{
+              __html: sanitizeAnkiHtml(card!.question),
+            }}
+          />
+        ) : twoCol && split.right ? (
+          // ANSWER phase, two-column: main answer (front+back+notes) LEFT,
+          // CONTEXT (sentence/image) RIGHT. The answer blob already holds the
+          // front, so we never render the separate question div here.
+          <div className="review-twocol">
             <div
               ref={answerRef}
-              className="review-anki review-answer"
+              className="review-anki review-answer review-col-left"
               lang="ja"
-              dangerouslySetInnerHTML={{
-                __html: sanitizeAnkiHtml(card!.answer),
-              }}
+              dangerouslySetInnerHTML={{ __html: split.left }}
             />
-          </>
+            <div
+              className="review-anki review-context review-col-right"
+              lang="ja"
+              dangerouslySetInnerHTML={{ __html: split.right }}
+            />
+          </div>
+        ) : (
+          // ANSWER phase, one-column (default): the answer blob (contains front).
+          <div
+            ref={answerRef}
+            className="review-anki review-answer"
+            lang="ja"
+            dangerouslySetInnerHTML={{ __html: answerHtml }}
+          />
         )}
 
         {!revealed ? (
@@ -321,6 +518,9 @@ export function Review({ go }: { go: (h: string) => void }) {
             </button>
             <span className="muted review-replay-hint" title="Replay audio">
               <kbd>R</kbd> replay
+            </span>
+            <span className="muted review-delete-hint" title="Delete note from Anki">
+              <kbd>Del</kbd> delete
             </span>
           </div>
         )}

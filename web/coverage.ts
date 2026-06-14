@@ -111,7 +111,8 @@ export async function coverageOfCues(
       const key = wordKey(t);
       const isKnown =
         knownWords.has(key) ||
-        matchFront(wordIndex, t.surface_form, t.reading, t.basic_form) != null;
+        matchFront(wordIndex, t.surface_form, t.reading, t.basic_form, t.pos) !=
+          null;
       if (isKnown) known++;
       else {
         unknown.add(key);

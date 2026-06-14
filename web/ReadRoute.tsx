@@ -24,6 +24,8 @@ import {
   withoutFront,
   type WordIndex,
 } from "./progress.ts";
+import { refreshAnkiWords, subscribeAnkiWords } from "./ankicache.ts";
+import type { AnkiWordsResponse } from "./api.ts";
 import { getTokenizer, type KToken } from "./tokenizer.ts";
 import { accentOf, loadAccents } from "./accent.ts";
 import { readBlacklist, writeBlacklist } from "./blacklist.ts";
@@ -38,6 +40,7 @@ interface ReadPopup {
   y: number;
   surface: string;
   reading?: string;
+  pos?: string; // token 品詞 — POS-aware matchFront veto (popup/coloring agree)
   dictForm?: string;
   context: string;
   /** RU translation of the paragraph (mining context), if present */
@@ -150,34 +153,60 @@ export function ReadRoute({
     };
   }, [id]);
 
+  // Apply a deck payload to the popup/token saved-state, reconciling pending
+  // optimistic marks. Shared by the initial fetch AND the live subscription so
+  // a background revalidation (or a delete that happened in another view) can
+  // unstick a stale saved-state — getAnkiWords() resolves SYNCHRONOUSLY from a
+  // possibly-stale localStorage cache, so without this the popup would freeze
+  // on whatever the deck looked like at page-load time (e.g. a since-deleted
+  // word would keep its `saved` color forever). [Was a real e2e flake source.]
+  const applyDeck = useCallback((a: AnkiWordsResponse) => {
+    const fronts = new Set(a.words.map((w) => w.front));
+    for (const f of pendingFrontsRef.current) {
+      if (fronts.has(f)) pendingFrontsRef.current.delete(f); // confirmed
+      else fronts.add(f); // still pending — keep the optimistic mark
+    }
+    let idx = buildWordIndex(a.words, a.progress);
+    for (const f of pendingFrontsRef.current) idx = withFront(idx, f);
+    setWordIndex(idx);
+    deckCardsRef.current = new Map(a.words.map((w) => [w.front, w]));
+    setKnownFronts(fronts);
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     void getTokenizer()
       .then((tok) => !cancelled && setTokenize(() => (t: string) => tok.tokenize(t)))
       .catch(() => {});
+    // Subscribe BEFORE kicking off any fetch so a revalidation that resolves
+    // quickly can't fire its notify before we're listening (we'd miss it and
+    // freeze on stale cached data). Live updates: background revalidation and
+    // optimistic cache writes push fresh deck payloads here, so the popup's
+    // saved-state stays in sync with the real deck instead of freezing on the
+    // initial (possibly-stale localStorage) read.
+    const unsub = subscribeAnkiWords((a) => {
+      if (!cancelled) applyDeck(a);
+    });
+    // Seed from the (possibly stale) cache immediately for instant coloring,
+    // then FORCE a fresh network revalidation — refreshAnkiWords notifies on a
+    // 200, which our subscriber above reconciles into the saved-state. Without
+    // the forced refresh a getAnkiWords() cache hit would never re-validate
+    // unless something else triggered it.
     void api
       .ankiWords()
       .then((a) => {
-        if (cancelled) return;
-        const fronts = new Set(a.words.map((w) => w.front));
-        for (const f of pendingFrontsRef.current) {
-          if (fronts.has(f)) pendingFrontsRef.current.delete(f); // confirmed
-          else fronts.add(f); // still pending — keep the optimistic mark
-        }
-        let idx = buildWordIndex(a.words, a.progress);
-        for (const f of pendingFrontsRef.current) idx = withFront(idx, f);
-        setWordIndex(idx);
-        deckCardsRef.current = new Map(a.words.map((w) => [w.front, w]));
-        setKnownFronts(fronts);
+        if (!cancelled) applyDeck(a);
       })
       .catch(() => {});
+    void refreshAnkiWords().catch(() => {});
     void loadAccents()
       .then((m) => !cancelled && setAccents(m))
       .catch(() => {});
     return () => {
       cancelled = true;
+      unsub();
     };
-  }, []);
+  }, [applyDeck]);
 
   const toggleKnown = useCallback((key: string) => {
     setKnownWords((prev) => {
@@ -251,7 +280,13 @@ export function ReadRoute({
       setLookup(null);
       return;
     }
-    const matched = matchFront(wordIndex, popup.surface, popup.reading, popup.dictForm);
+    const matched = matchFront(
+      wordIndex,
+      popup.surface,
+      popup.reading,
+      popup.dictForm,
+      popup.pos,
+    );
     const deckCard = matched ? deckCardsRef.current.get(matched) : undefined;
     if (deckCard) {
       setLookup(deckCardToLookup(deckCard));
@@ -345,6 +380,11 @@ export function ReadRoute({
   const onWordClick = useCallback(
     (tok: KToken, e: React.MouseEvent, ctx: string, secondary?: string) => {
       e.stopPropagation();
+      // Revalidate the deck the moment a popup opens so its saved-state (and the
+      // `a` toggle's add-vs-remove decision) reflects the LIVE deck, not a stale
+      // localStorage snapshot from page-load time. The subscription above
+      // reconciles the notify into knownFronts/wordIndex.
+      void refreshAnkiWords().catch(() => {});
       const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
       // Y-clamp: flip the popup above the word when a below-word popup would
       // spill past the viewport bottom (e.g. words in a last/low paragraph).
@@ -354,6 +394,7 @@ export function ReadRoute({
         y: pos.y + window.scrollY,
         surface: tok.surface_form,
         reading: tok.reading,
+        pos: tok.pos,
         dictForm:
           tok.basic_form && tok.basic_form !== "*" && tok.basic_form !== tok.surface_form
             ? tok.basic_form
@@ -424,7 +465,13 @@ export function ReadRoute({
   const popupMatchedFront = useMemo(() => {
     if (!popup) return null;
     return (
-      matchFront(wordIndex, popup.surface, popup.reading, popup.dictForm) ??
+      matchFront(
+        wordIndex,
+        popup.surface,
+        popup.reading,
+        popup.dictForm,
+        popup.pos,
+      ) ??
       (popupFront && knownFronts.has(popupFront) ? popupFront : null)
     );
   }, [popup, wordIndex, knownFronts, popupFront]);

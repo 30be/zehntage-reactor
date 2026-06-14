@@ -71,12 +71,24 @@ export function withoutFront(idx: WordIndex, front: string): WordIndex {
  * card never claims 辛い read as つらい. Readingless fronts (sentence cards,
  * legacy bare lemmas) match on exact text. Falls back to the dictionary form
  * (basic_form) so conjugated tokens like 食べた still match a 食べる card —
- * the surface reading can't be checked against the dictionary form there. */
+ * the surface reading can't be checked against the dictionary form there.
+ *
+ * POS-aware homograph veto: the strict reading veto above protects genuine
+ * homographs — 辛い[からい] (spicy, 形容詞) vs 辛い[つらい] (painful, 形容詞)
+ * are different ADJECTIVES that MUST stay disjoint. But kuromoji also mis-tags
+ * the on/kun reading of a NOUN inside a compound (色 inside バラ色 comes out as
+ * 名詞/接尾 reading ショク, while the standalone word and its deck card are
+ * 名詞/一般 reading いろ — the SAME word). For a NON-inflecting token (名詞 or
+ * 接尾) where there is EXACTLY ONE bare card for the spelling, we accept that
+ * single card despite the reading mismatch (the reading is a kuromoji on/kun
+ * mis-tag, not a real homograph). NEVER for 形容詞/動詞: their readings ARE the
+ * word, so a single からい card must not claim a つらい token. */
 export function matchFront(
   idx: WordIndex,
   surface: string,
   reading?: string,
   basicForm?: string,
+  pos?: string,
 ): string | null {
   const hira = reading ? kataToHira(reading) : null;
   if (hira) {
@@ -90,6 +102,15 @@ export function matchFront(
     // no token reading to verify — accept any card for this bare word
     const cands = idx.bare.get(surface);
     if (cands && cands.length > 0) return cands[0]!.front;
+  } else if (pos === "名詞" || pos === "接尾") {
+    // POS gate: a NON-inflecting token (noun / suffix) whose reading didn't
+    // match any bracket above. If the deck has EXACTLY ONE card for this bare
+    // spelling, the reading mismatch is a kuromoji compound on/kun mis-tag
+    // (色 read ショク in バラ色 vs the いろ card) — accept it. With 2+ cards
+    // we can't tell which the token means, so stay vetoed. Adjectives/verbs
+    // never reach here (different readings ARE different words for them).
+    const cands = idx.bare.get(surface);
+    if (cands && cands.length === 1) return cands[0]!.front;
   }
   if (basicForm && basicForm !== "*" && basicForm !== surface) {
     if (hira) {

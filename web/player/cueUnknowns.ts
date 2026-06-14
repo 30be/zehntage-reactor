@@ -36,7 +36,10 @@ export function cueUnknownKeys(
     if (t.pos === "助詞" || t.pos === "助動詞") continue; // particles/aux
     const key = wordKey(t);
     if (sets.knownWords.has(key) || sets.blacklist.has(key)) continue;
-    if (matchFront(sets.wordIndex, t.surface_form, t.reading, t.basic_form) != null)
+    if (
+      matchFront(sets.wordIndex, t.surface_form, t.reading, t.basic_form, t.pos) !=
+      null
+    )
       continue;
     us.push(key);
   }

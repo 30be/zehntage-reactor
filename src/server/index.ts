@@ -61,10 +61,12 @@ import {
   storeMedia,
   retrieveMedia,
   bustListWordsCache,
+  fakeResetQueue,
 } from "../lib/anki.ts";
 import {
   reviewQueueAuto,
   answerCardAuto,
+  deleteNoteAuto,
   deckCountsAuto,
   reviewStatus,
 } from "../lib/review.ts";
@@ -1804,7 +1806,7 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         if (!body.word || !body.translation) return err("word and translation required", 400);
 
         // Context format (lines joined with <br>):
-        //   (1) JP sentence  (2) image  (3) RU sentence translation
+        //   (1) JP sentence  (2) RU sentence translation  (3) image
         //   (4) [sound:...]  (5) source "file @ mm:ss" LAST.
         // On the remote anki-mcp path the image travels via the `image`
         // param instead (the remote server controls its placement).
@@ -1870,8 +1872,8 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         }
         const context = [
           body.context ?? "",
-          imgLine,
           body.sentenceTranslation,
+          imgLine,
           soundLine,
           sourceLine,
         ]
@@ -2153,6 +2155,38 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         const res = await answerCardAuto(cardId, ease);
         // A recorded grade changes due state — refresh words/cards caches.
         if (res.ok) bustAnkiWordsCache();
+        return json({ ok: res.ok, error: res.error, reason: res.reason });
+      }
+
+      // --- TEST-ONLY: reset fake review queue (ANKI_FAKE=1 only) ---
+      // This endpoint exists ONLY in fake mode and is a no-op / 404 otherwise.
+      // It reseeds the in-memory review queue so each e2e spec starts from a
+      // known 2-card deck regardless of run order.
+      if (req.method === "POST" && path === "/api/test/reset-review-queue") {
+        if (process.env.ANKI_FAKE !== "1") {
+          return new Response("Not Found", { status: 404 });
+        }
+        fakeResetQueue();
+        return json({ ok: true });
+      }
+
+      if (req.method === "POST" && path === "/api/review/delete") {
+        // Same safety gate as /api/review/answer: constant-time token check
+        // when ZEHNTAGE_DB_TOKEN is set, open when unset.
+        const denied = await requireDbToken(req);
+        if (denied) return denied;
+        const body = (await req.json().catch(() => ({}))) as {
+          cardId?: unknown;
+        };
+        const cardId = body.cardId;
+        if (typeof cardId !== "number" || !Number.isFinite(cardId)) {
+          return err("cardId must be a number", 400);
+        }
+        // DESTRUCTIVE: deletes the note from Anki and records graves for sync.
+        const res = await deleteNoteAuto(cardId);
+        // A deleted note changes due state — refresh words/cards caches.
+        if (res.ok) bustAnkiWordsCache();
+        // Strip the internal `backend` field before sending to the client.
         return json({ ok: res.ok, error: res.error, reason: res.reason });
       }
 

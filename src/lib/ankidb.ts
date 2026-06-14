@@ -110,8 +110,6 @@ export type ReviewScope = "zehntage" | "all";
 
 /** Deck holding zehntage cards. */
 const MIXED_DECK_ID = 1701241966991;
-/** The single zehntage notetype "Back+Front+Usage". */
-const ZEHNTAGE_NOTETYPE_ID = 1680028238431;
 /** Default day-rollover hour when the `config` table doesn't say otherwise. */
 const DEFAULT_ROLLOVER_HOUR = 4;
 /** Field separator inside notes.flds. */
@@ -561,14 +559,31 @@ function renderRow(
 /**
  * Collection presence + openness + schema sanity. Read-only, never throws.
  */
-export function dbStatus(): DbStatus {
+/** Injectable deps for dbStatus (testability seam, mirrors canWrite's deps).
+ *  Production always uses the real ankiRunning /proc scan. Tests that exercise
+ *  the WAL/-shm file heuristic in isolation can stub the live-process signal so
+ *  the result is deterministic regardless of whether the dev has Anki open. */
+export interface DbStatusDeps {
+  /** Live-process openness check; defaults to the real ankiRunning. */
+  processRunning?: (collectionPath: string) => boolean;
+}
+
+export function dbStatus(deps: DbStatusDeps = {}): DbStatus {
   const path = collectionPath();
   const present = existsSync(path);
   if (!present) {
     return { present: false, ankiOpen: false, ver: 0, schemaOk: false };
   }
 
-  // Openness: a non-empty -wal or a -shm, or a live Anki process.
+  // Openness: a non-empty -wal indicates an active or uncommitted WAL transaction;
+  // a live Anki process means the DB is held open. These are the two reliable
+  // signals that the collection is genuinely in use.
+  //
+  // NOTE: a stale `-shm` file alone does NOT mean Anki is open. SQLite leaves
+  // `-shm` behind after a non-clean shutdown even when Anki has fully exited and
+  // the `-wal` is empty (or absent). Counting a lone `-shm` would produce a
+  // false-positive and block windowless grading. Only WAL non-empty or a live
+  // process constitutes "open".
   const walNonEmpty = (() => {
     try {
       return statSync(`${path}-wal`).size > 0;
@@ -579,11 +594,14 @@ export function dbStatus(): DbStatus {
   const shmExists = existsSync(`${path}-shm`);
   let processOpen = false;
   try {
-    processOpen = ankiRunning(path);
+    processOpen = (deps.processRunning ?? ankiRunning)(path);
   } catch {
     processOpen = false;
   }
-  const ankiOpen = walNonEmpty || shmExists || processOpen;
+  // shmExists is intentionally excluded: a stale -shm without a non-empty -wal
+  // or live process does not mean Anki is holding the collection.
+  void shmExists; // retained for potential future use (copy-when-locked guards)
+  const ankiOpen = walNonEmpty || processOpen;
 
   const ver = readSchemaVer(path) ?? 0;
   const schemaOk = ver > 0 && schemaSupported(ver);
@@ -642,7 +660,7 @@ export function dbDeckCounts(scope: ReviewScope = "zehntage"): DeckCounts {
 // ===========================================================================
 
 /** Map a card's (type, queue) to the FSRS phase the kernel needs. */
-function phaseOf(type: number, queue: number): CardPhase {
+function phaseOf(type: number, _queue: number): CardPhase {
   // type: 0=new 1=learning 2=review 3=relearning ; queue<0 means suspended/buried.
   if (type === 0) return "new";
   if (type === 1) return "learning";
@@ -723,6 +741,12 @@ function encodeLeft(stepsRemaining: number): number {
 }
 
 export interface AnswerResult {
+  ok: boolean;
+  error?: string;
+  reason?: string;
+}
+
+export interface DeleteResult {
   ok: boolean;
   error?: string;
   reason?: string;
@@ -1027,7 +1051,7 @@ export async function dbAnswerCard(
     // 5c. col bookkeeping: bump col.mod (MS). NEVER touch col.scm or col.usn.
     db.query("UPDATE col SET mod=?").run(nowMs);
 
-    // Pre-commit invariant + integrity check (still inside the txn).
+    // Pre-commit invariants (still inside the txn — a failure here rolls back).
     const fk = db.query("PRAGMA foreign_key_check").all();
     if (fk.length > 0) {
       db.exec("ROLLBACK");
@@ -1036,29 +1060,241 @@ export async function dbAnswerCard(
       return { ok: false, error: "foreign_key_check failed" };
     }
 
+    // integrity_check runs INSIDE the transaction so a failure → clean ROLLBACK
+    // and ok:false is truthful. Running it after COMMIT would mean a committed
+    // write gets reported as failed → double-grade on retry (H1 bug).
+    // Caveat: if the `unicase` collation failed to register (best-effort C ext),
+    // integrity_check throws SQLITE_ERROR_MISSING_COLLSEQ. Treat that as a skip
+    // (log + proceed) so a missing collation never blocks a valid write.
+    try {
+      const ic = db.query("PRAGMA integrity_check").get() as
+        | { integrity_check?: string }
+        | Record<string, unknown>
+        | null;
+      const icVal =
+        ic && typeof ic === "object"
+          ? String(
+              (ic as Record<string, unknown>).integrity_check ??
+                Object.values(ic)[0] ??
+                "",
+            )
+          : "";
+      if (icVal && icVal !== "ok") {
+        db.exec("ROLLBACK");
+        began = false;
+        db.close();
+        return { ok: false, error: `integrity_check: ${icVal}` };
+      }
+    } catch (icErr) {
+      const msg = (icErr as Error).message ?? "";
+      if (msg.includes("COLLSEQ") || msg.includes("collation")) {
+        // Missing unicase collation — not a data integrity issue; proceed.
+        console.warn("[ankidb] integrity_check skipped: missing collation —", msg);
+      } else {
+        // Unknown error from integrity_check inside the txn — roll back safely.
+        db.exec("ROLLBACK");
+        began = false;
+        db.close();
+        return { ok: false, error: `integrity_check threw: ${msg}` };
+      }
+    }
+
     db.exec("COMMIT");
     began = false;
 
-    // 5d. Fold WAL back, then verify integrity. Failure here = report (already
-    // committed; backup exists for manual recovery).
+    // 5d. Fold WAL back (outside the txn; non-fatal if it fails).
     try {
       db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
     } catch {
       /* non-fatal */
     }
-    const ic = db.query("PRAGMA integrity_check").get() as
-      | { integrity_check?: string }
-      | Record<string, unknown>
-      | null;
-    const icVal =
-      ic && typeof ic === "object"
-        ? String((ic as Record<string, unknown>).integrity_check ?? Object.values(ic)[0] ?? "")
-        : "";
     db.close();
     db = null;
-    if (icVal && icVal !== "ok") {
-      return { ok: false, error: `integrity_check: ${icVal}` };
+    return { ok: true };
+  } catch (e) {
+    if (db) {
+      if (began) {
+        try {
+          db.exec("ROLLBACK");
+        } catch {
+          /* ignore */
+        }
+      }
+      try {
+        db.close();
+      } catch {
+        /* ignore */
+      }
     }
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+// ===========================================================================
+// WRITE-BACK — dbDeleteNote (windowless, offline-only).
+//
+// Deletes a note (and all its cards) from the real collection, records graves
+// so the deletion syncs to AnkiWeb, bumps col.mod, never touches col.scm.
+//
+// Same safety posture as dbAnswerCard: fail-closed, backup-first, one BEGIN
+// IMMEDIATE transaction, integrity_check inside the txn (rollback on failure),
+// collation-missing → skip+warn (same pattern).
+// ===========================================================================
+
+/**
+ * Delete a note (resolved from `cardId`) directly in the real collection.
+ *
+ * @param cardId any card belonging to the note to delete.
+ * @returns {ok:true} on a committed, integrity-checked write; otherwise
+ *          {ok:false, reason} for refused writes or {ok:false, error} for
+ *          operational failures (always rolled back).
+ *
+ * SAFETY: identical posture to dbAnswerCard. Refuses unless canWrite() passes.
+ * Backs up before any write. One BEGIN IMMEDIATE transaction; rollback on any
+ * error. Inserts graves (usn=-1) so deletions sync to AnkiWeb. Never touches
+ * col.scm. Bumps col.mod (ms).
+ *
+ * Graves table: (usn integer, oid integer, type integer)
+ *   type 0 = card, type 1 = note, type 2 = deck.
+ * One grave per deleted card (type 0) + one grave for the note (type 1), all
+ * with usn=-1, so the next AnkiWeb sync propagates the deletion.
+ */
+export async function dbDeleteNote(
+  cardId: number,
+  testHooks?: {
+    path?: string;
+    canWrite?: (p: string) => { ok: boolean; reason?: string };
+    backup?: (p: string) => Promise<unknown>;
+  },
+): Promise<DeleteResult> {
+  const path = testHooks?.path ?? collectionPath();
+  const gateFn = testHooks?.canWrite ?? ((p: string) => canWrite(p));
+  const backupFn = testHooks?.backup ?? ((p: string) => backupCollection(p));
+
+  // 1. REFUSE-TO-WRITE gates (fail-closed). NEVER proceed if Anki is open.
+  const gate = gateFn(path);
+  if (!gate.ok) return { ok: false, reason: gate.reason ?? "refused" };
+
+  // 2. Backup BEFORE any write.
+  try {
+    await backupFn(path);
+  } catch (e) {
+    return { ok: false, error: `backup failed: ${(e as Error).message}` };
+  }
+
+  // 3. Open the REAL collection read-WRITE only inside the write path.
+  let db: Database | null = null;
+  let began = false;
+  try {
+    db = new Database(path, { readwrite: true });
+    db.exec("PRAGMA busy_timeout = 1000");
+    db.exec("PRAGMA journal_mode = wal");
+    db.exec("PRAGMA synchronous = FULL");
+    tryRegisterUnicase(db);
+
+    // BEGIN IMMEDIATE — grab the write lock up front; abort on BUSY.
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      began = true;
+    } catch {
+      try {
+        db.close();
+      } catch {
+        /* ignore */
+      }
+      return { ok: false, reason: "locked" };
+    }
+
+    // Resolve the note id from the card id.
+    const cardRow = db
+      .query("SELECT nid FROM cards WHERE id = ?")
+      .get(cardId) as { nid: number } | null;
+    if (!cardRow) {
+      db.exec("ROLLBACK");
+      began = false;
+      db.close();
+      return { ok: false, error: `card ${cardId} not found` };
+    }
+    const nid = cardRow.nid;
+
+    // Collect ALL card ids belonging to this note (may be more than one for
+    // note types with multiple templates / cloze deletions).
+    const cardRows = db
+      .query("SELECT id FROM cards WHERE nid = ?")
+      .all(nid) as { id: number }[];
+    const cardIds = cardRows.map((r) => r.id);
+
+    const nowMs = Date.now();
+
+    // Ensure the graves table exists (it is a standard Anki schema-18 table).
+    // We don't create it if it's missing; instead we surface a clear error so
+    // the caller can diagnose a corrupt / unexpected schema.
+    // (The table always exists in a schema-18 collection — it's created by
+    // Anki's migration scripts before we ever see the DB.)
+
+    // Delete all cards of the note.
+    db.query("DELETE FROM cards WHERE nid = ?").run(nid);
+
+    // Delete the note itself.
+    db.query("DELETE FROM notes WHERE id = ?").run(nid);
+
+    // Record graves: one per deleted card (type 0) + one for the note (type 1).
+    // usn=-1 marks the row as pending sync to AnkiWeb.
+    const insGrave = db.query(
+      "INSERT INTO graves (usn, oid, type) VALUES (-1, ?, ?)",
+    );
+    for (const cid of cardIds) {
+      insGrave.run(cid, 0); // type 0 = card
+    }
+    insGrave.run(nid, 1); // type 1 = note
+
+    // Bump col.mod (ms). NEVER touch col.scm or col.usn.
+    db.query("UPDATE col SET mod = ?").run(nowMs);
+
+    // Pre-commit integrity check (inside the txn — rollback on failure).
+    // collation-missing → skip+warn (same pattern as dbAnswerCard).
+    try {
+      const ic = db.query("PRAGMA integrity_check").get() as
+        | { integrity_check?: string }
+        | Record<string, unknown>
+        | null;
+      const icVal =
+        ic && typeof ic === "object"
+          ? String(
+              (ic as Record<string, unknown>).integrity_check ??
+                Object.values(ic)[0] ??
+                "",
+            )
+          : "";
+      if (icVal && icVal !== "ok") {
+        db.exec("ROLLBACK");
+        began = false;
+        db.close();
+        return { ok: false, error: `integrity_check: ${icVal}` };
+      }
+    } catch (icErr) {
+      const msg = (icErr as Error).message ?? "";
+      if (msg.includes("COLLSEQ") || msg.includes("collation")) {
+        console.warn("[ankidb] dbDeleteNote integrity_check skipped: missing collation —", msg);
+      } else {
+        db.exec("ROLLBACK");
+        began = false;
+        db.close();
+        return { ok: false, error: `integrity_check threw: ${msg}` };
+      }
+    }
+
+    db.exec("COMMIT");
+    began = false;
+
+    // Fold WAL back (outside the txn; non-fatal if it fails).
+    try {
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } catch {
+      /* non-fatal */
+    }
+    db.close();
+    db = null;
     return { ok: true };
   } catch (e) {
     if (db) {

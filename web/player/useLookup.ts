@@ -93,6 +93,7 @@ export function useLookup(opts: {
       popup.surface,
       popup.reading,
       popup.dictForm,
+      popup.pos,
     );
     const deckCard = matched ? deckCardsRef.current.get(matched) : undefined;
     if (deckCard) {
@@ -189,7 +190,13 @@ export function useLookup(opts: {
     if (popup.kind === "sentence")
       return knownFronts.has(popup.surface) ? popup.surface : null;
     return (
-      matchFront(wordIndex, popup.surface, popup.reading, popup.dictForm) ??
+      matchFront(
+        wordIndex,
+        popup.surface,
+        popup.reading,
+        popup.dictForm,
+        popup.pos,
+      ) ??
       (popupFront && knownFronts.has(popupFront) ? popupFront : null)
     );
   }, [popup, wordIndex, knownFronts, popupFront]);

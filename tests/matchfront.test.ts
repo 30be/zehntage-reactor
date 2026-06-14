@@ -233,6 +233,75 @@ describe("matchFront — null cases", () => {
 });
 
 // ---------------------------------------------------------------------------
+// matchFront — POS-aware single-card noun fallback (kuromoji on/kun mis-tag)
+//
+// kuromoji reads 色 inside バラ色 as 名詞/接尾 with reading ショク, while the
+// standalone word and its deck card are いろ. They are the SAME word — the
+// reading is a compound on/kun mis-tag, not a homograph. So a single-card NOUN
+// must match despite the reading mismatch. The strict veto MUST remain for
+// inflecting POS: 辛い[からい] (形容詞) vs 辛い[つらい] (形容詞) are different
+// words and a lone からい card must never claim a つらい token.
+// ---------------------------------------------------------------------------
+
+describe("matchFront — POS-aware single-card noun fallback", () => {
+  test("noun mis-read (色 as しょく) matches its single いろ card", () => {
+    const i = idx(["色 [いろ]"]);
+    // The exact-bracket lookup misses (しょく ≠ いろ), but 名詞 + exactly one
+    // card → accept the kuromoji on/kun mis-tag.
+    expect(matchFront(i, "色", "しょく", undefined, "名詞")).toBe("色 [いろ]");
+  });
+
+  test("suffix-tagged noun mis-read (接尾) also matches its single card", () => {
+    const i = idx(["色 [いろ]"]);
+    // kuromoji tags 色 inside バラ色 as 名詞/接尾 — pos may surface as 接尾.
+    expect(matchFront(i, "色", "しょく", undefined, "接尾")).toBe("色 [いろ]");
+  });
+
+  test("correct noun reading still matches via the exact bracket", () => {
+    const i = idx(["色 [いろ]"]);
+    expect(matchFront(i, "色", "いろ", undefined, "名詞")).toBe("色 [いろ]");
+  });
+
+  test("ADJECTIVE veto preserved: 辛い read つらい, only からい carded → null", () => {
+    const i = idx(["辛い [からい]"]);
+    // 形容詞 inflects — its readings ARE different words. Single-card fallback
+    // must NOT fire here.
+    expect(matchFront(i, "辛い", "つらい", undefined, "形容詞")).toBeNull();
+  });
+
+  test("VERB veto preserved: single-card verb with wrong reading → null", () => {
+    const i = idx(["行く [いく]"]);
+    expect(matchFront(i, "行く", "おこなう", undefined, "動詞")).toBeNull();
+  });
+
+  test("no POS given → no noun fallback (strict veto, legacy behavior)", () => {
+    const i = idx(["色 [いろ]"]);
+    expect(matchFront(i, "色", "しょく")).toBeNull();
+  });
+
+  test("2-card noun homograph stays vetoed (ambiguous → no guess)", () => {
+    // Two genuinely different noun readings carded. A mis-read token can't be
+    // safely assigned to either, so the fallback (length === 1) does NOT fire.
+    const i = idx(["方 [かた]", "方 [ほう]"]);
+    // token read as some third/wrong reading → null (not a wrong guess)
+    expect(matchFront(i, "方", "がた", undefined, "名詞")).toBeNull();
+    // and the reading-correct token still resolves precisely via the bracket
+    expect(matchFront(i, "方", "かた", undefined, "名詞")).toBe("方 [かた]");
+    expect(matchFront(i, "方", "ほう", undefined, "名詞")).toBe("方 [ほう]");
+  });
+
+  test("noun fallback path is irrelevant for a bracketless card", () => {
+    // A bracketless card matches by EXACT surface text (existing behavior),
+    // before the reading veto / noun-fallback ever run — it is not in .bare.
+    const i = idx(["色"]);
+    expect(matchFront(i, "色", "しょく", undefined, "名詞")).toBe("色");
+    // A different noun spelling with a wrong reading still has nothing to match.
+    const j = idx(["猫"]);
+    expect(matchFront(j, "色", "しょく", undefined, "名詞")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // progressBucket
 // ---------------------------------------------------------------------------
 

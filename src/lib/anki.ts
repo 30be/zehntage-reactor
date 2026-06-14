@@ -90,11 +90,16 @@ function fakeQueueEnsure(): ReviewCard[] {
   return fakeQueue;
 }
 
-/** Reset the fake review queue + recorded answers (e2e seeding helper). */
+/** Reset the fake review queue + recorded answers (e2e seeding helper).
+ *  Also clears any cards mined by other specs (fakeCards), so the queue
+ *  rebuilds from the fixed 2-card seed (勉強, 図書館) regardless of run order
+ *  — otherwise a mining spec (e.g. wave12 adding 学校) would leave its card at
+ *  the head of the re-seeded queue and break the review specs' FRONT_1 head. */
 export function fakeResetQueue(): void {
   if (!ankiFake()) return;
   fakeQueue = null;
   fakeAnswers.clear();
+  fakeCards.clear();
 }
 
 /** Recorded grades so far (cardId → ease). e2e inspection only. */
@@ -447,7 +452,21 @@ export async function reviewQueue(
   }
   try {
     const fm = await acFieldMap();
-    const query = scope === "zehntage" ? "tag:zehntage is:due" : "is:due";
+    // scope="all" mirrors the DB-direct definition: due cards in the Mixed deck
+    // only. A bare `is:due` would include every deck the user has, diverging from
+    // ankidb.ts which filters on MIXED_DECK_ID.
+    //
+    // NOTE: new-card-cap divergence — ankidb.ts applies the deck's newPerDay cap
+    // (selectNewCapped). AnkiConnect's `is:due` already reflects Anki's built-in
+    // cap for review/learn queues but the new-card daily limit is enforced by
+    // the scheduler, not by findCards — so `deck:Mixed is:due` here may return
+    // more new cards than Anki would actually show in a session. Acceptable for a
+    // cram client; re-applying the cap would require a separate cardsInfo pass to
+    // count today's reviews and subtract — not done here.
+    const query =
+      scope === "zehntage"
+        ? `tag:zehntage is:due`
+        : `deck:${AC_DECK} is:due`;
     const ids = await acRaw<number[]>("findCards", { query });
     const due = ids.length;
     if (due === 0) return { available: true, due: 0, cards: [] };
@@ -511,6 +530,47 @@ export async function answerCard(
     if (Array.isArray(res) && res[0] === false) {
       return { ok: false, error: "card not in review queue" };
     }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Delete the note that owns `cardId` via AnkiConnect.
+ *
+ * Maps the card id to its note id using `cardsToNotes`, then deletes the note
+ * with `deleteNotes`. Returns {ok:true} on success, {ok:false, error} on any
+ * failure (AnkiConnect unreachable, card not found, etc.).
+ *
+ * In fake mode (ANKI_FAKE=1): removes the card from the fake queue so the UI
+ * advances past it, and returns {ok:true}. The fake map is keyed by `front`
+ * which we don't have here, so we only drain the queue entry.
+ */
+export async function deleteNote(
+  cardId: number,
+): Promise<{ ok: boolean; error?: string }> {
+  if (ankiFake()) {
+    // Remove from the fake queue (the note-map keyed by front is not touched —
+    // acceptable for tests; the card just disappears from the review session).
+    if (fakeQueue) {
+      const idx = fakeQueue.findIndex((c) => c.cardId === cardId);
+      if (idx >= 0) fakeQueue.splice(idx, 1);
+    }
+    bustListWordsCache();
+    return { ok: true };
+  }
+  if (!(await ankiLocalAvailable())) {
+    return { ok: false, error: "AnkiConnect not available" };
+  }
+  try {
+    // cardsToNotes: { cards: number[] } → number[] (note ids, parallel to cards)
+    const noteIds = await acRaw<number[]>("cardsToNotes", { cards: [cardId] });
+    if (!Array.isArray(noteIds) || noteIds.length === 0 || noteIds[0] == null) {
+      return { ok: false, error: `no note found for card ${cardId}` };
+    }
+    await acRaw("deleteNotes", { notes: [noteIds[0]] });
+    bustListWordsCache();
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };

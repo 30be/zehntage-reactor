@@ -88,8 +88,22 @@ describe("busyProbeLocked temp-only guard (fix #2)", () => {
 });
 
 describe("collectionLocked", () => {
-  test("detects a -shm (live WAL connection) even with empty -wal — fix #3", async () => {
+  // FIX 1: a stale -shm + empty -wal (left behind after clean Anki exit) must NOT
+  // be treated as locked. Only a non-empty -wal or live process is authoritative.
+  test("stale -shm + empty -wal => NOT locked (post-fix behaviour)", async () => {
     await writeFile(`${col}-wal`, ""); // empty -wal (truncate-checkpointed)
+    await writeFile(`${col}-shm`, "shm-index-bytes"); // stale sidecar
+    expect(collectionLocked(col)).toBe(false);
+  });
+
+  test("stale -shm with no -wal at all => NOT locked", async () => {
+    // The -wal file is completely absent; only the -shm lingers.
+    await writeFile(`${col}-shm`, "shm-index-bytes");
+    expect(collectionLocked(col)).toBe(false);
+  });
+
+  test("-shm + non-empty -wal => locked (WAL has uncheckpointed data)", async () => {
+    await writeFile(`${col}-wal`, "uncheckpointed-frames");
     await writeFile(`${col}-shm`, "shm-index-bytes");
     expect(collectionLocked(col)).toBe(true);
   });

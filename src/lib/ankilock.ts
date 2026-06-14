@@ -125,17 +125,23 @@ export function ankiRunning(collectionPath?: string): boolean {
 
   if (scanned) return false;
 
-  // Fallback: pgrep anki (best-effort, never throws).
-  try {
-    const out = execFileSync("pgrep", ["-i", "-f", "anki"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    return out.split("\n").some((line) => line.trim() && line.trim() !== self);
-  } catch {
-    // pgrep exit 1 = no match.
-    return false;
+  // Fallback (non-Linux / /proc unreadable): use pgrep with an exact process-name
+  // match rather than the loose `-f` substring search. `-i -f anki` is too broad:
+  // it matches editors, grep invocations, and unrelated bun workers whose cmdline
+  // happens to contain "anki". Instead check for the native binary name ("anki")
+  // and the flatpak app-id ("net.ankiweb.Anki") by exact comm match.
+  for (const name of ["anki", "net.ankiweb.Anki"]) {
+    try {
+      const out = execFileSync("pgrep", ["-x", "-i", name], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      if (out.split("\n").some((line) => line.trim() && line.trim() !== self)) return true;
+    } catch {
+      // pgrep exit 1 = no match for this name; continue.
+    }
   }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -240,10 +246,11 @@ export function collectionLocked(
   opts: { probe?: boolean } = {},
 ): boolean {
   if (fileNonEmpty(`${collectionPath}-wal`)) return true;
-  // A -shm present at all implies a live WAL-mode connection (e.g. Anki open
-  // and idle after a truncate-checkpoint, which can leave -wal empty). Treat
-  // its mere existence as locked — fail-closed.
-  if (existsSync(`${collectionPath}-shm`)) return true;
+  // A lone -shm with an empty (or absent) -wal is a stale sidecar left behind
+  // after a clean Anki exit. It does NOT mean a live connection holds the DB.
+  // We treat -shm as a lock signal ONLY when combined with a non-empty -wal
+  // (already caught above) or a live Anki process (checked separately by the
+  // caller via ankiRunning). Drop bare -shm-exists as a lock signal.
   // A rollback journal is "hot" if it exists with non-zero size.
   if (existsSync(`${collectionPath}-journal`) && fileNonEmpty(`${collectionPath}-journal`)) {
     return true;

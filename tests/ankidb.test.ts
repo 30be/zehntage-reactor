@@ -17,6 +17,7 @@ import { join } from "node:path";
 import {
   collectionPath,
   dbAnswerCard,
+  dbDeleteNote,
   dbDeckCounts,
   dbReviewQueue,
   dbStatus,
@@ -422,5 +423,324 @@ describe("ankidb.dbAnswerCard (temp copy only)", () => {
     expect(r.ok).toBe(false);
     expect(r.reason).toBe("anki-open");
     expect(readRevlog(path).length).toBe(0);
+  });
+});
+
+// ===========================================================================
+// dbStatus ankiOpen heuristic — stale -shm must NOT trigger "open"
+//
+// All assertions run against a temp dir; the real collection is never read.
+// We use the ZEHNTAGE_ANKI_DB env override so dbStatus() points at our fake DB.
+// ===========================================================================
+describe("dbStatus ankiOpen heuristic (temp dir)", () => {
+  let dir: string;
+  let fakePath: string;
+  let savedEnv: string | undefined;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "zr-status-test-"));
+    fakePath = join(dir, "collection.anki2");
+    savedEnv = process.env.ZEHNTAGE_ANKI_DB;
+    process.env.ZEHNTAGE_ANKI_DB = fakePath;
+
+    // Create a minimal valid SQLite collection so dbStatus can read schemaVer.
+    const db = new Database(fakePath, { create: true });
+    db.exec("PRAGMA journal_mode = wal");
+    db.exec(`CREATE TABLE col (
+      id integer primary key, crt integer, mod integer, scm integer,
+      ver integer, dty integer, usn integer, ls integer,
+      conf text, models text, decks text, dconf text, tags text)`);
+    db.query(
+      "INSERT INTO col (id,crt,mod,scm,ver,dty,usn,ls,conf,models,decks,dconf,tags) VALUES (1,0,0,0,18,0,0,0,'{}','{}','{}','{}','{}')",
+    ).run();
+    db.close();
+
+    // After closing, remove the -wal and -shm SQLite may have left so each test
+    // starts from a known baseline and can plant its own auxiliary files.
+    const { unlinkSync: ul, existsSync: eS2 } = require("node:fs") as typeof import("node:fs");
+    if (eS2(`${fakePath}-wal`)) ul(`${fakePath}-wal`);
+    if (eS2(`${fakePath}-shm`)) ul(`${fakePath}-shm`);
+  });
+
+  afterEach(() => {
+    if (savedEnv === undefined) {
+      delete process.env.ZEHNTAGE_ANKI_DB;
+    } else {
+      process.env.ZEHNTAGE_ANKI_DB = savedEnv;
+    }
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+
+  test("lone stale -shm with empty -wal → ankiOpen=false", () => {
+    const walPath = `${fakePath}-wal`;
+    const shmPath = `${fakePath}-shm`;
+
+    // Ensure -wal is absent or zero bytes.
+    try {
+      const { writeFileSync } = require("node:fs") as typeof import("node:fs");
+      writeFileSync(walPath, new Uint8Array(0));
+    } catch {
+      // If it doesn't exist that's also fine — statSync will throw → walNonEmpty=false
+    }
+
+    // Place a 32768-byte -shm (same size as a real stale SQLite shm file).
+    const { writeFileSync } = require("node:fs") as typeof import("node:fs");
+    writeFileSync(shmPath, new Uint8Array(32768));
+
+    // Stub the live-process check so we test PURELY the WAL/-shm file heuristic,
+    // deterministically, even when the dev machine has a real Anki running.
+    const s = dbStatus({ processRunning: () => false });
+    expect(s.present).toBe(true);
+    // The key assertion: stale -shm alone must NOT set ankiOpen.
+    expect(s.ankiOpen).toBe(false);
+  });
+
+  test("non-empty -wal → ankiOpen=true regardless of -shm", () => {
+    const walPath = `${fakePath}-wal`;
+    const { writeFileSync } = require("node:fs") as typeof import("node:fs");
+    // Write 512 bytes of non-zero data to simulate a live WAL.
+    writeFileSync(walPath, new Uint8Array(512).fill(0xaa));
+
+    // processRunning stubbed false so the truthy ankiOpen here is attributable
+    // SOLELY to the non-empty WAL (the signal under test), not a live process.
+    const s = dbStatus({ processRunning: () => false });
+    expect(s.present).toBe(true);
+    expect(s.ankiOpen).toBe(true);
+  });
+
+  test("absent -wal and absent -shm → ankiOpen=false", () => {
+    // Remove both auxiliary files entirely.
+    const { unlinkSync, existsSync: eS } = require("node:fs") as typeof import("node:fs");
+    if (eS(`${fakePath}-wal`)) unlinkSync(`${fakePath}-wal`);
+    if (eS(`${fakePath}-shm`)) unlinkSync(`${fakePath}-shm`);
+
+    // Stub the live-process check: with no -wal/-shm and no live Anki, the DB is
+    // closed. (Tested deterministically regardless of the dev's running Anki.)
+    const s = dbStatus({ processRunning: () => false });
+    expect(s.present).toBe(true);
+    expect(s.ankiOpen).toBe(false);
+  });
+});
+
+// ===========================================================================
+// dbDeleteNote tests — all against a TEMP COPY of a synthetic schema-18
+// collection. The user's real collection is NEVER opened or referenced.
+// ===========================================================================
+
+/** Build a synthetic schema-18 collection with notes + graves tables.
+ *  Seeds one note (nid=201, flds="word\x1ftranslation") and one card (id=101, nid=201).
+ *  An optional second card (id=102, nid=201) is added when twoCards=true so
+ *  multi-card-per-note deletion can be tested. */
+function makeSyntheticCollectionWithNotes(opts: {
+  twoCards?: boolean;
+} = {}): { dir: string; path: string } {
+  const dir = mkdtempSync(join(tmpdir(), "zr-deltest-"));
+  const path = join(dir, "collection.anki2");
+  const db = new Database(path, { create: true });
+  db.exec("PRAGMA journal_mode = wal");
+  db.exec(`CREATE TABLE col (
+    id integer primary key, crt integer, mod integer, scm integer,
+    ver integer, dty integer, usn integer, ls integer,
+    conf text, models text, decks text, dconf text, tags text)`);
+  db.exec(`CREATE TABLE notes (
+    id integer primary key, guid text, mid integer, mod integer,
+    usn integer, tags text, flds text, sfld text, csum integer, flags integer, data text)`);
+  db.exec(`CREATE TABLE cards (
+    id integer primary key, nid integer, did integer, ord integer,
+    mod integer, usn integer, type integer, queue integer, due integer,
+    ivl integer, factor integer, reps integer, lapses integer, left integer,
+    odue integer, odid integer, flags integer, data text)`);
+  db.exec(`CREATE TABLE revlog (
+    id integer primary key, cid integer, usn integer, ease integer,
+    ivl integer, lastIvl integer, factor integer, time integer, type integer)`);
+  db.exec(`CREATE TABLE graves (usn integer, oid integer, type integer)`);
+  db.exec(`CREATE TABLE deck_config (
+    id integer primary key, name text, mtime_secs integer, usn integer, config blob)`);
+  db.exec(`CREATE TABLE config (key text primary key, usn integer, mtime_secs integer, val blob)`);
+
+  db.query(
+    "INSERT INTO col (id, crt, mod, scm, ver, dty, usn, ls, conf, models, decks, dconf, tags) VALUES (1,?,1000000,99999999999,18,0,0,0,'{}','{}','{}','{}','{}')",
+  ).run(CRT);
+  db.query(
+    "INSERT INTO deck_config (id, name, mtime_secs, usn, config) VALUES (1,'Default',0,0,?)",
+  ).run(deckConfigBlob());
+  db.query("INSERT INTO config (key, usn, mtime_secs, val) VALUES ('rollover',0,0,?)").run(
+    new TextEncoder().encode("3"),
+  );
+  // Insert one note.
+  db.query(
+    `INSERT INTO notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data)
+     VALUES (201, 'abc', 1234567890, 0, 0, ' zehntage ', 'word\x1ftranslation', 'word', 0, 0, '')`,
+  ).run();
+  // Insert card 101.
+  db.query(
+    `INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl,
+       factor, reps, lapses, left, odue, odid, flags, data)
+     VALUES (101, 201, 1, 0, 0, 0, 2, 2, 100, 18, 2500, 5, 0, 0, 0, 0, 0, '{}')`,
+  ).run();
+  if (opts.twoCards) {
+    // Second card for the same note (e.g. cloze template 1).
+    db.query(
+      `INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl,
+         factor, reps, lapses, left, odue, odid, flags, data)
+       VALUES (102, 201, 1, 1, 0, 0, 2, 2, 100, 14, 2500, 3, 0, 0, 0, 0, 0, '{}')`,
+    ).run();
+  }
+  db.close();
+  return { dir, path };
+}
+
+describe("ankidb.dbDeleteNote (temp copy only)", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) {
+      try {
+        rmSync(d, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  });
+
+  function readCards(path: string) {
+    const db = new Database(path, { readonly: true });
+    const rows = db.query("SELECT id, nid FROM cards").all() as { id: number; nid: number }[];
+    db.close();
+    return rows;
+  }
+  function readNotes(path: string) {
+    const db = new Database(path, { readonly: true });
+    const rows = db.query("SELECT id FROM notes").all() as { id: number }[];
+    db.close();
+    return rows;
+  }
+  function readGraves(path: string) {
+    const db = new Database(path, { readonly: true });
+    const rows = db.query("SELECT usn, oid, type FROM graves ORDER BY oid").all() as {
+      usn: number;
+      oid: number;
+      type: number;
+    }[];
+    db.close();
+    return rows;
+  }
+  function readCol(path: string) {
+    const db = new Database(path, { readonly: true });
+    const c = db.query("SELECT mod, scm FROM col LIMIT 1").get() as { mod: number; scm: number };
+    db.close();
+    return c;
+  }
+
+  test("deletes card + note rows, inserts correct graves (usn=-1), bumps col.mod, col.scm unchanged", async () => {
+    const { dir, path } = makeSyntheticCollectionWithNotes();
+    dirs.push(dir);
+    const colBefore = readCol(path);
+    const scmBefore = colBefore.scm;
+
+    const r = await dbDeleteNote(101, { path, canWrite: passGate, backup: noopBackup });
+    expect(r.ok).toBe(true);
+
+    // card and note rows must be gone.
+    expect(readCards(path)).toHaveLength(0);
+    expect(readNotes(path)).toHaveLength(0);
+
+    // graves: one for card (type 0), one for note (type 1), all usn=-1.
+    const graves = readGraves(path);
+    expect(graves.length).toBe(2);
+    const cardGrave = graves.find((g) => g.type === 0);
+    const noteGrave = graves.find((g) => g.type === 1);
+    expect(cardGrave).toBeDefined();
+    expect(cardGrave!.oid).toBe(101); // card id
+    expect(cardGrave!.usn).toBe(-1);
+    expect(noteGrave).toBeDefined();
+    expect(noteGrave!.oid).toBe(201); // note id
+    expect(noteGrave!.usn).toBe(-1);
+
+    // col.scm must NEVER be touched.
+    const colAfter = readCol(path);
+    expect(colAfter.scm).toBe(scmBefore);
+    // col.mod must be bumped (> 1000000 which was the seed value).
+    expect(colAfter.mod).toBeGreaterThan(1000000);
+
+    // integrity check on the modified file.
+    const db = new Database(path, { readonly: true });
+    const ic = db.query("PRAGMA integrity_check").get() as Record<string, unknown>;
+    db.close();
+    expect(Object.values(ic)[0]).toBe("ok");
+  });
+
+  test("multi-card note: all cards deleted, graves for each card + the note", async () => {
+    const { dir, path } = makeSyntheticCollectionWithNotes({ twoCards: true });
+    dirs.push(dir);
+
+    // resolve via either card id.
+    const r = await dbDeleteNote(101, { path, canWrite: passGate, backup: noopBackup });
+    expect(r.ok).toBe(true);
+
+    expect(readCards(path)).toHaveLength(0);
+    expect(readNotes(path)).toHaveLength(0);
+
+    const graves = readGraves(path);
+    // 2 card graves (type 0) + 1 note grave (type 1) = 3.
+    expect(graves.length).toBe(3);
+    const cardGraves = graves.filter((g) => g.type === 0);
+    const noteGraves = graves.filter((g) => g.type === 1);
+    expect(cardGraves.length).toBe(2);
+    expect(noteGraves.length).toBe(1);
+    expect(cardGraves.every((g) => g.usn === -1)).toBe(true);
+    expect(noteGraves[0]!.usn).toBe(-1);
+    // Both card ids are in the graves.
+    const cardGraveOids = new Set(cardGraves.map((g) => g.oid));
+    expect(cardGraveOids.has(101)).toBe(true);
+    expect(cardGraveOids.has(102)).toBe(true);
+  });
+
+  test("REFUSES when write gate fails — DB is untouched", async () => {
+    const { dir, path } = makeSyntheticCollectionWithNotes();
+    dirs.push(dir);
+
+    const r = await dbDeleteNote(101, {
+      path,
+      canWrite: () => ({ ok: false, reason: "anki-open" }),
+      backup: noopBackup,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("anki-open");
+
+    // Real file must be untouched.
+    expect(readCards(path)).toHaveLength(1);
+    expect(readNotes(path)).toHaveLength(1);
+    expect(readGraves(path)).toHaveLength(0);
+  });
+
+  test("returns ok:false for a nonexistent cardId (no graves, no changes)", async () => {
+    const { dir, path } = makeSyntheticCollectionWithNotes();
+    dirs.push(dir);
+
+    const r = await dbDeleteNote(9999, { path, canWrite: passGate, backup: noopBackup });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/9999/);
+
+    expect(readCards(path)).toHaveLength(1); // original card still there
+    expect(readGraves(path)).toHaveLength(0);
+  });
+
+  test("real file untouched after a refused write (gate fails)", async () => {
+    const { dir, path } = makeSyntheticCollectionWithNotes();
+    dirs.push(dir);
+    const colBefore = readCol(path);
+
+    await dbDeleteNote(101, {
+      path,
+      canWrite: () => ({ ok: false, reason: "locked" }),
+      backup: noopBackup,
+    });
+
+    // col.mod must be UNCHANGED (no write occurred).
+    expect(readCol(path).mod).toBe(colBefore.mod);
   });
 });

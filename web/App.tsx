@@ -245,7 +245,7 @@ export function App() {
         {route.name === "stats" && <Stats go={go} />}
         {route.name === "search" && <Search go={go} />}
         {route.name === "cards" && <Cards go={go} toast={toast} />}
-        {route.name === "review" && <Review go={go} />}
+        {route.name === "review" && <Review go={go} toast={toast} />}
         {route.name === "health" && <HealthRoute />}
         {route.name === "settings" && (
           <Settings settings={settings} setSettings={setSettings} toast={toast} />

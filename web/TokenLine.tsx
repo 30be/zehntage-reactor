@@ -111,7 +111,13 @@ function TokenLineInner({
         // marked known. Blacklist still forces plain.
         const front = blacklisted
           ? null
-          : matchFront(wordIndex, tok.surface_form, tok.reading, tok.basic_form);
+          : matchFront(
+              wordIndex,
+              tok.surface_form,
+              tok.reading,
+              tok.basic_form,
+              tok.pos,
+            );
         const inDeck = front != null;
         const localKnown = !inDeck && (knownWords.has(key) || blacklisted);
         const color = inDeck ? learningColor(wordIndex.progress[front!]) : null;

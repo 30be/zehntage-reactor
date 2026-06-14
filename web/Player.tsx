@@ -341,6 +341,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
             tk.surface_form,
             tk.reading,
             tk.basic_form,
+            tk.pos,
           ) != null
         )
           continue;
@@ -747,7 +748,13 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           for (const t of tokenizeCue(tok, displayCues[i]!.text)) {
             if (!isLexical(t)) continue;
             if (t.pos === "助詞" || t.pos === "助動詞") continue;
-            const front = matchFront(idx, t.surface_form, t.reading, t.basic_form);
+            const front = matchFront(
+              idx,
+              t.surface_form,
+              t.reading,
+              t.basic_form,
+              t.pos,
+            );
             if (front == null) continue;
             if (idx.progress[front]?.isDue === true) {
               due = true;
@@ -1229,6 +1236,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         kind: "word",
         surface,
         reading: tok.reading,
+        pos: tok.pos,
         x: rect.left + rect.width / 2,
         y: rect.top,
         anchorBottom: rect.bottom,

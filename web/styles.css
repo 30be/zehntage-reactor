@@ -2939,3 +2939,105 @@ textarea:focus-visible {
   }
   .review-replay-hint { margin-left: 0; justify-content: center; }
 }
+
+/* ---- Two-column review mode ---- */
+
+/* .review-twocol: overrides the default single-column .review layout.
+   Sits at viewport height so neither column scrolls the page; the right
+   column scrolls internally when its content is tall. */
+.review-twocol {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 24px;
+  max-width: none;          /* lift the 640px cap set by .review */
+  height: calc(100vh - 200px); /* fill viewport minus real chrome: sticky sidebar top + .review-head ~40px + .review-card padding ~56px + grade row ~72px ≈ 200px */
+  overflow: hidden;
+}
+
+/* Left column: front sentence + revealed answer-main.
+   Flex ~1, allows the grade row to anchor at the bottom via column layout. */
+.review-col-left {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow-y: auto;
+}
+
+/* Right column: notes, context, example sentence, image.
+   Scrolls internally when content exceeds the viewport height. */
+.review-col-right {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  padding-right: 4px; /* room for scrollbar without layout shift */
+}
+
+/* Narrow screens: collapse back to a single stacked column. */
+@media (max-width: 768px) {
+  .review-twocol {
+    flex-direction: column;
+    height: auto;
+    overflow: visible;
+    max-width: 640px;
+    margin: 0 auto;
+  }
+  .review-col-left,
+  .review-col-right {
+    width: 100%;
+    max-height: none;
+    overflow-y: visible;
+  }
+  .review-twocol-toggle { display: none; }
+}
+
+/* Two-column toggle button in .review-head — subtle, monochrome, matches
+   the .review-scope style so both controls read as quiet header affordances. */
+.review-twocol-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--muted);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 2px 6px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transition: color 0.1s, border-color 0.1s;
+}
+.review-twocol-toggle:hover {
+  color: var(--fg);
+  border-color: var(--border);
+}
+.review-twocol-toggle.active {
+  color: var(--fg);
+  border-color: var(--border);
+  background: var(--muted-bg);
+}
+/* icon inside the toggle (e.g. an SVG or a Unicode glyph) */
+.review-twocol-toggle svg,
+.review-twocol-toggle .icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+.review-twocol-toggle input[type="checkbox"] { margin: 0; accent-color: var(--fg); }
+
+/* Error / error-banner for ReviewRoute. Dim, established-red text, small —
+   consistent with .explain-err and .search-route-error treatments. */
+.review-error {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--c-warn);
+  margin: 8px 0;
+}

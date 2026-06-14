@@ -42,12 +42,38 @@ test("read mode: `a` mines the word with sentence context + source", async ({ pa
     )
     .toBe("clean");
   await openRead(page);
+  const popup = page.locator(".read-popup");
   const tok = page.locator(".read-para .tok").first(); // 勉強
   await tok.waitFor({ timeout: 20_000 });
-  await tok.click();
-  const popup = page.locator(".read-popup");
-  await expect(popup).toBeVisible();
-  await expect(popup.locator(".translation")).toBeVisible(); // fake lookup in
+  const openPopup = async () => {
+    await tok.click(); // opening the popup triggers a live deck revalidation
+    await expect(popup).toBeVisible();
+    await expect(popup.locator(".translation")).toBeVisible(); // fake lookup in
+  };
+  await openPopup();
+
+  // Precondition: the popup must reflect the NOT-saved state before we press `a`
+  // (else `a` REMOVES instead of ADDS and flips .word the wrong way). Opening
+  // the popup now revalidates the deck live, so a stale localStorage `saved`
+  // self-heals. But a genuinely SLOW straggler add from a prior mining spec
+  // (~1s ffmpeg) can land 勉強 in the deck AFTER our deck-poll above — making
+  // saved CORRECT. Delete-and-reopen until the live deck stays clean. The popup
+  // toggles closed on a re-click, so close it first each iteration.
+  await expect
+    .poll(
+      async () => {
+        const cls = (await popup.locator(".word").getAttribute("class")) ?? "";
+        const saved = cls.split(/\s+/).includes("saved");
+        if (saved) {
+          await deleteFront(page, "勉強 [べんきょう]");
+          await tok.click(); // re-click re-triggers a live deck revalidation
+          return "dirty";
+        }
+        return "clean";
+      },
+      { timeout: 20_000, intervals: Array(20).fill(500) },
+    )
+    .toBe("clean");
 
   // no Add/Delete buttons — `a` toggles, the word color is the state cue
   await expect(popup.locator("button", { hasText: "Add to Anki" })).toHaveCount(0);

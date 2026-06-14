@@ -493,6 +493,10 @@ export const api = {
       cardId,
       ease,
     }),
+  // Delete the note that owns cardId from Anki (DESTRUCTIVE — records graves
+  // for sync). Routed: AnkiConnect when open, windowless DB write when closed.
+  reviewDelete: (cardId: number) =>
+    jpost<{ ok: boolean; error?: string }>("/api/review/delete", { cardId }),
 };
 
 export function mediaUrl(id: string): string {

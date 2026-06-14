@@ -21,6 +21,7 @@
 import {
   reviewQueue as acReviewQueue,
   answerCard as acAnswerCard,
+  deleteNote as acDeleteNote,
   ankiLocalAvailable,
   type ReviewCard,
 } from "./anki.ts";
@@ -29,6 +30,7 @@ import {
   dbReviewQueue,
   dbDeckCounts,
   dbAnswerCard,
+  dbDeleteNote,
   type DeckCounts,
 } from "./ankidb.ts";
 
@@ -40,6 +42,54 @@ export type ReviewBackend = "db" | "ankiconnect";
 // the DB-direct path here keeps fake mode hermetic (and the offline-state e2e
 // deterministic).
 const dbDirectEnabled = (): boolean => process.env.ANKI_FAKE !== "1";
+
+// ---------------------------------------------------------------------------
+// Test seam (internal). The routing in this file depends on five concrete
+// functions from anki.ts / ankidb.ts. We can't unit-test the DB-vs-AnkiConnect
+// branch via env alone (ANKI_FAKE forces every dep into fake mode at once), and
+// mock.module() in bun patches the GLOBAL module registry for the whole test
+// run without restore — it would corrupt anki.test.ts / ankidb.test.ts which
+// import these modules for real. So we expose a tiny overridable indirection
+// table: production code calls through `deps`, which points at the real imports
+// by default; `__setReviewDeps` (test-only) swaps them and returns a restore fn.
+// Public function signatures and default behavior are unchanged.
+interface ReviewDeps {
+  acReviewQueue: typeof acReviewQueue;
+  acAnswerCard: typeof acAnswerCard;
+  acDeleteNote: typeof acDeleteNote;
+  ankiLocalAvailable: typeof ankiLocalAvailable;
+  dbStatus: typeof dbStatus;
+  dbReviewQueue: typeof dbReviewQueue;
+  dbDeckCounts: typeof dbDeckCounts;
+  dbAnswerCard: typeof dbAnswerCard;
+  dbDeleteNote: typeof dbDeleteNote;
+}
+
+const realDeps: ReviewDeps = {
+  acReviewQueue,
+  acAnswerCard,
+  acDeleteNote,
+  ankiLocalAvailable,
+  dbStatus,
+  dbReviewQueue,
+  dbDeckCounts,
+  dbAnswerCard,
+  dbDeleteNote,
+};
+
+let deps: ReviewDeps = realDeps;
+
+/**
+ * TEST-ONLY. Override the backend dependencies and return a restore function.
+ * Not part of the public API; do not call from production code.
+ */
+export function __setReviewDeps(overrides: Partial<ReviewDeps>): () => void {
+  const prev = deps;
+  deps = { ...deps, ...overrides };
+  return () => {
+    deps = prev;
+  };
+}
 
 /**
  * Refusal reason surfaced when grading cannot proceed.
@@ -59,6 +109,14 @@ export interface ReviewQueueResult {
 }
 
 export interface AnswerResult {
+  ok: boolean;
+  error?: string;
+  reason?: RefuseReason;
+  /** Informational only — the server strips this before replying. */
+  backend: ReviewBackend;
+}
+
+export interface DeleteResult {
   ok: boolean;
   error?: string;
   reason?: RefuseReason;
@@ -101,9 +159,14 @@ export async function reviewQueueAuto(
 ): Promise<ReviewQueueResult> {
   // Try the windowless DB read first.
   try {
-    const st = dbStatus();
-    if (dbDirectEnabled() && st.present && st.schemaOk) {
-      const r = dbReviewQueue(scope, limit);
+    const st = deps.dbStatus();
+    // Use the DB-direct snapshot ONLY when Anki is CLOSED. While Anki is open it
+    // holds edits in memory (WAL), so the on-disk file lags AnkiConnect's live
+    // state — reading the snapshot then grading via AnkiConnect makes graded
+    // cards reappear (an infinite review loop). When Anki is open, AnkiConnect is
+    // authoritative for BOTH read and write.
+    if (dbDirectEnabled() && st.present && st.schemaOk && !st.ankiOpen) {
+      const r = deps.dbReviewQueue(scope, limit);
       if (r.available) {
         return { available: true, due: r.due, cards: r.cards, backend: "db" };
       }
@@ -113,7 +176,7 @@ export async function reviewQueueAuto(
   }
 
   // Fallback: AnkiConnect (requires Anki open).
-  const r = await acReviewQueue(scope, limit);
+  const r = await deps.acReviewQueue(scope, limit);
   return {
     available: r.available,
     due: r.due,
@@ -134,9 +197,14 @@ export async function deckCountsAuto(
 ): Promise<DeckCountsResult> {
   // Try the windowless DB read first.
   try {
-    const st = dbStatus();
-    if (dbDirectEnabled() && st.present && st.schemaOk) {
-      const c: DeckCounts = dbDeckCounts(scope);
+    const st = deps.dbStatus();
+    // Use the DB-direct snapshot ONLY when Anki is CLOSED. While Anki is open it
+    // holds edits in memory (WAL), so the on-disk file lags AnkiConnect's live
+    // state — reading the snapshot then grading via AnkiConnect makes graded
+    // cards reappear (an infinite review loop). When Anki is open, AnkiConnect is
+    // authoritative for BOTH read and write.
+    if (dbDirectEnabled() && st.present && st.schemaOk && !st.ankiOpen) {
+      const c: DeckCounts = deps.dbDeckCounts(scope);
       return { new: c.new, learning: c.learning, review: c.review };
     }
   } catch {
@@ -148,7 +216,7 @@ export async function deckCountsAuto(
   // cheaply, so we surface the due total under `review` and leave the rest at 0
   // rather than fabricating a breakdown.
   try {
-    const q = await acReviewQueue(scope, 0);
+    const q = await deps.acReviewQueue(scope, 0);
     if (q.available) {
       return { new: 0, learning: 0, review: q.due };
     }
@@ -180,25 +248,27 @@ export async function answerCardAuto(
   // Fake/e2e mode: route to the in-memory fake AnkiConnect (records the grade,
   // drains the fake queue). Never touches the real collection or the DB write.
   if (process.env.ANKI_FAKE === "1") {
-    const r = await acAnswerCard(cardId, ease);
+    const r = await deps.acAnswerCard(cardId, ease);
     return { ok: r.ok, error: r.error, backend: "ankiconnect" };
   }
   // Is Anki up? If so, AnkiConnect is authoritative.
   let ankiConnectUp = false;
   try {
-    ankiConnectUp = await ankiLocalAvailable();
+    ankiConnectUp = await deps.ankiLocalAvailable();
   } catch {
     ankiConnectUp = false;
   }
 
   if (ankiConnectUp) {
-    const r = await acAnswerCard(cardId, ease);
+    const r = await deps.acAnswerCard(cardId, ease);
     if (r.ok) {
       return { ok: true, backend: "ankiconnect" };
     }
+    // Surface a CLEAR reason so the UI never silently loops on a failed grade.
     return {
       ok: false,
       error: r.error ?? "AnkiConnect not available",
+      reason: "ankiconnect-failed",
       backend: "ankiconnect",
     };
   }
@@ -208,7 +278,7 @@ export async function answerCardAuto(
     try {
       // `await` tolerates either a sync result or a Promise, so this stays
       // correct regardless of how ankidb finalizes dbAnswerCard's signature.
-      const r = await dbAnswerCard(cardId, ease);
+      const r = await deps.dbAnswerCard(cardId, ease);
       return {
         ok: r.ok,
         error: r.error,
@@ -219,6 +289,7 @@ export async function answerCardAuto(
       return {
         ok: false,
         error: e instanceof Error ? e.message : String(e),
+        reason: "db-write-threw",
         backend: "db",
       };
     }
@@ -228,6 +299,81 @@ export async function answerCardAuto(
   return {
     ok: false,
     error: "No grading backend available (Anki closed)",
+    reason: "no-backend",
+    backend: "ankiconnect",
+  };
+}
+
+/**
+ * Delete a note from Anki, windowless-capable. Same routing shape as
+ * `answerCardAuto`:
+ *
+ *   - ANKI_FAKE=1 → call the fake delete on the in-memory stub (always ok:true
+ *     if the stub doesn't implement deleteNotes; graceful).
+ *   - Anki OPEN (AnkiConnect reachable) → AnkiConnect: map card→note via
+ *     `cardsToNotes`, then `deleteNotes`. The live collection is authoritative.
+ *   - Anki CLOSED → `dbDeleteNote`, the gated, backup-first, fail-closed
+ *     windowless DB write. ankidb performs all safety checks.
+ *   - Neither → refuse with {ok:false, reason:"no-backend"}.
+ */
+export async function deleteNoteAuto(cardId: number): Promise<DeleteResult> {
+  // Fake/e2e mode: call the fake delete stub; never touch the real collection.
+  if (process.env.ANKI_FAKE === "1") {
+    try {
+      const r = await deps.acDeleteNote(cardId);
+      return { ok: r.ok, error: r.error, backend: "ankiconnect" };
+    } catch {
+      // If the fake stub doesn't implement deleteNotes, treat as ok (e2e can
+      // stub the whole function via __setReviewDeps if it needs assertions).
+      return { ok: true, backend: "ankiconnect" };
+    }
+  }
+
+  // Is Anki up? If so, AnkiConnect is authoritative.
+  let ankiConnectUp = false;
+  try {
+    ankiConnectUp = await deps.ankiLocalAvailable();
+  } catch {
+    ankiConnectUp = false;
+  }
+
+  if (ankiConnectUp) {
+    const r = await deps.acDeleteNote(cardId);
+    if (r.ok) {
+      return { ok: true, backend: "ankiconnect" };
+    }
+    return {
+      ok: false,
+      error: r.error ?? "AnkiConnect delete failed",
+      reason: "ankiconnect-failed",
+      backend: "ankiconnect",
+    };
+  }
+
+  // Anki closed → windowless DB write (unless fake mode, which must not write).
+  if (dbDirectEnabled()) {
+    try {
+      const r = await deps.dbDeleteNote(cardId);
+      return {
+        ok: r.ok,
+        error: r.error,
+        reason: r.reason,
+        backend: "db",
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+        reason: "db-write-threw",
+        backend: "db",
+      };
+    }
+  }
+
+  // No backend available.
+  return {
+    ok: false,
+    error: "No delete backend available (Anki closed)",
     reason: "no-backend",
     backend: "ankiconnect",
   };
@@ -247,7 +393,7 @@ export async function reviewStatus(): Promise<ReviewStatus> {
   let ankiOpen = false;
   let schemaOk = false;
   try {
-    const st = dbStatus();
+    const st = deps.dbStatus();
     dbPresent = st.present;
     ankiOpen = st.ankiOpen;
     schemaOk = st.schemaOk;
@@ -257,7 +403,7 @@ export async function reviewStatus(): Promise<ReviewStatus> {
 
   let ankiConnectUp = false;
   try {
-    ankiConnectUp = await ankiLocalAvailable();
+    ankiConnectUp = await deps.ankiLocalAvailable();
   } catch {
     ankiConnectUp = false;
   }

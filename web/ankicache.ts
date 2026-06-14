@@ -90,7 +90,13 @@ function revalidate(): Promise<AnkiWordsResponse> {
       const headers: Record<string, string> = {};
       if (cached?.etag) headers["If-None-Match"] = cached.etag;
       const _ankiT0 = Date.now();
-      const r = await fetch("/api/anki/words", { headers });
+      // `cache: "no-store"` bypasses the browser HTTP cache so revalidation is
+      // driven SOLELY by our app-level ETag (If-None-Match below). Without it
+      // the browser's own cache layer can answer a stale 200 (or short-circuit
+      // a 304) from a previous deck snapshot, freezing the UI on a since-deleted
+      // word — the server already sends Cache-Control: no-cache, but a default
+      // fetch still consults the disk cache first.
+      const r = await fetch("/api/anki/words", { headers, cache: "no-store" });
       tmEvent("perf.client.anki_hydrate", { ms: Date.now() - _ankiT0, status: r.status });
       if (r.status === 304 && cached) {
         writeAnkiCache(cached.data, cached.etag); // bump ts
