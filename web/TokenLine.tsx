@@ -13,6 +13,7 @@ import {
   matchFront,
   progressBucket,
   learningColor,
+  decayFactor,
   type WordIndex,
 } from "./progress.ts";
 import { accentOf, accentPattern, morae } from "./accent.ts";
@@ -108,6 +109,9 @@ export function TokenLine({
         const color = inDeck ? learningColor(wordIndex.progress[front!]) : null;
         // due for review right now → subtle dotted underline (SRS hint)
         const due = inDeck && wordIndex.progress[front!]?.isDue === true;
+        // overdue → retention-decay: learningColor() already tints the text
+        // toward unknown-red; .rot is a styling hook for the rotting state.
+        const rot = inDeck && decayFactor(wordIndex.progress[front!]) > 0;
         const unknown = !localKnown && !inDeck;
         const mature =
           inDeck &&
@@ -123,7 +127,7 @@ export function TokenLine({
         return (
           <span
             key={i}
-            className={`tok${inDeck ? " known" : ""}${due ? " due" : ""}${unknown ? " unk" : ""}`}
+            className={`tok${inDeck ? " known" : ""}${due ? " due" : ""}${rot ? " rot" : ""}${unknown ? " unk" : ""}`}
             style={color ? { color } : undefined}
             role={isInteractive ? "button" : undefined}
             tabIndex={isInteractive ? 0 : undefined}

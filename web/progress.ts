@@ -138,18 +138,64 @@ export function progressBucket(intervalDays: number): number {
 
 /** Fallback fresh-learning blue if `--learn-blue` is unset. */
 export const LEARNING_BLUE = "oklch(0.65 0.15 250)";
+/** Fallback unknown-red hue intent (the per-context `--tok-unk` in styles.css
+ *  resolves to AA-clearing literals: #9e2f3a on light, #f2a0a8 on dark). */
+export const UNKNOWN_RED = "#b35454";
 /** Interval (days) at which a learning word reaches the ambient color. */
 export const LEARNING_MATURE_DAYS = 21;
+/**
+ * Max fraction (0..1) an overdue word's color is pulled back toward the
+ * unknown-red. Kept SUBTLE so it reads as a tint, not a full red repaint.
+ */
+export const MAX_DECAY = 0.55;
+/**
+ * Interval (days) at which an overdue word reaches MAX_DECAY. A mature card
+ * that has gone overdue is the strongest "I'm forgetting this" signal — the
+ * longer you'd been retaining it, the more it should visibly rot. (We can't
+ * read true days-overdue: the server leaves Anki's `due` column undecoded —
+ * days-vs-epoch is queue-dependent — so isDue is the only reliable overdue
+ * signal client-side; interval modulates HOW MUCH a due word rots.)
+ */
+export const DECAY_FULL_DAYS = LEARNING_MATURE_DAYS;
 
 /**
- * Text color for a word IN the deck: blue -> ambient as interval grows.
- * Returns null at/after maturity (>= 21d) — render plain (ambient) text.
- * No progress entry (e.g. remote path without intervals) = fresh blue.
+ * Retention-decay factor 0..1 for a deck word: how far its color is dragged
+ * back toward the unknown-red. 0 unless the word is currently overdue
+ * (`isDue`). For overdue words it scales with the card's interval (more
+ * mature = more alarming rot), clamped to MAX_DECAY. Non-overdue words and
+ * words with no progress entry never decay.
+ */
+export function decayFactor(p?: ProgressEntry): number {
+  if (!p || p.isDue !== true) return 0;
+  const days = Math.max(0, p.interval || 0);
+  const t = Math.min(1, days / DECAY_FULL_DAYS);
+  return t * MAX_DECAY;
+}
+
+/**
+ * Text color for a word IN the deck.
+ *
+ * Base: blue -> ambient as the SRS interval grows (OKLCH interpolation).
+ * At/after maturity (>= 21d) the base is the ambient color (returns null
+ * only when there is NO decay to apply, so the token renders plain text).
+ *
+ * Retention decay: if the word is currently OVERDUE (`isDue`), the base
+ * color is additionally pulled a fraction (`decayFactor`) toward the
+ * unknown-red so neglected words visibly "rot" and stand out for review.
+ * Non-overdue words keep the unchanged blue->ambient interpolation.
  */
 export function learningColor(p?: ProgressEntry): string | null {
   const days = p ? Math.max(0, p.interval || 0) : 0;
   const t = Math.min(1, days / LEARNING_MATURE_DAYS);
-  if (t >= 1) return null;
-  const pct = Math.round((1 - t) * 100);
-  return `color-mix(in oklch, var(--learn-blue, ${LEARNING_BLUE}) ${pct}%, var(--tok-ambient, currentColor))`;
+  const bluePct = Math.round((1 - t) * 100);
+  const base =
+    t >= 1
+      ? "var(--tok-ambient, currentColor)"
+      : `color-mix(in oklch, var(--learn-blue, ${LEARNING_BLUE}) ${bluePct}%, var(--tok-ambient, currentColor))`;
+
+  const decay = decayFactor(p);
+  if (decay <= 0) return t >= 1 ? null : base;
+
+  const redPct = Math.round(decay * 100);
+  return `color-mix(in oklch, var(--tok-unk, ${UNKNOWN_RED}) ${redPct}%, ${base})`;
 }
