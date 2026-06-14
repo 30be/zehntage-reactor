@@ -83,11 +83,39 @@ export function Palette({ go, toast, settings, setSettings }: Props) {
     [setSettings, toast],
   );
 
+  // Theme toggle reachable from the palette: mirror App.applyTheme — flip the
+  // <html data-theme>, persist to zr.theme, and round-trip via patchSettings so
+  // the Settings <select> stays in sync. No new wiring from App needed.
+  const toggleTheme = useCallback(() => {
+    const cur = (settings.theme as string) || "light";
+    const next = cur === "dark" ? "light" : "dark";
+    document.documentElement.dataset.theme = next;
+    try {
+      localStorage.setItem("zr.theme", next);
+    } catch {
+      /* ignore storage errors */
+    }
+    patchSettings({ theme: next }, `theme: ${next}`);
+  }, [settings, patchSettings]);
+
+  const copyDeepLink = useCallback(() => {
+    const url = window.location.href;
+    void (async () => {
+      try {
+        await navigator.clipboard?.writeText(url);
+        toast("deep-link copied");
+      } catch {
+        toast(url);
+      }
+    })();
+  }, [toast]);
+
   const staticCommands = useMemo<Command[]>(() => {
     const last = readLastMedia();
     const furiganaOn = settings.furigana !== false;
     const pitchOn = settings.pitchAccent !== false;
     const apUnknown = settings.autopauseMode === "unknown";
+    const theme = (settings.theme as string) || "light";
     return [
       { id: "nav.home", title: "go: home", run: () => go("#/home") },
       { id: "nav.library", title: "go: library", run: () => go("#/") },
@@ -97,10 +125,26 @@ export function Palette({ go, toast, settings, setSettings }: Props) {
         when: () => readLastMedia() != null,
         run: () => go(`#/play/${last}`),
       },
+      {
+        id: "nav.episode",
+        title: "go: jump to episode (library)",
+        run: () => go("#/"),
+      },
       { id: "nav.cards", title: "go: cards", run: () => go("#/cards") },
       { id: "nav.review", title: "go: review due words", run: () => go("#/review") },
       { id: "nav.stats", title: "go: stats", run: () => go("#/stats") },
+      { id: "nav.health", title: "go: health", run: () => go("#/health") },
       { id: "nav.settings", title: "go: settings", run: () => go("#/settings") },
+      {
+        id: "set.theme",
+        title: `setting: theme → ${theme === "dark" ? "light" : "dark"}`,
+        run: toggleTheme,
+      },
+      {
+        id: "action.copylink",
+        title: "action: copy deep-link",
+        run: copyDeepLink,
+      },
       {
         id: "set.furigana",
         title: `setting: furigana ${furiganaOn ? "off" : "on"}`,
@@ -135,11 +179,11 @@ export function Palette({ go, toast, settings, setSettings }: Props) {
         run: () => setSheet(true),
       },
     ];
-  }, [go, patchSettings, settings]);
+  }, [go, patchSettings, settings, toggleTheme, copyDeepLink]);
 
   const commands = useMemo(() => {
     const all = [...allCommands(), ...staticCommands];
-    return filterCommands(all, q).slice(0, 12);
+    return filterCommands(all, q).slice(0, 16);
   }, [staticCommands, q, open]);
 
   useEffect(() => {

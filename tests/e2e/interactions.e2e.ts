@@ -145,6 +145,66 @@ test("Ctrl+K opens the command palette; typing filters; Escape closes", async ({
   await expect(palette).toHaveCount(0);
 });
 
+// --- 3b. Palette deep actions: run "review" command navigates to #/review ---
+test("Ctrl+K palette: filter to review and run it navigates to #/review", async ({ page }) => {
+  await page.goto("/");
+  await page.locator("body").click();
+
+  await page.keyboard.press("Control+KeyK");
+  const palette = page.locator(".palette");
+  await expect(palette).toBeVisible();
+
+  const input = palette.locator("input");
+  await input.fill("review");
+  const row = page.locator(".palette-row", { hasText: "review due words" }).first();
+  await expect(row).toBeVisible();
+
+  await page.keyboard.press("Enter");
+  // palette closes and the route hash flips to the review route
+  await expect(palette).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.location.hash)).toBe("#/review");
+});
+
+// --- 3c. Palette deep actions: "health" command is reachable + navigates ---
+test("Ctrl+K palette: health command navigates to #/health", async ({ page }) => {
+  await page.goto("/");
+  await page.locator("body").click();
+
+  await page.keyboard.press("Control+KeyK");
+  const palette = page.locator(".palette");
+  await expect(palette).toBeVisible();
+
+  await palette.locator("input").fill("health");
+  const row = page.locator(".palette-row", { hasText: "health" }).first();
+  await expect(row).toBeVisible();
+  await row.click();
+
+  await expect(palette).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.location.hash)).toBe("#/health");
+});
+
+// --- 3d. Palette deep actions: theme toggle flips <html data-theme> ---------
+test("Ctrl+K palette: theme command toggles the document theme", async ({ page }) => {
+  await page.goto("/");
+  await page.locator("body").click();
+
+  const before = await page.evaluate(() => document.documentElement.dataset.theme ?? "light");
+
+  await page.keyboard.press("Control+KeyK");
+  const palette = page.locator(".palette");
+  await expect(palette).toBeVisible();
+
+  await palette.locator("input").fill("theme");
+  const row = page.locator(".palette-row", { hasText: "theme" }).first();
+  await expect(row).toBeVisible();
+  await row.click();
+
+  await expect(palette).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => document.documentElement.dataset.theme ?? "light"))
+    .not.toBe(before);
+});
+
 // --- 4. Echo dictation (`e`) ----------------------------------------------
 // `e` toggles echo mode (toast). With echo on, playback pauses at each cue end
 // and opens the `.echo-overlay` dictation input over the finished line.
