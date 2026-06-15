@@ -56,7 +56,10 @@ serves the `public/` static bundle for non-`/api/` GETs (`/app.js` and
 - **word / index (mining)**: `GET /api/word/history`,
   `GET /api/index/encounters`, `GET|POST /api/index/comprehensibility`,
   `POST /api/index/due`, `GET /api/index/showfreq`.
-- **review**: `GET /api/review/due`.
+- **review**: `GET /api/review/queue` (due queue; `scope=zehntage|all`),
+  `GET /api/review/counts` (`{new,learning,review}`), `GET /api/review/status`
+  (capability snapshot), `POST /api/review/answer` (grade; auth-gated),
+  `POST /api/review/delete` (delete note; auth-gated).
 - **state**: `GET|POST /api/state` (localStorage sync).
 - **jimaku**: `GET /api/jimaku/search`, `GET /api/jimaku/files`,
   `POST /api/jimaku/download`.
@@ -91,10 +94,32 @@ serves the `public/` static bundle for non-`/api/` GETs (`/app.js` and
   `showFrequency()` sums lemma occurrences across entries (backs
   `/api/index/showfreq`); the client-side i+1/prestudy ranking lives in
   `web/prestudy.ts`. (Coverage computation is client-side only: `web/coverage.ts`.)
-- **anki.ts** — proxy to the anki-mcp `/zehntage/*` endpoints, with a preferred
-  local AnkiConnect path. `ANKI_FAKE=1` uses an in-memory card map. `tags`
-  includes `zehntage` to mark mined cards; `image` accepts data URI / URL /
-  upload-dir path.
+- **ankidb.ts** — the DB-direct Anki engine. All real reads and writes bypass
+  AnkiConnect and hit `collection.anki2` on disk. Reads open a copy in a temp
+  dir when Anki holds the WAL lock (Anki never sees the read). Writes are
+  fail-closed via `canWrite()` (process check + WAL check + schema check) and
+  backup-first (`backupCollection`). Exports: `dbStatus`, `dbReviewQueue`,
+  `dbDeckCounts`, `dbListCards`, `dbProgress`, `dbGetMedia` (reads);
+  `dbAnswerCard`, `dbDeleteNote` (writes with graves for sync), `dbAddNote`
+  (create notes/cards from DB notetype, guid/csum/fields all resolved Anki-
+  faithfully), `dbStoreMedia` (audio → `collection.media/` + `media.db2`;
+  images are embedded as `data:URI`). Schema: v18 (v3 scheduler, FSRS-6).
+  Requires the `unicase` SQLite collation (compiled from a C snippet on first
+  use; degrades gracefully without it).
+- **anki.ts** — legacy AnkiConnect client and shared types (`AnkiCard`,
+  `ReviewCard`). In production, **no real traffic is routed here**; it exists
+  only as the `ANKI_FAKE=1` in-memory test double and as the source of shared
+  type definitions. (Stage 2b-2: the real AnkiConnect code will be removed once
+  review.ts has fully migrated — the description here reflects the end state.)
+  `ANKI_FAKE=1` uses an in-memory card map. `tags` includes `zehntage`; `image`
+  accepts data URI / URL / upload-dir path.
+- **review.ts** — backend selector facade. Routes every `*Auto` function
+  (`reviewQueueAuto`, `answerCardAuto`, `deleteNoteAuto`, `addNoteAuto`,
+  `listCardsAuto`, `progressAuto`, `mediaAuto`, `deckCountsAuto`,
+  `reviewStatus`) to either the DB-direct path (real) or the in-memory fake
+  (`ANKI_FAKE=1`). No AnkiConnect calls in the real path. Exposes
+  `__setReviewDeps` for test-seam injection without polluting the global module
+  registry.
 - **telemetry.ts** — append-only JSONL event log at
   `~/.local/share/zehntage-reactor/events.jsonl` (override `ZR_EVENTS_FILE`),
   parsed on demand by `summarizeEvents()`.
@@ -183,11 +208,11 @@ collaborators mutate the SAME instances.
 DOM-free, network-free, fully unit-tested:
 `progress` (deck→color), `tokenizer` (kuromoji wrapper + the mirrored
 `vocabKey`/`mergeTokens`/`lemmaOf`/`isLexical`/`kataToHira`), `coverage`,
-`quiz`, `forecast`, `goal`, `timer`, `searchquery`, `wordday`, `cardfilter`,
-`iplusone`, `prestudy`, `review`. Plus `freq`, `accent`, `heat`, `dictation`,
+`quiz`, `goal`, `timer`, `searchquery`, `wordday`, `cardfilter`,
+`iplusone`, `prestudy`. Plus `freq`, `accent`, `heat`, `dictation`,
 `readProgress`, `readlayout`, `statsfmt`, `ankicache`,
 `continueWatching`, `sync`, `blacklist`, `vocabreset`, `commands`, `lang`,
-`keys`, `cues`, `telemetry`.
+`keys`, `cues`, `telemetry`. (`forecast` module removed.)
 
 ### Coloring pipeline
 

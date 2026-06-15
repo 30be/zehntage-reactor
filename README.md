@@ -59,8 +59,8 @@ Dark theme:
 - Person-name tokenizer merge: consecutive name tokens (e.g. 折木 + 奉太郎) are
   treated as one word for lookup and card mining
 - Pre-study mode: bulk-add the unknown words of the upcoming minutes
-- Anki integration: local AnkiConnect when reachable, remote fallback otherwise;
-  one-click cards with video frame and sentence audio
+- Anki integration: reads and writes go directly to `collection.anki2` on disk
+  (no AnkiConnect required); one-click mining with video frame and sentence audio
 
 **Search** (`#/search`)
 - Global cross-episode subtitle search: type to query every episode's Japanese
@@ -71,15 +71,14 @@ Dark theme:
 - Also reachable from the sidebar nav and the Ctrl+K command palette
   ("search subtitles (jump to any line)")
 
-**Review / Cram mode** (`#/review`)
-- Drills your currently-due Anki words as cloze prompts built from your own
-  watched cues; type the answer, check, see correct/wrong, advance with Space/→
-- Optional Russian translation hint; "watch in context" deep-link per card
-- Falls back to interval order when `is:due` is unavailable
-- **SRS due-forecast histogram**: bar chart of upcoming review load at the top
-  of the Review page — bucket 0 = due now/overdue (emphasized), buckets 1–14
-  = estimated days until due (15-day window, `FORECAST_WINDOW = 14` in
-  `web/forecast.ts`)
+**Review mode** (`#/review`)
+- Hotkey-driven SRS review of your Anki due queue — Space to reveal, 1–4 to
+  grade, R to replay audio, Delete to remove the note
+- Reads and grades `collection.anki2` directly on disk — Anki does NOT need to
+  be open (windowless / DB-direct); close Anki to review and sync windowlessly
+- Two-column layout toggle for cards with a context image/sentence (persisted)
+- While Anki is open: reads proceed (snapshot may lag); writes are refused and
+  the UI tells you to close Anki
 
 **UI**
 - Three themes (light/dark/system) switchable from the sidebar 日/月/◐ buttons
@@ -108,8 +107,9 @@ Keys go in `~/.env` (names only — never commit values):
 
 - `GEMINI_API_KEY` — word/sentence lookups, translation (into `knownLang`), proper-noun correction
 - `JIMAKU_API_KEY` — jimaku.cc human subtitle fetch
-- `ZEHNTAGE_ANKI_URL` / `ZEHNTAGE_ANKI_KEY` — remote Anki fallback
-- `ANKICONNECT_URL` — optional, defaults to local AnkiConnect
+- `ZEHNTAGE_ANKI_DB` — override the collection path (default: `~/.local/share/Anki2/User 1/collection.anki2`)
+- `ZEHNTAGE_DB_TOKEN` — optional auth token for review/add/delete write endpoints
+- `ZR_ANKI_BACKUP_DIR` — override the backup dir (default: `~/.local/share/zehntage/anki-backups/`)
 
 Subtitle generation needs `ffmpeg` and `whisper-cli` (for the whisper fallback).
 Other CLI modes: `subtitle <lang> [<lang2>] <file>`, `backup [<dir>]`, `backups`.

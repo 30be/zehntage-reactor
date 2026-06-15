@@ -102,17 +102,15 @@ export function fakeResetQueue(): void {
   fakeCards.clear();
 }
 
-/** Recorded grades so far (cardId → ease). e2e inspection only. */
-export function fakeGetAnswers(): Map<number, number> {
-  return new Map(fakeAnswers);
-}
-
-// --- local AnkiConnect (preferred when reachable) ---------------------------
+// --- local AnkiConnect (still used by the mining/delete server paths) -------
 //
-// When a local Anki with AnkiConnect is running we talk to it DIRECTLY:
-// same deck/model as the remote anki-mcp ("Mixed" / "Back+Front+Usage"),
-// but with real media filenames (storeMediaFile) and retrievable media for
-// the Cards tab (/api/anki/media proxy). Falls back to the remote anki-mcp.
+// After the Stage 2b cutover the REVIEW flow no longer touches AnkiConnect
+// (review.ts routes reads/writes through the DB engine, and only its
+// ANKI_FAKE branch hits the in-memory fake below). What REMAINS live here is
+// the mining/delete server path (server/index.ts): ankiLocalAvailable() probes
+// a running Anki, storeMedia() writes frame/audio media into the open
+// collection, and deleteCard()/addCard() (via resolveMediaName) still use the
+// local AnkiConnect when reachable, falling back to the remote anki-mcp.
 
 const AC_URL = process.env.ANKICONNECT_URL ?? "http://127.0.0.1:8765";
 const AC_DECK = "Mixed";
@@ -208,22 +206,7 @@ async function acListCards(): Promise<AnkiCard[]> {
   }));
 }
 
-interface AcCardInfo {
-  cardId: number;
-  note: number;
-  interval: number;
-  due: number;
-  reps: number;
-  lapses: number;
-  factor: number;
-  queue: number;
-  type: number;
-  /** Card modification time, epoch SECONDS (last review/edit). */
-  mod: number;
-  fields: Record<string, { value: string; order: number }>;
-}
-
-/** Subset of AcCardInfo needed to estimate days-overdue. */
+/** Subset of an Anki card's fields needed to estimate days-overdue. */
 export interface DaysOverdueCard {
   interval: number;
   queue: number;
@@ -272,38 +255,6 @@ export function decodeDaysOverdue(
   return overdue;
 }
 
-async function acProgress(): Promise<Record<string, unknown>> {
-  const [fm, cardIds, dueIds] = await Promise.all([
-    acFieldMap(),
-    acRaw<number[]>("findCards", { query: `deck:${AC_DECK}` }),
-    // Anki resolves "is:due" itself — no client-side decoding of the
-    // column-encoded `due` field (days vs epoch-seconds depending on queue).
-    acRaw<number[]>("findCards", { query: `deck:${AC_DECK} is:due` }).catch(
-      () => [] as number[],
-    ),
-  ]);
-  if (cardIds.length === 0) return {};
-  const dueSet = new Set(dueIds);
-  const infos = await acRaw<AcCardInfo[]>("cardsInfo", { cards: cardIds });
-  const out: Record<string, unknown> = {};
-  for (const c of infos) {
-    const front = c.fields[fm.front]?.value;
-    if (!front) continue;
-    out[front] = {
-      interval: c.interval,
-      due: c.due,
-      reps: c.reps,
-      lapses: c.lapses,
-      ease: c.factor,
-      queue: c.queue,
-      type: c.type,
-      isDue: dueSet.has(c.cardId),
-      daysOverdue: decodeDaysOverdue(c),
-    };
-  }
-  return out;
-}
-
 async function acAddCard(card: AnkiCard): Promise<void> {
   const fm = await acFieldMap();
   const fields: Record<string, string> = {
@@ -348,11 +299,23 @@ export async function storeMedia(bytes: Uint8Array, filename: string): Promise<s
   return stored || filename;
 }
 
-// --- Review client (Wave 14): due queue + grading via AnkiConnect ----------
+// ===========================================================================
+// FAKE AnkiConnect test double — review flow (ANKI_FAKE=1, e2e only)
+// ===========================================================================
 //
-// Scheduling is delegated ENTIRELY to Anki (the user's FSRS + deck limits).
-// We only surface the due cards (rendered HTML, media rewritten to the proxy)
-// and pipe the user's grade back through `answerCards`.
+// The REAL review flow (queue → reveal → grade → delete) no longer lives here:
+// after the Stage 2b cutover review.ts drives all real reads/writes through the
+// DB engine and only calls these functions inside its `ANKI_FAKE === "1"`
+// branch. So reviewQueue / answerCard / deleteNote below are now FAKE-ONLY: each
+// operates purely on the in-memory fake queue/map above. The previous real
+// AnkiConnect (localhost:8765) machinery for these — findCards/cardsInfo +
+// answerCards + cardsToNotes/deleteNotes, plus the HTML helpers (stripHtml,
+// rewriteAnkiMedia), the AcReviewCardInfo shape and queueRank sorter — was dead
+// after 2b-1 and has been deleted. DO NOT reintroduce a real branch here; the
+// real path is ankidb.ts (dbReviewQueue/dbAnswerCard/dbDeleteNote).
+//
+// review.ts imports these under ac* aliases (acReviewQueue/acAnswerCard/
+// acDeleteNote), so the export NAMES must stay even though the behavior is fake.
 
 export interface ReviewCard {
   cardId: number;
@@ -361,232 +324,47 @@ export interface ReviewCard {
   front: string;
 }
 
-/** Strip all HTML tags for a plain-text front label. */
-function stripHtml(html: string): string {
-  return html
-    .replace(/<[^>]*>/g, "")
-    .replace(/&nbsp;/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-/**
- * Rewrite bare Anki media references in rendered card HTML so the browser can
- * load them through the existing `/api/anki/media/<name>` proxy:
- *  - `src="FILENAME"` / `src='FILENAME'` on img/audio/source whose value is a
- *    bare filename (not absolute, no http(s)/data scheme) → proxy URL.
- *  - `[sound:FILENAME]` tokens → `<audio controls src="…proxy…"></audio>`.
- * FILENAME is validated to contain no `/`, `\`, or `..` (skip rewrite if it
- * does — matches the proxy's own name guard at server index.ts ~line 1680).
- */
-function rewriteAnkiMedia(html: string): string {
-  const safe = (name: string) =>
-    !name.includes("/") && !name.includes("\\") && !name.includes("..");
-  let out = html.replace(
-    /(\bsrc\s*=\s*)(["'])([^"']+)\2/gi,
-    (m, pre: string, q: string, val: string) => {
-      // Leave absolute / scheme-qualified / data URIs untouched.
-      if (/^(?:[a-z][a-z0-9+.-]*:|\/\/|\/)/i.test(val)) return m;
-      if (!safe(val)) return m;
-      return `${pre}${q}/api/anki/media/${encodeURIComponent(val)}${q}`;
-    },
-  );
-  out = out.replace(/\[sound:([^\]]+)\]/gi, (m, name: string) => {
-    const trimmed = name.trim();
-    if (!safe(trimmed)) return m;
-    return `<audio controls src="/api/anki/media/${encodeURIComponent(trimmed)}"></audio>`;
-  });
-  return out;
-}
-
-interface AcReviewCardInfo {
-  cardId: number;
-  question: string;
-  answer: string;
-  queue: number;
-  due: number;
-  type: number;
-  fields: Record<string, { value: string; order: number }>;
-}
-
-/**
- * Scheduler-priority rank for a card's queue, mirroring ankidb.ts `selectDue`:
- * learning/relearning (queue 1 and 3) first, then review (queue 2), then new
- * (queue 0). Anything else sorts last. Within a rank, callers sort by ascending
- * `due` (most-overdue first). NOTE: `due`'s units differ per queue (epoch-secs
- * for queue 1, day-number for 2/3, position for 0) — but since we only ever
- * compare `due` between cards of the SAME queue rank, the mixed semantics are
- * harmless (exactly as ankidb.ts sorts each group independently).
- */
-function queueRank(queue: number): number {
-  if (queue === 1 || queue === 3) return 0; // (re)learning
-  if (queue === 2) return 1; // review
-  if (queue === 0) return 2; // new
-  return 3; // suspended/buried/other — shouldn't appear in is:due
-}
-
-/**
- * Fetch the cards Anki considers due, rendered and proxy-rewritten.
- *
- * `is:due` reflects what Anki considers due now; it does NOT re-apply the
- * *new-card* daily intro cap once the queue is built — acceptable for a cram
- * client, and matches the existing isDue usage (see acProgress, ~line 196).
- *
- * Grading has no remote anki-mcp equivalent, so when only the remote fallback
- * is reachable we report `available:false` (the client shows an offline state).
- */
+/** FAKE-ONLY: serve the in-memory fake review queue (e2e). */
 export async function reviewQueue(
-  scope: "zehntage" | "all",
+  _scope: "zehntage" | "all",
   limit = 50,
 ): Promise<{ available: boolean; due: number; cards: ReviewCard[] }> {
-  if (ankiFake()) {
-    // Serve the in-memory fake queue (real space→reveal→grade flow, no Anki).
-    // `scope` is honored only insofar as the queue is a single shared deck —
-    // the client always asks for "all" now (scope toggle removed).
-    const q = fakeQueueEnsure();
-    const cards = q.slice(0, limit);
-    return { available: true, due: q.length, cards };
-  }
-  if (!(await ankiLocalAvailable())) {
-    return { available: false, due: 0, cards: [] };
-  }
-  try {
-    const fm = await acFieldMap();
-    // scope="all" mirrors the DB-direct definition: due cards in the Mixed deck
-    // only. A bare `is:due` would include every deck the user has, diverging from
-    // ankidb.ts which filters on MIXED_DECK_ID.
-    //
-    // NOTE: new-card-cap divergence — ankidb.ts applies the deck's newPerDay cap
-    // (selectNewCapped). AnkiConnect's `is:due` already reflects Anki's built-in
-    // cap for review/learn queues but the new-card daily limit is enforced by
-    // the scheduler, not by findCards — so `deck:Mixed is:due` here may return
-    // more new cards than Anki would actually show in a session. Acceptable for a
-    // cram client; re-applying the cap would require a separate cardsInfo pass to
-    // count today's reviews and subtract — not done here.
-    const query =
-      scope === "zehntage"
-        ? `tag:zehntage is:due`
-        : `deck:${AC_DECK} is:due`;
-    const ids = await acRaw<number[]>("findCards", { query });
-    const due = ids.length;
-    if (due === 0) return { available: true, due: 0, cards: [] };
-    // findCards returns ids in DB/nid order, NOT scheduler/due order — so a
-    // naive slice would surface an arbitrary subset in arbitrary order, missing
-    // the most-overdue cards. Fetch cardsInfo for ALL due ids, sort the way
-    // Anki's scheduler roughly would (mirroring ankidb.ts selectDue), THEN
-    // slice. (Bounded by the deck's due set; reused below — no double-fetch.)
-    const infos = await acRaw<AcReviewCardInfo[]>("cardsInfo", { cards: ids });
-    infos.sort((a, b) => {
-      const ra = queueRank(a.queue);
-      const rb = queueRank(b.queue);
-      if (ra !== rb) return ra - rb;
-      return a.due - b.due; // ascending due within a queue group (most-overdue first)
-    });
-    const cards: ReviewCard[] = infos.slice(0, limit).map((c) => {
-      const frontRaw =
-        c.fields[fm.front]?.value ??
-        Object.values(c.fields).sort((a, b) => a.order - b.order)[0]?.value ??
-        "";
-      return {
-        cardId: c.cardId,
-        question: rewriteAnkiMedia(c.question ?? ""),
-        answer: rewriteAnkiMedia(c.answer ?? ""),
-        front: stripHtml(frontRaw),
-      };
-    });
-    return { available: true, due, cards };
-  } catch {
-    return { available: false, due: 0, cards: [] };
-  }
+  if (!ankiFake()) return { available: false, due: 0, cards: [] };
+  // `scope` is honored only insofar as the queue is a single shared deck —
+  // the client always asks for "all" now (scope toggle removed).
+  const q = fakeQueueEnsure();
+  const cards = q.slice(0, limit);
+  return { available: true, due: q.length, cards };
 }
 
-/**
- * Grade a card through Anki's own scheduler (FSRS). The `answerCards` param
- * key is "answers" — using "cards" throws. Busts the listWords/progress cache
- * so due counts refresh on the next read.
- */
+/** FAKE-ONLY: record the grade and drop the card from the fake queue (e2e). */
 export async function answerCard(
   cardId: number,
   ease: 1 | 2 | 3 | 4,
 ): Promise<{ ok: boolean; error?: string }> {
-  if (ankiFake()) {
-    // Record the grade and drop the card from the fake queue, mirroring how a
-    // real grade removes the card from today's due set.
-    fakeAnswers.set(cardId, ease);
-    const q = fakeQueueEnsure();
-    const idx = q.findIndex((c) => c.cardId === cardId);
-    if (idx >= 0) q.splice(idx, 1);
-    bustListWordsCache();
-    return { ok: true };
-  }
-  if (!(await ankiLocalAvailable())) {
-    return { ok: false, error: "AnkiConnect not available" };
-  }
-  try {
-    const res = await acRaw<boolean[]>("answerCards", {
-      answers: [{ cardId, ease }],
-    });
-    bustListWordsCache();
-    if (Array.isArray(res) && res[0] === false) {
-      return { ok: false, error: "card not in review queue" };
-    }
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
-  }
+  if (!ankiFake()) return { ok: false, error: "AnkiConnect not available" };
+  // Mirrors how a real grade removes the card from today's due set.
+  fakeAnswers.set(cardId, ease);
+  const q = fakeQueueEnsure();
+  const idx = q.findIndex((c) => c.cardId === cardId);
+  if (idx >= 0) q.splice(idx, 1);
+  bustListWordsCache();
+  return { ok: true };
 }
 
-/**
- * Delete the note that owns `cardId` via AnkiConnect.
- *
- * Maps the card id to its note id using `cardsToNotes`, then deletes the note
- * with `deleteNotes`. Returns {ok:true} on success, {ok:false, error} on any
- * failure (AnkiConnect unreachable, card not found, etc.).
- *
- * In fake mode (ANKI_FAKE=1): removes the card from the fake queue so the UI
- * advances past it, and returns {ok:true}. The fake map is keyed by `front`
- * which we don't have here, so we only drain the queue entry.
- */
+/** FAKE-ONLY: drain the card from the fake queue so the UI advances (e2e). */
 export async function deleteNote(
   cardId: number,
 ): Promise<{ ok: boolean; error?: string }> {
-  if (ankiFake()) {
-    // Remove from the fake queue (the note-map keyed by front is not touched —
-    // acceptable for tests; the card just disappears from the review session).
-    if (fakeQueue) {
-      const idx = fakeQueue.findIndex((c) => c.cardId === cardId);
-      if (idx >= 0) fakeQueue.splice(idx, 1);
-    }
-    bustListWordsCache();
-    return { ok: true };
+  if (!ankiFake()) return { ok: false, error: "AnkiConnect not available" };
+  // The note-map keyed by front is not touched — acceptable for tests; the
+  // card just disappears from the review session.
+  if (fakeQueue) {
+    const idx = fakeQueue.findIndex((c) => c.cardId === cardId);
+    if (idx >= 0) fakeQueue.splice(idx, 1);
   }
-  if (!(await ankiLocalAvailable())) {
-    return { ok: false, error: "AnkiConnect not available" };
-  }
-  try {
-    // cardsToNotes: { cards: number[] } → number[] (note ids, parallel to cards)
-    const noteIds = await acRaw<number[]>("cardsToNotes", { cards: [cardId] });
-    if (!Array.isArray(noteIds) || noteIds.length === 0 || noteIds[0] == null) {
-      return { ok: false, error: `no note found for card ${cardId}` };
-    }
-    await acRaw("deleteNotes", { notes: [noteIds[0]] });
-    bustListWordsCache();
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
-  }
-}
-
-/** Raw bytes of a media file from the LOCAL Anki collection, or null. */
-export async function retrieveMedia(name: string): Promise<Uint8Array | null> {
-  if (ankiFake() || !(await ankiLocalAvailable())) return null;
-  try {
-    const b64 = await acRaw<string | false>("retrieveMediaFile", { filename: name });
-    if (!b64 || typeof b64 !== "string") return null;
-    return new Uint8Array(Buffer.from(b64, "base64"));
-  } catch {
-    return null;
-  }
+  bustListWordsCache();
+  return { ok: true };
 }
 
 async function ankiBase(): Promise<{ base: string; key: string }> {
@@ -735,22 +513,14 @@ export async function listWords(): Promise<AnkiCard[]> {
   return p;
 }
 
-/** New endpoint; may not exist yet on the server — callers fall back gracefully. */
+/**
+ * FAKE-ONLY: progress map for token coloring (e2e). The real per-word
+ * scheduling/progress now comes from ankidb.ts (dbProgress), routed by
+ * review.ts's progressAuto; this fake branch (returns {}) is all that's left.
+ */
 export async function getProgress(): Promise<Record<string, number> | null> {
   if (ankiFake()) return {};
-  if (await ankiLocalAvailable()) {
-    try {
-      return (await acProgress()) as Record<string, number>;
-    } catch {
-      return null;
-    }
-  }
-  try {
-    const data = await zehntageRequest("/zehntage/progress", "GET");
-    return data && typeof data === "object" ? (data as Record<string, number>) : null;
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 export async function addCard(card: AnkiCard): Promise<void> {
