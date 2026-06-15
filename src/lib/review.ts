@@ -29,6 +29,7 @@ import {
   reviewQueue as acReviewQueue,
   answerCard as acAnswerCard,
   deleteNote as acDeleteNote,
+  deleteCard as acDeleteCardByFront,
   addCard as acAddCard,
   listWords as acListWords,
   getProgress as acGetProgress,
@@ -41,6 +42,7 @@ import {
   dbDeckCounts,
   dbAnswerCard,
   dbDeleteNote,
+  dbDeleteNoteByFront,
   dbAddNote,
   dbListCards,
   dbProgress,
@@ -75,12 +77,14 @@ interface ReviewDeps {
   acReviewQueue: typeof acReviewQueue;
   acAnswerCard: typeof acAnswerCard;
   acDeleteNote: typeof acDeleteNote;
+  acDeleteCardByFront: typeof acDeleteCardByFront;
   acAddCard: typeof acAddCard;
   dbStatus: typeof dbStatus;
   dbReviewQueue: typeof dbReviewQueue;
   dbDeckCounts: typeof dbDeckCounts;
   dbAnswerCard: typeof dbAnswerCard;
   dbDeleteNote: typeof dbDeleteNote;
+  dbDeleteNoteByFront: typeof dbDeleteNoteByFront;
   dbAddNote: typeof dbAddNote;
   acListWords: typeof acListWords;
   acGetProgress: typeof acGetProgress;
@@ -93,12 +97,14 @@ const realDeps: ReviewDeps = {
   acReviewQueue,
   acAnswerCard,
   acDeleteNote,
+  acDeleteCardByFront,
   acAddCard,
   dbStatus,
   dbReviewQueue,
   dbDeckCounts,
   dbAnswerCard,
   dbDeleteNote,
+  dbDeleteNoteByFront,
   dbAddNote,
   acListWords,
   acGetProgress,
@@ -345,6 +351,66 @@ export async function deleteNoteAuto(cardId: number): Promise<DeleteResult> {
   if (dbDirectEnabled()) {
     try {
       const r = await deps.dbDeleteNote(cardId);
+      return {
+        ok: r.ok,
+        error: r.error,
+        reason: r.reason,
+        backend: "db",
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+        reason: "db-write-threw",
+        backend: "db",
+      };
+    }
+  }
+
+  // DB-direct disabled → no backend.
+  return {
+    ok: false,
+    error: "No delete backend available",
+    reason: "no-backend",
+    backend: "db",
+  };
+}
+
+/**
+ * Un-mine a card identified by its FRONT field value (the player's
+ * `/api/anki/delete` path: the web only knows the card front, not a cardId).
+ * Same windowless routing as deleteNoteAuto:
+ *
+ *   - ANKI_FAKE=1 → the in-memory fake by-front delete (removes from the fake
+ *     note map keyed by front, which `/api/anki/words` reads). e2e (wave12
+ *     un-mine) relies on this exact shape.
+ *   - else → `dbDeleteNoteByFront`, which resolves front→cardId read-only then
+ *     runs the gated, backup-first, fail-closed windowless DB delete. A missing
+ *     front is reported as {ok:false, reason:"not-found"} (the caller treats it
+ *     as already-absent → ok). No AnkiConnect.
+ *   - DB-direct disabled → refuse with {ok:false, reason:"no-backend"}.
+ */
+export async function deleteNoteByFrontAuto(front: string): Promise<DeleteResult> {
+  // Fake/e2e mode: drop the card from the in-memory fake map by front.
+  if (process.env.ANKI_FAKE === "1") {
+    try {
+      await deps.acDeleteCardByFront(front);
+      return { ok: true, backend: "ankiconnect" };
+    } catch (e) {
+      return {
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+        reason: "fake-delete-threw",
+        backend: "ankiconnect",
+      };
+    }
+  }
+
+  // Real path: windowless DB write. dbDeleteNoteByFront fails-closed when Anki
+  // is open and returns reason:"not-found" when the front isn't in the deck.
+  if (dbDirectEnabled()) {
+    try {
+      const r = await deps.dbDeleteNoteByFront(front);
       return {
         ok: r.ok,
         error: r.error,

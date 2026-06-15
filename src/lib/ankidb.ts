@@ -1679,6 +1679,65 @@ export async function dbDeleteNote(
   }
 }
 
+/**
+ * Delete a note identified by its FRONT field value (the un-mine path: the web
+ * only knows the card's front, e.g. `語 [よみ]`). Resolves the front to a
+ * concrete cardId read-only, then delegates to dbDeleteNote (same fail-closed /
+ * backup-first / graves write). Windowless — no AnkiConnect.
+ *
+ * Matching mirrors dbListCards: a note is read via the Mixed deck and its front
+ * field is compared exactly to `front`. If several notes share a front, the
+ * first found is deleted (un-mine removes the user's mined card for that word).
+ *
+ * @returns {ok:false, reason:"not-found"} when no note matches (treated as a
+ *          no-op success by the caller — the word is already absent).
+ */
+export async function dbDeleteNoteByFront(
+  front: string,
+  testHooks?: {
+    path?: string;
+    canWrite?: (p: string) => { ok: boolean; reason?: string };
+    backup?: (p: string) => Promise<unknown>;
+  },
+): Promise<DeleteResult> {
+  const path = testHooks?.path ?? collectionPath();
+  // Resolve front → a cardId read-only (no write, no lock).
+  let cardId: number | null = null;
+  const h = openReadOnly(path);
+  if (h) {
+    try {
+      const deckId = resolveDeckId(h, "Mixed");
+      const rows = h.db
+        .query(
+          `SELECT c.id AS cid, n.mid AS mid, n.flds AS flds
+           FROM cards c JOIN notes n ON c.nid = n.id
+           WHERE c.did = ?`,
+        )
+        .all(deckId) as { cid: number; mid: number; flds: string }[];
+      const fmCache = new Map<number, DbFieldMap | null>();
+      for (const r of rows) {
+        let fm = fmCache.get(r.mid);
+        if (fm === undefined) {
+          fm = resolveFieldMap(h, r.mid);
+          fmCache.set(r.mid, fm);
+        }
+        const v = r.flds.split(FLD_SEP);
+        const f = fm ? v[fm.front] ?? "" : v[0] ?? "";
+        if (f === front) {
+          cardId = r.cid;
+          break;
+        }
+      }
+    } catch {
+      cardId = null;
+    } finally {
+      closeDb(h);
+    }
+  }
+  if (cardId === null) return { ok: false, reason: "not-found" };
+  return dbDeleteNote(cardId, testHooks);
+}
+
 // ===========================================================================
 // WRITE — dbAddNote (windowless, offline-only). See:
 //   /tmp/zehntage-dbaddnote-spec.md  (empirically verified, schema ver 18)

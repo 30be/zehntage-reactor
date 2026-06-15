@@ -51,9 +51,6 @@ import {
 import { loadGlossary } from "../lib/glossary.ts";
 import { guessEpisode } from "../lib/episode.ts";
 import {
-  deleteCard,
-  ankiLocalAvailable,
-  storeMedia,
   bustListWordsCache,
   fakeResetQueue,
 } from "../lib/anki.ts";
@@ -61,6 +58,7 @@ import {
   reviewQueueAuto,
   answerCardAuto,
   deleteNoteAuto,
+  deleteNoteByFrontAuto,
   deckCountsAuto,
   reviewStatus,
   addNoteAuto,
@@ -1812,11 +1810,14 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         // Context format (lines joined with <br>):
         //   (1) JP sentence  (2) RU sentence translation  (3) image
         //   (4) [sound:...]  (5) source "file @ mm:ss" LAST.
-        // On the remote anki-mcp path the image travels via the `image`
-        // param instead (the remote server controls its placement).
-        const _ankiProbeT0 = Date.now();
-        const useLocal = await ankiLocalAvailable();
-        void logEvent("perf.anki", { op: "probe", ms: Date.now() - _ankiProbeT0, local: useLocal });
+        //
+        // Media is handled FULLY WINDOWLESSLY — AnkiConnect is gone:
+        //   - image → inlined as a self-contained data: URI (renders regardless
+        //     of which media file exists; matches the older inline-image cards).
+        //   - audio → written straight into the on-disk collection.media/ +
+        //     media.db2 via dbStoreMedia (windowless writer), referenced by
+        //     [sound:filename].
+        // Both are non-fatal: the card still goes through if media fails.
         let imgLine: string | undefined;
         let soundLine: string | undefined;
         let sourceLine: string | undefined;
@@ -1834,24 +1835,13 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
               .slice(0, 60);
             try {
               const frame = await captureFrame(entry.absPath, ts, 320);
-              if (useLocal) {
-                // Real filename straight into the local collection.
-                const name = await storeMedia(frame, `zr-${slug}-${stamp}.jpg`);
-                imgLine = `<img src="${name}">`;
-              } else {
-                // Local AnkiConnect is unavailable, so a remote-uploaded media
-                // name (anki_*.jpg) can't be served back through the local media
-                // proxy (which reads the local collection only) → broken <img>.
-                // Inline the frame as a self-contained data: URI instead: it
-                // always renders regardless of which Anki backend stored the
-                // card (matches the older, still-working inline-image cards).
-                const b64 = Buffer.from(frame).toString("base64");
-                imgLine = `<img src="data:image/jpeg;base64,${b64}">`;
-              }
+              const b64 = Buffer.from(frame).toString("base64");
+              imgLine = `<img src="data:image/jpeg;base64,${b64}">`;
             } catch {
               // no frame — card still goes through
             }
-            // Sentence audio: cut the cue's audio and reference it via
+            // Sentence audio: cut the cue's audio and write it into the local
+            // collection.media/ + media.db2 (windowless). Reference via
             // [sound:...]. Any failure along the way is non-fatal.
             if (
               typeof body.cueStart === "number" &&
@@ -1860,22 +1850,13 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
             ) {
               try {
                 const audio = await cutAudio(entry.absPath, body.cueStart, body.cueEnd);
-                if (useLocal) {
-                  const name = await storeMedia(audio, `zr-${slug}-${stamp}.mp3`);
-                  soundLine = `[sound:${name}]`;
-                } else {
-                  // Anki closed: write the audio straight into the local
-                  // collection.media/ + media.db2 (windowless, Option A). This
-                  // preserves sentence audio without AnkiConnect. Non-fatal on
-                  // failure — the card still goes through without [sound:].
-                  const stored = await dbStoreMedia(
-                    audio,
-                    `zr-${slug}-${stamp}.mp3`,
-                    { path: collectionPath() },
-                  );
-                  if (stored.ok && stored.filename) {
-                    soundLine = `[sound:${stored.filename}]`;
-                  }
+                const stored = await dbStoreMedia(
+                  audio,
+                  `zr-${slug}-${stamp}.mp3`,
+                  { path: collectionPath() },
+                );
+                if (stored.ok && stored.filename) {
+                  soundLine = `[sound:${stored.filename}]`;
                 }
               } catch {
                 // no audio — card still goes through
@@ -1922,11 +1903,20 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       }
 
       if (req.method === "POST" && path === "/api/anki/delete") {
+        // Same safety gate as the other Anki write endpoints.
+        const denied = await requireDbToken(req);
+        if (denied) return denied;
         const body = (await req.json()) as { front?: string };
         if (!body.front) return err("front required", 400);
-        await deleteCard(body.front);
-        bustAnkiWordsCache();
-        return json({ ok: true });
+        // Windowless un-mine: AnkiConnect is gone. ANKI_FAKE → fake by-front
+        // delete; real → dbDeleteNoteByFront (fail-closed when Anki is open).
+        // A front that's already absent (reason "not-found") is treated as a
+        // successful no-op so the client's optimistic delete stays consistent.
+        const delRes = await deleteNoteByFrontAuto(body.front);
+        const ok = delRes.ok || delRes.reason === "not-found";
+        if (ok) bustAnkiWordsCache();
+        void logEvent("anki_delete", { front: body.front, ok });
+        return json({ ok, error: ok ? undefined : delRes.error, reason: delRes.reason });
       }
 
       // --- library root (current root + re-root) ---
