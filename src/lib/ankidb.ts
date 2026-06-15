@@ -212,9 +212,10 @@ interface OpenDb {
 function openReadOnly(path: string): OpenDb | null {
   if (!existsSync(path)) return null;
 
-  // 1. Direct read-only open (works when Anki is closed / WAL checkpointed).
-  try {
-    const db = new Database(path, { readonly: true });
+  // Open `file` read-only, enforce query_only, smoke-read the collation-free
+  // `col` table, and register unicase best-effort. Throws on any failure.
+  const openHandle = (file: string): { db: Database; unicase: boolean } => {
+    const db = new Database(file, { readonly: true });
     try {
       db.exec("PRAGMA query_only = ON");
     } catch {
@@ -222,7 +223,12 @@ function openReadOnly(path: string): OpenDb | null {
     }
     // Smoke-read the always-present, collation-free `col` table.
     db.query("SELECT crt FROM col LIMIT 1").get();
-    const unicase = tryRegisterUnicase(db);
+    return { db, unicase: tryRegisterUnicase(db) };
+  };
+
+  // 1. Direct read-only open (works when Anki is closed / WAL checkpointed).
+  try {
+    const { db, unicase } = openHandle(path);
     return { db, unicase, tmpDir: null };
   } catch {
     /* fall through to copy path */
@@ -237,14 +243,7 @@ function openReadOnly(path: string): OpenDb | null {
     for (const ext of ["-wal", "-shm"]) {
       if (existsSync(path + ext)) copyFileSync(path + ext, dst + ext);
     }
-    const db = new Database(dst, { readonly: true });
-    try {
-      db.exec("PRAGMA query_only = ON");
-    } catch {
-      /* ignore */
-    }
-    db.query("SELECT crt FROM col LIMIT 1").get();
-    const unicase = tryRegisterUnicase(db);
+    const { db, unicase } = openHandle(dst);
     return { db, unicase, tmpDir };
   } catch {
     if (tmpDir) {
@@ -270,6 +269,218 @@ function closeDb(h: OpenDb): void {
     } catch {
       /* ignore */
     }
+  }
+}
+
+/** Close a DB handle, swallowing any error (close-and-ignore boilerplate). */
+function closeQuiet(db: Database | null | undefined): void {
+  try {
+    db?.close();
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Run a statement on a DB, swallowing any error (e.g. ROLLBACK best-effort). */
+function execQuiet(db: Database | null | undefined, sql: string): void {
+  try {
+    db?.exec(sql);
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Memoizing map lookup: return the cached value for `key`, computing + storing
+ * it on first access. `undefined` is a valid stored result (a resolved miss),
+ * so presence is checked with `has`, not truthiness.
+ */
+function getOrCompute<K, V>(cache: Map<K, V>, key: K, make: () => V): V {
+  if (cache.has(key)) return cache.get(key) as V;
+  const v = make();
+  cache.set(key, v);
+  return v;
+}
+
+// ---------------------------------------------------------------------------
+// Shared write-transaction scaffolding (dbAnswerCard / dbDeleteNote / dbAddNote).
+//
+// Every collection writer shares the SAME fail-closed safety wrapper:
+//   1. canWrite() gate (refuse if Anki open / hot WAL / wrong schema).
+//   2. backup BEFORE the first byte is written.
+//   3. open the REAL collection read-WRITE only inside the write path, with
+//      busy_timeout / journal_mode=wal / synchronous=FULL and best-effort unicase.
+//   4. BEGIN IMMEDIATE (grab the write lock up front; abort with reason "locked").
+//   5. run the caller's mutation body.
+//   6. PRAGMA foreign_key_check + PRAGMA integrity_check INSIDE the txn; any
+//      failure → clean ROLLBACK and a truthful ok:false (collation-missing on
+//      integrity_check is logged + skipped, never blocking a valid write).
+//   7. COMMIT, then wal_checkpoint(TRUNCATE) (non-fatal), then close.
+// On ANY thrown error: ROLLBACK (if a txn began) + close, surfaced as ok:false.
+//
+// The body may abort early by throwing a WriteAbort carrying the exact result
+// object the legacy inline `ROLLBACK; close; return {...}` path produced — the
+// wrapper rolls back, closes, and returns that object verbatim.
+// ---------------------------------------------------------------------------
+
+/** Thrown by a write body to roll back and return a specific result. */
+class WriteAbort<R> {
+  constructor(readonly result: R) {}
+}
+
+interface WriteTxnCtx<R> {
+  db: Database;
+  /** Whether the unicase collation registered (mirrors the read path). */
+  unicase: boolean;
+  /** Roll back + close and return `result` from the wrapper (early exit). */
+  abort: (result: R) => never;
+}
+
+interface WriteTxnOpts {
+  path: string;
+  gateFn: (p: string) => { ok: boolean; reason?: string };
+  /** Backup before any write. Omit for writers that take no backup. */
+  backupFn?: (p: string) => Promise<unknown>;
+  /** Label used in the integrity_check collation-skip warning. */
+  label?: string;
+  /** Run PRAGMA foreign_key_check before integrity_check (default true). */
+  foreignKeyCheck?: boolean;
+}
+
+/**
+ * Run a guarded write transaction. `body` performs the table mutations and may
+ * call `ctx.abort(result)` (or `throw new WriteAbort(result)`) to roll back and
+ * return `result`. On normal return, the wrapper runs foreign_key_check +
+ * integrity_check (inside the txn), commits, checkpoints, and returns `body`'s
+ * value. Preserves every safety invariant byte-for-byte.
+ */
+async function withWriteTxn<R extends { ok: boolean }>(
+  opts: WriteTxnOpts,
+  refused: () => R,
+  body: (ctx: WriteTxnCtx<R>) => R,
+): Promise<R> {
+  const { path, gateFn, backupFn, label, foreignKeyCheck = true } = opts;
+
+  // 1. REFUSE-TO-WRITE gates (fail-closed). NEVER proceed if Anki is open.
+  const gate = gateFn(path);
+  if (!gate.ok) return { ...refused(), reason: gate.reason ?? "refused" } as R;
+
+  // 2. Backup BEFORE any write.
+  if (backupFn) {
+    try {
+      await backupFn(path);
+    } catch (e) {
+      return { ...refused(), error: `backup failed: ${(e as Error).message}` } as R;
+    }
+  }
+
+  // 3. Open the REAL collection read-WRITE only inside the write path.
+  let db: Database | null = null;
+  let began = false;
+  try {
+    db = new Database(path, { readwrite: true });
+    db.exec("PRAGMA busy_timeout = 1000");
+    db.exec("PRAGMA journal_mode = wal");
+    db.exec("PRAGMA synchronous = FULL");
+    // Register unicase so PREPARE against unicase-bearing tables succeeds.
+    const unicase = tryRegisterUnicase(db);
+
+    // 4. BEGIN IMMEDIATE — grab the write lock up front; abort on BUSY.
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      began = true;
+    } catch {
+      closeQuiet(db);
+      return { ...refused(), reason: "locked" } as R;
+    }
+
+    const ctx: WriteTxnCtx<R> = {
+      db,
+      unicase,
+      abort: (result: R): never => {
+        throw new WriteAbort(result);
+      },
+    };
+
+    let out: R;
+    try {
+      out = body(ctx);
+    } catch (e) {
+      if (e instanceof WriteAbort) {
+        execQuiet(db, "ROLLBACK");
+        began = false;
+        closeQuiet(db);
+        return e.result as R;
+      }
+      throw e;
+    }
+
+    // 6. Pre-commit invariants (inside the txn — failure → ROLLBACK).
+    if (foreignKeyCheck) {
+      const fk = db.query("PRAGMA foreign_key_check").all();
+      if (fk.length > 0) {
+        execQuiet(db, "ROLLBACK");
+        began = false;
+        closeQuiet(db);
+        return { ...refused(), error: "foreign_key_check failed" } as R;
+      }
+    }
+
+    const icFail = runIntegrityCheck(db, label);
+    if (icFail !== null) {
+      execQuiet(db, "ROLLBACK");
+      began = false;
+      closeQuiet(db);
+      return { ...refused(), error: icFail } as R;
+    }
+
+    // 7. COMMIT, fold WAL back (non-fatal), close.
+    db.exec("COMMIT");
+    began = false;
+    execQuiet(db, "PRAGMA wal_checkpoint(TRUNCATE)");
+    db.close();
+    db = null;
+    return out;
+  } catch (e) {
+    if (db) {
+      if (began) execQuiet(db, "ROLLBACK");
+      closeQuiet(db);
+    }
+    return { ...refused(), error: (e as Error).message } as R;
+  }
+}
+
+/**
+ * Run PRAGMA integrity_check INSIDE the txn. Returns null when the collection is
+ * "ok" (or the unicase collation is missing → skip+warn), or an error string
+ * describing the failure (caller rolls back). NEVER throws.
+ */
+function runIntegrityCheck(db: Database, label?: string): string | null {
+  try {
+    const ic = db.query("PRAGMA integrity_check").get() as
+      | { integrity_check?: string }
+      | Record<string, unknown>
+      | null;
+    const icVal =
+      ic && typeof ic === "object"
+        ? String(
+            (ic as Record<string, unknown>).integrity_check ??
+              Object.values(ic)[0] ??
+              "",
+          )
+        : "";
+    if (icVal && icVal !== "ok") return `integrity_check: ${icVal}`;
+    return null;
+  } catch (icErr) {
+    const msg = (icErr as Error).message ?? "";
+    if (msg.includes("COLLSEQ") || msg.includes("collation")) {
+      // Missing unicase collation — not a data integrity issue; proceed.
+      const where = label ? `${label} ` : "";
+      console.warn(`[ankidb] ${where}integrity_check skipped: missing collation —`, msg);
+      return null;
+    }
+    // Unknown error from integrity_check inside the txn — roll back safely.
+    return `integrity_check threw: ${msg}`;
   }
 }
 
@@ -525,11 +736,7 @@ function renderRow(
   const values = row.flds.split(FLD_SEP);
   const firstField = values[0] ?? "";
 
-  let nt = ntCache.get(row.mid);
-  if (nt === undefined) {
-    nt = readNotetypeRender(h, row.mid);
-    ntCache.set(row.mid, nt);
-  }
+  const nt = getOrCompute(ntCache, row.mid, () => readNotetypeRender(h, row.mid));
 
   if (nt) {
     try {
@@ -593,16 +800,14 @@ export function dbStatus(deps: DbStatusDeps = {}): DbStatus {
       return false;
     }
   })();
-  const shmExists = existsSync(`${path}-shm`);
   let processOpen = false;
   try {
     processOpen = (deps.processRunning ?? ankiRunning)(path);
   } catch {
     processOpen = false;
   }
-  // shmExists is intentionally excluded: a stale -shm without a non-empty -wal
-  // or live process does not mean Anki is holding the collection.
-  void shmExists; // retained for potential future use (copy-when-locked guards)
+  // A stale -shm (without a non-empty -wal or live process) does NOT mean Anki
+  // is holding the collection, so it is intentionally excluded from this signal.
   const ankiOpen = walNonEmpty || processOpen;
 
   const ver = readSchemaVer(path) ?? 0;
@@ -806,11 +1011,7 @@ export function dbListCards(scope: ReviewScope = "all"): DbListedCard[] {
     const fmCache = new Map<number, DbFieldMap | null>();
     const out: DbListedCard[] = [];
     for (const r of rows) {
-      let fm = fmCache.get(r.mid);
-      if (fm === undefined) {
-        fm = resolveFieldMap(h, r.mid);
-        fmCache.set(r.mid, fm);
-      }
+      const fm = getOrCompute(fmCache, r.mid, () => resolveFieldMap(h, r.mid));
       const v = r.flds.split(FLD_SEP);
       const at = (ord: number | undefined): string =>
         ord === undefined ? "" : v[ord] ?? "";
@@ -917,11 +1118,7 @@ export function dbProgress(
     const fmCache = new Map<number, DbFieldMap | null>();
     const out: Record<string, DbProgressEntry> = {};
     for (const r of rows) {
-      let fm = fmCache.get(r.mid);
-      if (fm === undefined) {
-        fm = resolveFieldMap(h, r.mid);
-        fmCache.set(r.mid, fm);
-      }
+      const fm = getOrCompute(fmCache, r.mid, () => resolveFieldMap(h, r.mid));
       const v = r.flds.split(FLD_SEP);
       const front = fm ? v[fm.front] ?? "" : v[0] ?? "";
       // acProgress skips cards whose front is empty/falsy (`if (!front) continue`).
@@ -1144,45 +1341,14 @@ export async function dbAnswerCard(
   },
 ): Promise<AnswerResult> {
   const path = testHooks?.path ?? collectionPath();
-  const gateFn = testHooks?.canWrite ?? ((p: string) => canWrite(p));
-  const backupFn = testHooks?.backup ?? ((p: string) => backupCollection(p));
-
-  // 1. REFUSE-TO-WRITE gates (fail-closed). NEVER proceed if Anki is open.
-  const gate = gateFn(path);
-  if (!gate.ok) return { ok: false, reason: gate.reason ?? "refused" };
-
-  // 2. Backup BEFORE any write.
-  try {
-    await backupFn(path);
-  } catch (e) {
-    return { ok: false, error: `backup failed: ${(e as Error).message}` };
-  }
-
-  // 3. Open the REAL collection read-WRITE only inside the write path.
-  let db: Database | null = null;
-  let began = false;
-  try {
-    db = new Database(path, { readwrite: true });
-    db.exec("PRAGMA busy_timeout = 1000");
-    db.exec("PRAGMA journal_mode = wal");
-    db.exec("PRAGMA synchronous = FULL");
-    // Register unicase so deck_config / any unicase-bearing PREPARE succeeds
-    // (mirrors the read path). Best-effort; deck_config query needs no collation.
-    tryRegisterUnicase(db);
-
-    // BEGIN IMMEDIATE — grab the write lock up front; abort on BUSY.
-    try {
-      db.exec("BEGIN IMMEDIATE");
-      began = true;
-    } catch {
-      try {
-        db.close();
-      } catch {
-        /* ignore */
-      }
-      return { ok: false, reason: "locked" };
-    }
-
+  return withWriteTxn<AnswerResult>(
+    {
+      path,
+      gateFn: testHooks?.canWrite ?? ((p: string) => canWrite(p)),
+      backupFn: testHooks?.backup ?? ((p: string) => backupCollection(p)),
+    },
+    () => ({ ok: false }),
+    ({ db, abort }) => {
     const card = db
       .query(
         "SELECT id, type, queue, due, ivl, factor, reps, lapses, left, data FROM cards WHERE id = ?",
@@ -1201,12 +1367,7 @@ export async function dbAnswerCard(
           data: unknown;
         }
       | null;
-    if (!card) {
-      db.exec("ROLLBACK");
-      began = false;
-      db.close();
-      return { ok: false, error: `card ${cardId} not found` };
-    }
+    if (!card) return abort({ ok: false, error: `card ${cardId} not found` });
 
     const colRow = db.query("SELECT crt FROM col LIMIT 1").get() as { crt: number };
     const crt = colRow.crt;
@@ -1415,83 +1576,9 @@ export async function dbAnswerCard(
     // 5c. col bookkeeping: bump col.mod (MS). NEVER touch col.scm or col.usn.
     db.query("UPDATE col SET mod=?").run(nowMs);
 
-    // Pre-commit invariants (still inside the txn — a failure here rolls back).
-    const fk = db.query("PRAGMA foreign_key_check").all();
-    if (fk.length > 0) {
-      db.exec("ROLLBACK");
-      began = false;
-      db.close();
-      return { ok: false, error: "foreign_key_check failed" };
-    }
-
-    // integrity_check runs INSIDE the transaction so a failure → clean ROLLBACK
-    // and ok:false is truthful. Running it after COMMIT would mean a committed
-    // write gets reported as failed → double-grade on retry (H1 bug).
-    // Caveat: if the `unicase` collation failed to register (best-effort C ext),
-    // integrity_check throws SQLITE_ERROR_MISSING_COLLSEQ. Treat that as a skip
-    // (log + proceed) so a missing collation never blocks a valid write.
-    try {
-      const ic = db.query("PRAGMA integrity_check").get() as
-        | { integrity_check?: string }
-        | Record<string, unknown>
-        | null;
-      const icVal =
-        ic && typeof ic === "object"
-          ? String(
-              (ic as Record<string, unknown>).integrity_check ??
-                Object.values(ic)[0] ??
-                "",
-            )
-          : "";
-      if (icVal && icVal !== "ok") {
-        db.exec("ROLLBACK");
-        began = false;
-        db.close();
-        return { ok: false, error: `integrity_check: ${icVal}` };
-      }
-    } catch (icErr) {
-      const msg = (icErr as Error).message ?? "";
-      if (msg.includes("COLLSEQ") || msg.includes("collation")) {
-        // Missing unicase collation — not a data integrity issue; proceed.
-        console.warn("[ankidb] integrity_check skipped: missing collation —", msg);
-      } else {
-        // Unknown error from integrity_check inside the txn — roll back safely.
-        db.exec("ROLLBACK");
-        began = false;
-        db.close();
-        return { ok: false, error: `integrity_check threw: ${msg}` };
-      }
-    }
-
-    db.exec("COMMIT");
-    began = false;
-
-    // 5d. Fold WAL back (outside the txn; non-fatal if it fails).
-    try {
-      db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-    } catch {
-      /* non-fatal */
-    }
-    db.close();
-    db = null;
     return { ok: true };
-  } catch (e) {
-    if (db) {
-      if (began) {
-        try {
-          db.exec("ROLLBACK");
-        } catch {
-          /* ignore */
-        }
-      }
-      try {
-        db.close();
-      } catch {
-        /* ignore */
-      }
-    }
-    return { ok: false, error: (e as Error).message };
-  }
+    },
+  );
 }
 
 // ===========================================================================
@@ -1532,151 +1619,52 @@ export async function dbDeleteNote(
   },
 ): Promise<DeleteResult> {
   const path = testHooks?.path ?? collectionPath();
-  const gateFn = testHooks?.canWrite ?? ((p: string) => canWrite(p));
-  const backupFn = testHooks?.backup ?? ((p: string) => backupCollection(p));
+  return withWriteTxn<DeleteResult>(
+    {
+      path,
+      gateFn: testHooks?.canWrite ?? ((p: string) => canWrite(p)),
+      backupFn: testHooks?.backup ?? ((p: string) => backupCollection(p)),
+      label: "dbDeleteNote",
+      // dbDeleteNote historically ran integrity_check only (no foreign_key_check).
+      foreignKeyCheck: false,
+    },
+    () => ({ ok: false }),
+    ({ db, abort }) => {
+      // Resolve the note id from the card id.
+      const cardRow = db
+        .query("SELECT nid FROM cards WHERE id = ?")
+        .get(cardId) as { nid: number } | null;
+      if (!cardRow) return abort({ ok: false, error: `card ${cardId} not found` });
+      const nid = cardRow.nid;
 
-  // 1. REFUSE-TO-WRITE gates (fail-closed). NEVER proceed if Anki is open.
-  const gate = gateFn(path);
-  if (!gate.ok) return { ok: false, reason: gate.reason ?? "refused" };
+      // Collect ALL card ids belonging to this note (may be more than one for
+      // note types with multiple templates / cloze deletions).
+      const cardRows = db
+        .query("SELECT id FROM cards WHERE nid = ?")
+        .all(nid) as { id: number }[];
+      const cardIds = cardRows.map((r) => r.id);
 
-  // 2. Backup BEFORE any write.
-  try {
-    await backupFn(path);
-  } catch (e) {
-    return { ok: false, error: `backup failed: ${(e as Error).message}` };
-  }
+      const nowMs = Date.now();
 
-  // 3. Open the REAL collection read-WRITE only inside the write path.
-  let db: Database | null = null;
-  let began = false;
-  try {
-    db = new Database(path, { readwrite: true });
-    db.exec("PRAGMA busy_timeout = 1000");
-    db.exec("PRAGMA journal_mode = wal");
-    db.exec("PRAGMA synchronous = FULL");
-    tryRegisterUnicase(db);
+      // graves is a standard schema-18 table (created by Anki's migrations).
+      // Delete all cards of the note, then the note itself.
+      db.query("DELETE FROM cards WHERE nid = ?").run(nid);
+      db.query("DELETE FROM notes WHERE id = ?").run(nid);
 
-    // BEGIN IMMEDIATE — grab the write lock up front; abort on BUSY.
-    try {
-      db.exec("BEGIN IMMEDIATE");
-      began = true;
-    } catch {
-      try {
-        db.close();
-      } catch {
-        /* ignore */
-      }
-      return { ok: false, reason: "locked" };
-    }
+      // Record graves: one per deleted card (type 0) + one for the note (type 1).
+      // usn=-1 marks the row as pending sync to AnkiWeb.
+      const insGrave = db.query(
+        "INSERT INTO graves (usn, oid, type) VALUES (-1, ?, ?)",
+      );
+      for (const cid of cardIds) insGrave.run(cid, 0); // type 0 = card
+      insGrave.run(nid, 1); // type 1 = note
 
-    // Resolve the note id from the card id.
-    const cardRow = db
-      .query("SELECT nid FROM cards WHERE id = ?")
-      .get(cardId) as { nid: number } | null;
-    if (!cardRow) {
-      db.exec("ROLLBACK");
-      began = false;
-      db.close();
-      return { ok: false, error: `card ${cardId} not found` };
-    }
-    const nid = cardRow.nid;
+      // Bump col.mod (ms). NEVER touch col.scm or col.usn.
+      db.query("UPDATE col SET mod = ?").run(nowMs);
 
-    // Collect ALL card ids belonging to this note (may be more than one for
-    // note types with multiple templates / cloze deletions).
-    const cardRows = db
-      .query("SELECT id FROM cards WHERE nid = ?")
-      .all(nid) as { id: number }[];
-    const cardIds = cardRows.map((r) => r.id);
-
-    const nowMs = Date.now();
-
-    // Ensure the graves table exists (it is a standard Anki schema-18 table).
-    // We don't create it if it's missing; instead we surface a clear error so
-    // the caller can diagnose a corrupt / unexpected schema.
-    // (The table always exists in a schema-18 collection — it's created by
-    // Anki's migration scripts before we ever see the DB.)
-
-    // Delete all cards of the note.
-    db.query("DELETE FROM cards WHERE nid = ?").run(nid);
-
-    // Delete the note itself.
-    db.query("DELETE FROM notes WHERE id = ?").run(nid);
-
-    // Record graves: one per deleted card (type 0) + one for the note (type 1).
-    // usn=-1 marks the row as pending sync to AnkiWeb.
-    const insGrave = db.query(
-      "INSERT INTO graves (usn, oid, type) VALUES (-1, ?, ?)",
-    );
-    for (const cid of cardIds) {
-      insGrave.run(cid, 0); // type 0 = card
-    }
-    insGrave.run(nid, 1); // type 1 = note
-
-    // Bump col.mod (ms). NEVER touch col.scm or col.usn.
-    db.query("UPDATE col SET mod = ?").run(nowMs);
-
-    // Pre-commit integrity check (inside the txn — rollback on failure).
-    // collation-missing → skip+warn (same pattern as dbAnswerCard).
-    try {
-      const ic = db.query("PRAGMA integrity_check").get() as
-        | { integrity_check?: string }
-        | Record<string, unknown>
-        | null;
-      const icVal =
-        ic && typeof ic === "object"
-          ? String(
-              (ic as Record<string, unknown>).integrity_check ??
-                Object.values(ic)[0] ??
-                "",
-            )
-          : "";
-      if (icVal && icVal !== "ok") {
-        db.exec("ROLLBACK");
-        began = false;
-        db.close();
-        return { ok: false, error: `integrity_check: ${icVal}` };
-      }
-    } catch (icErr) {
-      const msg = (icErr as Error).message ?? "";
-      if (msg.includes("COLLSEQ") || msg.includes("collation")) {
-        console.warn("[ankidb] dbDeleteNote integrity_check skipped: missing collation —", msg);
-      } else {
-        db.exec("ROLLBACK");
-        began = false;
-        db.close();
-        return { ok: false, error: `integrity_check threw: ${msg}` };
-      }
-    }
-
-    db.exec("COMMIT");
-    began = false;
-
-    // Fold WAL back (outside the txn; non-fatal if it fails).
-    try {
-      db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-    } catch {
-      /* non-fatal */
-    }
-    db.close();
-    db = null;
-    return { ok: true };
-  } catch (e) {
-    if (db) {
-      if (began) {
-        try {
-          db.exec("ROLLBACK");
-        } catch {
-          /* ignore */
-        }
-      }
-      try {
-        db.close();
-      } catch {
-        /* ignore */
-      }
-    }
-    return { ok: false, error: (e as Error).message };
-  }
+      return { ok: true };
+    },
+  );
 }
 
 /**
@@ -1716,11 +1704,7 @@ export async function dbDeleteNoteByFront(
         .all(deckId) as { cid: number; mid: number; flds: string }[];
       const fmCache = new Map<number, DbFieldMap | null>();
       for (const r of rows) {
-        let fm = fmCache.get(r.mid);
-        if (fm === undefined) {
-          fm = resolveFieldMap(h, r.mid);
-          fmCache.set(r.mid, fm);
-        }
+        const fm = getOrCompute(fmCache, r.mid, () => resolveFieldMap(h, r.mid));
         const v = r.flds.split(FLD_SEP);
         const f = fm ? v[fm.front] ?? "" : v[0] ?? "";
         if (f === front) {
@@ -1867,60 +1851,18 @@ export async function dbAddNote(
   },
 ): Promise<AddNoteResult> {
   const path = testHooks?.path ?? collectionPath();
-  const gateFn = testHooks?.canWrite ?? ((p: string) => canWrite(p));
-  const backupFn = testHooks?.backup ?? ((p: string) => backupCollection(p));
   const allowDuplicate = testHooks?.allowDuplicate ?? false;
-
-  // 1. REFUSE-TO-WRITE gates (fail-closed). NEVER proceed if Anki is open.
-  const gate = gateFn(path);
-  if (!gate.ok) return { ok: false, reason: gate.reason ?? "refused" };
-
-  // 2. Backup BEFORE any write.
-  try {
-    await backupFn(path);
-  } catch (e) {
-    return { ok: false, error: `backup failed: ${(e as Error).message}` };
-  }
-
-  // 3. Open the REAL collection read-WRITE only inside the write path.
-  let db: Database | null = null;
-  let began = false;
-  try {
-    db = new Database(path, { readwrite: true });
-    db.exec("PRAGMA busy_timeout = 1000");
-    db.exec("PRAGMA journal_mode = wal");
-    db.exec("PRAGMA synchronous = FULL");
-    // Register unicase so PREPARE against notetypes/fields/templates/decks
-    // (name TEXT COLLATE unicase) succeeds.
-    const haveUnicase = tryRegisterUnicase(db);
-
-    try {
-      db.exec("BEGIN IMMEDIATE");
-      began = true;
-    } catch {
-      try {
-        db.close();
-      } catch {
-        /* ignore */
-      }
-      return { ok: false, reason: "locked" };
-    }
-
-    const fail = (out: AddNoteResult): AddNoteResult => {
-      try {
-        db?.exec("ROLLBACK");
-      } catch {
-        /* ignore */
-      }
-      began = false;
-      try {
-        db?.close();
-      } catch {
-        /* ignore */
-      }
-      db = null;
-      return out;
-    };
+  return withWriteTxn<AddNoteResult>(
+    {
+      path,
+      gateFn: testHooks?.canWrite ?? ((p: string) => canWrite(p)),
+      backupFn: testHooks?.backup ?? ((p: string) => backupCollection(p)),
+      label: "dbAddNote",
+    },
+    () => ({ ok: false }),
+    ({ db, unicase: haveUnicase, abort }) => {
+    // Early-exit alias: roll back + close + return `out` (wrapper-owned).
+    const fail = (out: AddNoteResult): AddNoteResult => abort(out);
 
     // -- Resolve mid (notetype by name). Requires unicase. --
     if (!haveUnicase) {
@@ -2077,65 +2019,9 @@ export async function dbAddNote(
     // -- col bookkeeping: bump col.mod (MS). NEVER touch col.scm / col.usn. --
     db.query("UPDATE col SET mod = ?").run(nowMs);
 
-    // -- Pre-commit invariants (inside the txn — failure → ROLLBACK). --
-    const fk = db.query("PRAGMA foreign_key_check").all();
-    if (fk.length > 0) {
-      return fail({ ok: false, error: "foreign_key_check failed" });
-    }
-
-    try {
-      const ic = db.query("PRAGMA integrity_check").get() as
-        | { integrity_check?: string }
-        | Record<string, unknown>
-        | null;
-      const icVal =
-        ic && typeof ic === "object"
-          ? String(
-              (ic as Record<string, unknown>).integrity_check ??
-                Object.values(ic)[0] ??
-                "",
-            )
-          : "";
-      if (icVal && icVal !== "ok") {
-        return fail({ ok: false, error: `integrity_check: ${icVal}` });
-      }
-    } catch (icErr) {
-      const msg = (icErr as Error).message ?? "";
-      if (msg.includes("COLLSEQ") || msg.includes("collation")) {
-        console.warn("[ankidb] dbAddNote integrity_check skipped: missing collation —", msg);
-      } else {
-        return fail({ ok: false, error: `integrity_check threw: ${msg}` });
-      }
-    }
-
-    db.exec("COMMIT");
-    began = false;
-
-    try {
-      db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-    } catch {
-      /* non-fatal */
-    }
-    db.close();
-    db = null;
     return { ok: true, noteId: nid, cardIds };
-  } catch (e) {
-    if (db) {
-      if (began) {
-        try {
-          db.exec("ROLLBACK");
-        } catch {
-          /* ignore */
-        }
-      }
-      try {
-        db.close();
-      } catch {
-        /* ignore */
-      }
-    }
-    return { ok: false, error: (e as Error).message };
-  }
+    },
+  );
 }
 
 // ===========================================================================
@@ -2246,18 +2132,8 @@ export async function dbStoreMedia(
     return { ok: true, filename: stored };
   } catch (e) {
     if (db) {
-      if (began) {
-        try {
-          db.exec("ROLLBACK");
-        } catch {
-          /* ignore */
-        }
-      }
-      try {
-        db.close();
-      } catch {
-        /* ignore */
-      }
+      if (began) execQuiet(db, "ROLLBACK");
+      closeQuiet(db);
     }
     return { ok: false, error: (e as Error).message };
   }

@@ -37,6 +37,7 @@ import {
   type ReactNode,
 } from "react";
 import type { KToken } from "./tokenizer.ts";
+import { usePersistedToggle } from "./usePersisted.ts";
 import {
   readFurthest,
   writeFurthest,
@@ -83,23 +84,6 @@ const PARAGRAPH_GAP_S = 1.5;
 // startSync() monkey-patch round-trips zr.* keys to the server like other UI
 // prefs). A single global pref — not per-document — so the choice sticks.
 const SECONDARY_KEY = "zr.read.secondary";
-
-function readShowSecondary(fallback: boolean): boolean {
-  try {
-    const v = localStorage.getItem(SECONDARY_KEY);
-    return v == null ? fallback : v === "1";
-  } catch {
-    return fallback;
-  }
-}
-
-function writeShowSecondary(on: boolean): void {
-  try {
-    localStorage.setItem(SECONDARY_KEY, on ? "1" : "0");
-  } catch {
-    /* quota / SSR — ignore */
-  }
-}
 
 export interface Paragraph {
   start: number;
@@ -165,16 +149,10 @@ export function Read({
   knownPct,
   settings,
 }: ReadProps) {
-  const [showSecondary, setShowSecondary] = useState(() =>
-    readShowSecondary(settings?.showSecondary ?? true),
+  const [showSecondary, , toggleSecondary] = usePersistedToggle(
+    SECONDARY_KEY,
+    settings?.showSecondary ?? true,
   );
-  const toggleSecondary = useCallback(() => {
-    setShowSecondary((v) => {
-      const next = !v;
-      writeShowSecondary(next);
-      return next;
-    });
-  }, []);
 
   const paragraphs = useMemo(
     () => buildParagraphs(cues, secondaryCues),

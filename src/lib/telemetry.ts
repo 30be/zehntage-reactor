@@ -23,6 +23,16 @@ export function eventsFilePath(): string {
   );
 }
 
+/** Map get-or-create: returns the existing value or inserts and returns init(). */
+function getOr<K, V>(map: Map<K, V>, key: K, init: () => V): V {
+  let v = map.get(key);
+  if (v === undefined) {
+    v = init();
+    map.set(key, v);
+  }
+  return v;
+}
+
 // Serialize appends so concurrent requests never interleave partial lines.
 let writeChain: Promise<void> = Promise.resolve();
 
@@ -63,9 +73,10 @@ interface EventsCacheSlot {
 }
 const eventsCache = new Map<string, EventsCacheSlot>();
 
-function parseEventsText(text: string): TelemetryEvent[] {
+function parseEventLines(lines: string[], start = 0): TelemetryEvent[] {
   const out: TelemetryEvent[] = [];
-  for (const line of text.split("\n")) {
+  for (let i = start; i < lines.length; i++) {
+    const line = lines[i]!;
     if (!line.trim()) continue;
     try {
       const e = JSON.parse(line) as TelemetryEvent;
@@ -75,6 +86,10 @@ function parseEventsText(text: string): TelemetryEvent[] {
     }
   }
   return out;
+}
+
+function parseEventsText(text: string): TelemetryEvent[] {
+  return parseEventLines(text.split("\n"));
 }
 
 export async function readEvents(): Promise<TelemetryEvent[]> {
@@ -141,23 +156,18 @@ export function summarizeEvents(events: TelemetryEvent[]): StatsSummary {
   // last seen heartbeat position per media (for content-time delta estimate)
   const lastPos = new Map<string, number>();
 
-  const day = (ts: number) => {
-    const key = localDate(ts);
-    let d = days.get(key);
-    if (!d) {
-      d = { date: key, playSec: 0, pauseSec: 0, mediaCount: 0, ankiAdds: 0, lookups: 0, media: new Set() };
-      days.set(key, d);
-    }
-    return d;
-  };
-  const med = (id: string) => {
-    let m = media.get(id);
-    if (!m) {
-      m = { mediaId: id, wallSec: 0, contentSec: 0, ankiAdds: 0, lookups: 0 };
-      media.set(id, m);
-    }
-    return m;
-  };
+  const day = (ts: number) =>
+    getOr(days, localDate(ts), () => ({
+      date: localDate(ts),
+      playSec: 0,
+      pauseSec: 0,
+      mediaCount: 0,
+      ankiAdds: 0,
+      lookups: 0,
+      media: new Set<string>(),
+    }));
+  const med = (id: string) =>
+    getOr(media, id, () => ({ mediaId: id, wallSec: 0, contentSec: 0, ankiAdds: 0, lookups: 0 }));
 
   for (const e of events) {
     if (!Number.isFinite(e.ts)) continue;
@@ -394,21 +404,15 @@ export function episodeSeries(events: TelemetryEvent[]): EpisodeDayRow[] {
 
   const row = (mediaId: string, ts: number): Acc => {
     const date = localDate(ts);
-    const key = `${mediaId} ${date}`;
-    let r = rows.get(key);
-    if (!r) {
-      r = {
-        mediaId,
-        date,
-        wallPlayingSec: 0,
-        wallPausedSec: 0,
-        contentSec: 0,
-        lookups: 0,
-        ankiAdds: 0,
-      };
-      rows.set(key, r);
-    }
-    return r;
+    return getOr(rows, `${mediaId} ${date}`, () => ({
+      mediaId,
+      date,
+      wallPlayingSec: 0,
+      wallPausedSec: 0,
+      contentSec: 0,
+      lookups: 0,
+      ankiAdds: 0,
+    }));
   };
 
   for (const e of events) {
@@ -508,18 +512,14 @@ export function overview(events: TelemetryEvent[], now = Date.now()): Overview {
     totals.contentSec += r.contentSec;
     totals.lookups += r.lookups;
     totals.ankiAdds += r.ankiAdds;
-    let d = byDay.get(r.date);
-    if (!d) {
-      d = {
-        date: r.date,
-        wallPlayingSec: 0,
-        wallPausedSec: 0,
-        contentSec: 0,
-        lookups: 0,
-        ankiAdds: 0,
-      };
-      byDay.set(r.date, d);
-    }
+    const d = getOr(byDay, r.date, () => ({
+      date: r.date,
+      wallPlayingSec: 0,
+      wallPausedSec: 0,
+      contentSec: 0,
+      lookups: 0,
+      ankiAdds: 0,
+    }));
     d.wallPlayingSec += r.wallPlayingSec;
     d.wallPausedSec += r.wallPausedSec;
     d.contentSec += r.contentSec;
@@ -827,18 +827,7 @@ export async function readRecentEvents(
   // bounded even as events.jsonl grows to many MB.
   const lines = text.split("\n");
   const start = Math.max(0, lines.length - max - 1); // -1 for trailing newline
-  const out: TelemetryEvent[] = [];
-  for (let i = start; i < lines.length; i++) {
-    const line = lines[i]!;
-    if (!line.trim()) continue;
-    try {
-      const e = JSON.parse(line) as TelemetryEvent;
-      if (e && typeof e.ts === "number" && typeof e.type === "string") out.push(e);
-    } catch {
-      // skip torn/garbage lines
-    }
-  }
-  return out;
+  return parseEventLines(lines, start);
 }
 
 export async function wordHistoryFromFile(forms: string[]): Promise<WordHistory> {

@@ -124,6 +124,20 @@ async function runTar(args: string[]): Promise<void> {
 }
 
 /** Delete all but the newest `keep` backup-*.tar.gz in dir. Returns deleted paths. */
+// Best-effort delete each name under dir; returns the paths actually removed.
+async function rmEach(dir: string, names: string[]): Promise<string[]> {
+  const deleted: string[] = [];
+  for (const name of names) {
+    try {
+      await rm(join(dir, name));
+      deleted.push(join(dir, name));
+    } catch {
+      // best effort
+    }
+  }
+  return deleted;
+}
+
 export async function rotateBackups(dir: string, keep = KEEP_BACKUPS): Promise<string[]> {
   let names: string[];
   try {
@@ -133,16 +147,7 @@ export async function rotateBackups(dir: string, keep = KEEP_BACKUPS): Promise<s
   }
   const backups = names.filter((n) => /^backup-.*\.tar\.gz$/.test(n)).sort();
   const doomed = backups.slice(0, Math.max(0, backups.length - keep));
-  const deleted: string[] = [];
-  for (const name of doomed) {
-    try {
-      await rm(join(dir, name));
-      deleted.push(join(dir, name));
-    } catch {
-      // best effort
-    }
-  }
-  return deleted;
+  return rmEach(dir, doomed);
 }
 
 export interface CreateBackupOptions {
@@ -395,17 +400,7 @@ export async function listSnapshots(dir?: string): Promise<SnapshotInfo[]> {
 export async function rotateSnapshots(dir?: string, keep = KEEP_SNAPSHOTS): Promise<string[]> {
   const d = dir ?? defaultSnapshotDir();
   const infos = await listSnapshots(d);
-  const doomed = snapshotsToDelete(infos, keep);
-  const deleted: string[] = [];
-  for (const name of doomed) {
-    try {
-      await rm(join(d, name));
-      deleted.push(join(d, name));
-    } catch {
-      // best effort
-    }
-  }
-  return deleted;
+  return rmEach(d, snapshotsToDelete(infos, keep));
 }
 
 export interface SnapshotResult {

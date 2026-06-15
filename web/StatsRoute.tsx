@@ -7,11 +7,10 @@ import { useEffect, useState } from "react";
 import {
   api,
   type AnkiWordsResponse,
-  type EpisodeDayRow,
   type LibraryEntry,
-  type Overview,
 } from "./api.ts";
 import { readKnownWords, useCoverage } from "./coverage.ts";
+import { useApi } from "./useApi.ts";
 import { activityShade, fmtMin, localDateStr } from "./statsfmt.ts";
 
 /** Enter/Space → activate, for role="button" containers (a11y). */
@@ -64,6 +63,13 @@ interface GrowthPoint {
   cumulative: number;
 }
 
+// Fetched directly (not via the api.ts client) like the old inline effect did.
+function fetchGrowth(): Promise<GrowthPoint[]> {
+  return fetch("/api/stats/growth").then((r) =>
+    r.ok ? (r.json() as Promise<GrowthPoint[]>) : Promise.reject(r.status),
+  );
+}
+
 type LoadState = "loading" | "error" | "ok";
 
 function SectionLoad({
@@ -92,46 +98,12 @@ export function Stats({ go }: { go: (h: string) => void }) {
   const [entries, setEntries] = useState<LibraryEntry[] | null>(null);
   const [anki, setAnki] = useState<AnkiWordsResponse | null>(null);
   const [ankiErr, setAnkiErr] = useState(false);
-  const [summary, setSummary] = useState<import("./api.ts").StatsSummary | null>(null);
-  const [summaryState, setSummaryState] = useState<LoadState>("loading");
-
-  const [episodes, setEpisodes] = useState<EpisodeDayRow[] | null>(null);
-  const [episodesState, setEpisodesState] = useState<LoadState>("loading");
-
-  const [ov, setOv] = useState<Overview | null>(null);
-  const [ovState, setOvState] = useState<LoadState>("loading");
-
-  const [comp, setComp] = useState<
-    import("./api.ts").ComprehensionSummary | null
-  >(null);
-  const [compState, setCompState] = useState<LoadState>("loading");
-
-  const [growth, setGrowth] = useState<GrowthPoint[] | null>(null);
-  const [growthState, setGrowthState] = useState<LoadState>("loading");
-
-  useEffect(() => {
-    void api
-      .statsSummary()
-      .then((v) => { setSummary(v); setSummaryState("ok"); })
-      .catch(() => setSummaryState("error"));
-    void api
-      .statsEpisodes()
-      .then((v) => { setEpisodes(v); setEpisodesState("ok"); })
-      .catch(() => setEpisodesState("error"));
-    void api
-      .statsOverview()
-      .then((v) => { setOv(v); setOvState("ok"); })
-      .catch(() => setOvState("error"));
-    void api
-      .statsComprehension()
-      .then((v) => { setComp(v); setCompState("ok"); })
-      .catch(() => setCompState("error"));
-    // Vocab growth (G2): fetched directly like other Stats sections.
-    void fetch("/api/stats/growth")
-      .then((r) => (r.ok ? (r.json() as Promise<GrowthPoint[]>) : Promise.reject(r.status)))
-      .then((v) => { setGrowth(v); setGrowthState("ok"); })
-      .catch(() => setGrowthState("error"));
-  }, []);
+  const { data: summary, state: summaryState } = useApi(api.statsSummary);
+  const { data: episodes, state: episodesState } = useApi(api.statsEpisodes);
+  const { data: ov, state: ovState } = useApi(api.statsOverview);
+  const { data: comp, state: compState } = useApi(api.statsComprehension);
+  // Vocab growth (G2): fetched directly like other Stats sections.
+  const { data: growth, state: growthState } = useApi(fetchGrowth);
   // Per-episode coverage, computed in idle time (web/coverage.ts hook).
   const coverage = useCoverage(entries, anki);
 

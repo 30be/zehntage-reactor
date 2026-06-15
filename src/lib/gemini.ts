@@ -455,6 +455,22 @@ ${numbered}`;
 
 const BATCH_SIZE = 100;
 
+// Process cues in fixed-size batches, concatenating each batch's output cues and
+// reporting progress (done/total) after each batch.
+async function runBatched(
+  cues: Cue[],
+  handleBatch: (batch: Cue[]) => Promise<Cue[]>,
+  onProgress?: (done: number, total: number) => void,
+): Promise<Cue[]> {
+  const out: Cue[] = [];
+  for (let i = 0; i < cues.length; i += BATCH_SIZE) {
+    const batch = cues.slice(i, i + BATCH_SIZE);
+    out.push(...(await handleBatch(batch)));
+    onProgress?.(Math.min(i + BATCH_SIZE, cues.length), cues.length);
+  }
+  return out;
+}
+
 /** Exported for testing. Throws if translation count doesn't match cue count. */
 export function assertTranslationCount(translations: string[], expected: number): void {
   if (translations.length !== expected) {
@@ -558,9 +574,7 @@ export async function correctNames(
   }
   if (glossary.length === 0) return cues.map((c) => ({ ...c }));
 
-  const out: Cue[] = [];
-  for (let i = 0; i < cues.length; i += BATCH_SIZE) {
-    const batch = cues.slice(i, i + BATCH_SIZE);
+  return runBatched(cues, async (batch) => {
     try {
       const result = (await callGemini(
         buildCorrectBatchPrompt(batch.map((c) => c.text), glossary),
@@ -570,18 +584,16 @@ export async function correctNames(
         throw new Error("Gemini returned no corrected array");
       }
       assertTranslationCount(result.corrected, batch.length);
-      batch.forEach((c, j) => {
+      return batch.map((c, j) => {
         const proposed = stripEnumerator(result.corrected[j]!, j);
         const text = acceptCorrection(c.text, proposed) ? proposed : c.text;
-        out.push({ start: c.start, end: c.end, text });
+        return { start: c.start, end: c.end, text };
       });
     } catch {
       // fail safe: keep the originals for this batch
-      batch.forEach((c) => out.push({ start: c.start, end: c.end, text: c.text }));
+      return batch.map((c) => ({ start: c.start, end: c.end, text: c.text }));
     }
-    onProgress?.(Math.min(i + BATCH_SIZE, cues.length), cues.length);
-  }
-  return out;
+  }, onProgress);
 }
 
 export async function translateCues(
@@ -655,14 +667,8 @@ export async function translateCues(
     }
   };
 
-  const out: Cue[] = [];
-  for (let i = 0; i < cues.length; i += BATCH_SIZE) {
-    const batch = cues.slice(i, i + BATCH_SIZE);
+  return runBatched(cues, async (batch) => {
     const texts = await translateBatchResilient(batch);
-    batch.forEach((c, j) => {
-      out.push({ start: c.start, end: c.end, text: texts[j]! });
-    });
-    onProgress?.(Math.min(i + BATCH_SIZE, cues.length), cues.length);
-  }
-  return out;
+    return batch.map((c, j) => ({ start: c.start, end: c.end, text: texts[j]! }));
+  }, onProgress);
 }

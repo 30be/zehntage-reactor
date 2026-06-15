@@ -59,8 +59,6 @@ import {
   answerCardAuto,
   deleteNoteAuto,
   deleteNoteByFrontAuto,
-  deckCountsAuto,
-  reviewStatus,
   addNoteAuto,
   listCardsAuto,
   progressAuto,
@@ -114,6 +112,8 @@ import {
   dueIntersection,
   type EntryIndex,
 } from "../lib/tokenindex.ts";
+
+import { bodyJson, q, qList, attachment } from "./http.ts";
 
 const PUBLIC_DIR = join(import.meta.dir, "..", "..", "public");
 
@@ -1270,7 +1270,7 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
           return new Response(bytes, {
             headers: {
               "Content-Type": "image/jpeg",
-              "Content-Disposition": `attachment; filename="${exportMediaFileName(entry.name, t, "jpg")}"`,
+              "Content-Disposition": attachment(exportMediaFileName(entry.name, t, "jpg")),
             },
           });
         } catch (e) {
@@ -1291,7 +1291,7 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
           return new Response(bytes, {
             headers: {
               "Content-Type": "audio/mpeg",
-              "Content-Disposition": `attachment; filename="${exportMediaFileName(entry.name, start, "mp3")}"`,
+              "Content-Disposition": attachment(exportMediaFileName(entry.name, start, "mp3")),
             },
           });
         } catch (e) {
@@ -1328,7 +1328,7 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       if (req.method === "POST" && whisperStart) {
         const entry = library.get(whisperStart[1]!);
         if (!entry) return err("not found", 404);
-        const body = (await req.json().catch(() => ({}))) as { lang?: string };
+        const body = await bodyJson<{ lang?: string }>(req, {});
         const lang = body.lang ?? "ja";
         // `lang` becomes a filename component in sidecarPath — reject anything
         // that isn't a plain BCP-47 tag to prevent path injection.
@@ -1548,7 +1548,7 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       if (req.method === "POST" && translate) {
         const entry = library.get(translate[1]!);
         if (!entry) return err("not found", 404);
-        const body = (await req.json().catch(() => ({}))) as { targetLang?: string };
+        const body = await bodyJson<{ targetLang?: string }>(req, {});
         const targetLang = body.targetLang ?? "ru";
         // `targetLang` becomes a filename component in sidecarPath — reject
         // anything that isn't a plain BCP-47 tag to prevent path injection.
@@ -1925,7 +1925,7 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
           return json({ root: currentRoot, count: library.list().length });
         }
         if (req.method === "POST") {
-          const body = (await req.json().catch(() => ({}))) as { path?: string };
+          const body = await bodyJson<{ path?: string }>(req, {});
           const p = (body.path ?? "").trim();
           if (!p) return err("path required", 400);
           const st = await stat(p).catch(() => null);
@@ -1945,9 +1945,7 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
 
       // --- telemetry: client event batches + summary ---
       if (req.method === "POST" && path === "/api/events") {
-        const body = (await req.json().catch(() => ({}))) as {
-          events?: TelemetryEvent[];
-        };
+        const body = await bodyJson<{ events?: TelemetryEvent[] }>(req, {});
         if (!Array.isArray(body.events)) return err("events array required", 400);
         await logEvents(body.events);
         return json({ ok: true, count: body.events.length });
@@ -1965,7 +1963,7 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         return new Response(toCsv(episodeSeries(await readEvents())), {
           headers: {
             "Content-Type": "text/csv; charset=utf-8",
-            "Content-Disposition": 'attachment; filename="episodes.csv"',
+            "Content-Disposition": attachment("episodes.csv"),
           },
         });
       }
@@ -1987,8 +1985,8 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       // fetches it lazily on open. Pass the lemma plus the surface form so we
       // match however the click was originally logged (events store `word`).
       if (req.method === "GET" && path === "/api/word/history") {
-        const lemma = (url.searchParams.get("lemma") ?? "").trim();
-        const surface = (url.searchParams.get("surface") ?? "").trim();
+        const lemma = q(url, "lemma");
+        const surface = q(url, "surface");
         const forms = [lemma, surface].filter(Boolean);
         if (forms.length === 0) return err("lemma required", 400);
         const h = await wordHistoryFromFile(forms);
@@ -2004,14 +2002,9 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
 
       // --- lemma index queries (lazy per-entry indexes, ja track) ---
       if (req.method === "GET" && path === "/api/index/encounters") {
-        const lemma = (url.searchParams.get("lemma") ?? "").trim();
+        const lemma = q(url, "lemma");
         if (!lemma) return err("lemma required", 400);
-        const wanted = new Set(
-          (url.searchParams.get("mediaIds") ?? "")
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean),
-        );
+        const wanted = new Set(qList(url, "mediaIds"));
         const entries = library.list();
         // Only entries already indexed + explicitly requested ones get built;
         // a popup hover must never trigger a full-library tokenize.
@@ -2034,14 +2027,11 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       ) {
         let known: string[] = [];
         if (req.method === "POST") {
-          const body = (await req.json().catch(() => ({}))) as { known?: unknown };
+          const body = await bodyJson<{ known?: unknown }>(req, {});
           if (Array.isArray(body.known))
             known = body.known.filter((k): k is string => typeof k === "string");
         } else {
-          known = (url.searchParams.get("known") ?? "")
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean);
+          known = qList(url, "known");
         }
         const knownSet = new Set(known);
         const entries = library.list();
@@ -2069,9 +2059,7 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       }
 
       if (req.method === "POST" && path === "/api/index/due") {
-        const body = (await req.json().catch(() => ({}))) as {
-          dueFronts?: unknown;
-        };
+        const body = await bodyJson<{ dueFronts?: unknown }>(req, {});
         if (!Array.isArray(body.dueFronts))
           return err("dueFronts array required", 400);
         // Anki fronts are "word" or "word [reading]" — the index keys on lemmas.
@@ -2127,32 +2115,12 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         return json({ scope, available, due, cards });
       }
 
-      // Due counts {new, learning, review}. Additive; DB-direct preferred.
-      if (req.method === "GET" && path === "/api/review/counts") {
-        const raw = url.searchParams.get("scope") ?? "zehntage";
-        if (raw !== "zehntage" && raw !== "all") {
-          return err("scope must be 'zehntage' or 'all'", 400);
-        }
-        const scope = raw as "zehntage" | "all";
-        const counts = await deckCountsAuto(scope);
-        return json(counts);
-      }
-
-      // Engine capability snapshot. Additive; not consumed by current UI.
-      if (req.method === "GET" && path === "/api/review/status") {
-        const status = await reviewStatus();
-        return json(status);
-      }
-
       if (req.method === "POST" && path === "/api/review/answer") {
         // Safety gate for the upcoming windowless write-back. Open when
         // ZEHNTAGE_DB_TOKEN is unset; constant-time check when set.
         const denied = await requireDbToken(req);
         if (denied) return denied;
-        const body = (await req.json().catch(() => ({}))) as {
-          cardId?: unknown;
-          ease?: unknown;
-        };
+        const body = await bodyJson<{ cardId?: unknown; ease?: unknown }>(req, {});
         const cardId = body.cardId;
         const ease = body.ease;
         if (typeof cardId !== "number" || !Number.isFinite(cardId)) {
@@ -2187,9 +2155,7 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         // when ZEHNTAGE_DB_TOKEN is set, open when unset.
         const denied = await requireDbToken(req);
         if (denied) return denied;
-        const body = (await req.json().catch(() => ({}))) as {
-          cardId?: unknown;
-        };
+        const body = await bodyJson<{ cardId?: unknown }>(req, {});
         const cardId = body.cardId;
         if (typeof cardId !== "number" || !Number.isFinite(cardId)) {
           return err("cardId must be a number", 400);
@@ -2204,11 +2170,7 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
 
       // --- show-local lemma frequency (pre-study ordering) ---
       if (req.method === "GET" && path === "/api/index/showfreq") {
-        const ids = (url.searchParams.get("mediaIds") ?? "")
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-        const wanted = new Set(ids);
+        const wanted = new Set(qList(url, "mediaIds"));
         const scope = library.list().filter((e) => wanted.has(e.id));
         const _tokSfT0 = Date.now();
         const indexes = await collectIndexes(scope, Math.max(1, scope.length));
@@ -2220,14 +2182,14 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       if (path === "/api/state") {
         if (req.method === "GET") return json(await readState());
         if (req.method === "POST") {
-          const body = (await req.json().catch(() => ({}))) as ZrState;
+          const body = await bodyJson<ZrState>(req, {} as ZrState);
           return json(await mergeIntoFile(body));
         }
       }
 
       // --- jimaku.cc subtitle directory ---
       if (req.method === "GET" && path === "/api/jimaku/search") {
-        let query = (url.searchParams.get("query") ?? "").trim();
+        let query = q(url, "query");
         const mediaId = url.searchParams.get("mediaId") ?? "";
         if (!query && mediaId) {
           const entry = library.get(mediaId);
@@ -2259,11 +2221,10 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       }
 
       if (req.method === "POST" && path === "/api/jimaku/download") {
-        const body = (await req.json().catch(() => ({}))) as {
-          mediaId?: string;
-          url?: string;
-          name?: string;
-        };
+        const body = await bodyJson<{ mediaId?: string; url?: string; name?: string }>(
+          req,
+          {},
+        );
         if (!body.mediaId || !body.url || !body.name)
           return err("mediaId, url and name required", 400);
         // SSRF guard: the server fetches body.url, so restrict it to jimaku.cc
@@ -2302,7 +2263,7 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
           status: 200,
           headers: {
             "Content-Type": "application/json",
-            "Content-Disposition": `attachment; filename="${exportFileName()}"`,
+            "Content-Disposition": attachment(exportFileName()),
           },
         });
       }
@@ -2336,7 +2297,7 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       }
 
       if (req.method === "POST" && path === "/api/snapshots/restore") {
-        const body = (await req.json().catch(() => ({}))) as { name?: unknown };
+        const body = await bodyJson<{ name?: unknown }>(req, {});
         if (typeof body.name !== "string" || !body.name) {
           return err("missing snapshot `name`", 400);
         }

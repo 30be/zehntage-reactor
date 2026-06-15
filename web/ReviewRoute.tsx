@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { api, type ReviewCard } from "./api.ts";
 import { sanitizeAnkiHtml } from "./ankihtml.ts";
+import { usePersistedToggle } from "./usePersisted.ts";
 
 type Phase = "loading" | "offline" | "empty" | "question" | "answer" | "done";
 
@@ -90,21 +91,7 @@ export function Review({
   // loop on the same card). Cleared on the next successful action.
   const [gradeErr, setGradeErr] = useState<string | null>(null);
   // two-column layout toggle, persisted across sessions (default off).
-  const [twoCol, setTwoCol] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(TWOCOL_KEY) === "1";
-    } catch {
-      return false;
-    }
-  });
-  const toggleTwoCol = useCallback((next: boolean) => {
-    setTwoCol(next);
-    try {
-      localStorage.setItem(TWOCOL_KEY, next ? "1" : "0");
-    } catch {
-      /* storage may be unavailable (private mode) — toggle still works in-session */
-    }
-  }, []);
+  const [twoCol, toggleTwoCol] = usePersistedToggle(TWOCOL_KEY, false);
 
   const answerRef = useRef<HTMLDivElement>(null);
   // guards optimistic advance so a double key-press can't grade the same card

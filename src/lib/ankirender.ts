@@ -93,12 +93,15 @@ export function protoString(v: ProtoValue | undefined): string {
   return String(v);
 }
 
+// Little-endian DataView over a Uint8Array's exact byte range.
+const dataView = (v: Uint8Array) => new DataView(v.buffer, v.byteOffset, v.byteLength);
+
 /** Interpret a varint field value as a JS number. */
 export function protoNumber(v: ProtoValue | undefined): number {
   if (v == null) return 0;
   if (typeof v === "bigint") return Number(v);
   // little-endian fixed32/64
-  const dv = new DataView(v.buffer, v.byteOffset, v.byteLength);
+  const dv = dataView(v);
   if (v.byteLength >= 8) return Number(dv.getBigUint64(0, true));
   if (v.byteLength >= 4) return dv.getUint32(0, true);
   return 0;
@@ -107,7 +110,7 @@ export function protoNumber(v: ProtoValue | undefined): number {
 /** Decode a packed repeated float32 (little-endian) length-delimited field. */
 export function protoPackedFloats(v: ProtoValue | undefined): number[] {
   if (!(v instanceof Uint8Array)) return [];
-  const dv = new DataView(v.buffer, v.byteOffset, v.byteLength);
+  const dv = dataView(v);
   const out: number[] = [];
   for (let i = 0; i + 4 <= v.byteLength; i += 4) out.push(dv.getFloat32(i, true));
   return out;
@@ -116,8 +119,7 @@ export function protoPackedFloats(v: ProtoValue | undefined): number[] {
 /** Decode a single fixed32 float field value. */
 export function protoFloat(v: ProtoValue | undefined): number {
   if (!(v instanceof Uint8Array) || v.byteLength < 4) return 0;
-  const dv = new DataView(v.buffer, v.byteOffset, v.byteLength);
-  return dv.getFloat32(0, true);
+  return dataView(v).getFloat32(0, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -175,11 +177,7 @@ export function decodeDeckConfig(configBlob: Uint8Array): DeckConfigDecoded {
   }
   // Prefer the newest non-empty weight array (f6, else f5, else f3).
   const weights =
-    weightHistory[6]?.length
-      ? weightHistory[6]
-      : weightHistory[5]?.length
-        ? weightHistory[5]
-        : (weightHistory[3] ?? []);
+    [6, 5, 3].map((k) => weightHistory[k]).find((w) => w?.length) ?? [];
   // FSRS-5/6 schedules on exactly 21 weights; a malformed/truncated array would
   // silently corrupt write-back, so reject it here before any caller schedules.
   if (weights.length !== 21)

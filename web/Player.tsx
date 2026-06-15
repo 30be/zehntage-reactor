@@ -52,6 +52,7 @@ import {
   type QaItem,
 } from "./player/shared.ts";
 import { useWhisperJob } from "./player/useWhisperJob.ts";
+import { usePersistedToggle } from "./usePersisted.ts";
 import { computeCueUnknowns } from "./player/cueUnknowns.ts";
 import { useResume } from "./player/useResume.ts";
 import { useActiveCues } from "./player/useActiveCues.ts";
@@ -106,26 +107,16 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   const blurOffRef = useRef(false);
   const lastBDownRef = useRef(0);
   // Autopause: no UI control — toggled with the `p` hotkey, persisted.
-  const [autopause, setAutopause] = useState(() => {
-    try {
-      return localStorage.getItem("zr.autopause") === "1";
-    } catch {
-      return false;
-    }
-  });
+  const onAutopauseChange = useCallback(
+    (next: boolean) => toast(next ? "autopause on" : "autopause off"),
+    [toast],
+  );
+  const [autopause, , toggleAutopause] = usePersistedToggle(
+    "zr.autopause",
+    false,
+    onAutopauseChange,
+  );
   const autopauseRef = useRef(false);
-  const toggleAutopause = useCallback(() => {
-    setAutopause((prev) => {
-      const next = !prev;
-      try {
-        localStorage.setItem("zr.autopause", next ? "1" : "0");
-      } catch {
-        /* ignore */
-      }
-      toast(next ? "autopause on" : "autopause off");
-      return next;
-    });
-  }, [toast]);
   // True while WE are performing the autopause seek-back, so the user-seek
   // detector below doesn't treat it as a manual seek.
   const internalSeekRef = useRef(false);
@@ -279,24 +270,11 @@ export function Player({ entry, startAt, toast, settings }: Props) {
 
   // "with frames" toggle in the pre-study header: bulk adds also pass
   // mediaId+timestamp so the server captures a frame per card (slower).
-  const [preFrames, setPreFrames] = useState(() => {
-    try {
-      return localStorage.getItem("zr.prestudyFrames") !== "0"; // default ON
-    } catch {
-      return true;
-    }
-  });
-  const togglePreFrames = useCallback(() => {
-    setPreFrames((prev) => {
-      const next = !prev;
-      try {
-        localStorage.setItem("zr.prestudyFrames", next ? "1" : "0");
-      } catch {
-        /* ignore */
-      }
-      return next;
-    });
-  }, []);
+  // default ON: a missing zr.prestudyFrames key yields true.
+  const [preFrames, , togglePreFrames] = usePersistedToggle(
+    "zr.prestudyFrames",
+    true,
+  );
 
   // --- telemetry: playback heartbeat every 15s while the Player is mounted ---
   useEffect(() => {
@@ -542,24 +520,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   }, [entry.id]);
 
   // --- cue-list sidebar (toggled with `l`, persisted) ---
-  const [sidebarOpen, setSidebarOpen] = useState(() => {
-    try {
-      return localStorage.getItem("zr.sidebar") === "1";
-    } catch {
-      return false;
-    }
-  });
-  const toggleSidebar = useCallback(() => {
-    setSidebarOpen((o) => {
-      const next = !o;
-      try {
-        localStorage.setItem("zr.sidebar", next ? "1" : "0");
-      } catch {
-        /* ignore */
-      }
-      return next;
-    });
-  }, []);
+  const [sidebarOpen, , toggleSidebar] = usePersistedToggle("zr.sidebar", false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   useEffect(() => {
     const onFs = () => setIsFullscreen(document.fullscreenElement != null);

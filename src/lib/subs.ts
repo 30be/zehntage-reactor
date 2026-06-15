@@ -672,16 +672,22 @@ interface FfprobeStream {
   tags?: Record<string, string>;
 }
 
-export async function probeStreams(file: string): Promise<FfprobeStream[]> {
-  const proc = Bun.spawn(
-    ["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", file],
-    { stdout: "pipe", stderr: "pipe" },
-  );
-  const [out] = await Promise.all([
+// Run a subprocess to completion, draining both pipes (avoids deadlock) and
+// returning captured stdout/stderr text plus the exit code.
+async function spawnText(argv: string[]): Promise<{ out: string; err: string; code: number }> {
+  const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" });
+  const [out, err] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
   ]);
-  if ((await proc.exited) !== 0) throw new Error(`ffprobe failed for ${file}`);
+  return { out, err, code: await proc.exited };
+}
+
+export async function probeStreams(file: string): Promise<FfprobeStream[]> {
+  const { out, code } = await spawnText([
+    "ffprobe", "-v", "error", "-print_format", "json", "-show_streams", file,
+  ]);
+  if (code !== 0) throw new Error(`ffprobe failed for ${file}`);
   const data = JSON.parse(out) as { streams?: FfprobeStream[] };
   return data.streams ?? [];
 }
@@ -705,15 +711,18 @@ export async function listEmbeddedSubTracks(file: string): Promise<SubTrack[]> {
     // matching the previous always-probe behavior).
   }
   const tracks = await listEmbeddedSubTracksUncached(file);
-  if (key != null) {
-    while (embeddedTracksCache.size >= EMBEDDED_TRACKS_CACHE_MAX) {
-      const oldest = embeddedTracksCache.keys().next().value;
-      if (oldest === undefined) break;
-      embeddedTracksCache.delete(oldest);
-    }
-    embeddedTracksCache.set(key, tracks);
-  }
+  if (key != null) fifoSet(embeddedTracksCache, key, tracks, EMBEDDED_TRACKS_CACHE_MAX);
   return tracks;
+}
+
+// Insert into a FIFO-capped Map, evicting oldest entries until under `max`.
+function fifoSet<V>(cache: Map<string, V>, key: string, value: V, max: number): void {
+  while (cache.size >= max) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+  cache.set(key, value);
 }
 
 async function listEmbeddedSubTracksUncached(file: string): Promise<SubTrack[]> {
@@ -754,35 +763,12 @@ export async function extractEmbeddedTrack(
   } catch {
     // unstatable — extract uncached (ffmpeg will report the real error)
   }
-  const proc = Bun.spawn(
-    [
-      "ffmpeg",
-      "-v",
-      "error",
-      "-i",
-      file,
-      "-map",
-      `0:${streamIndex}`,
-      "-f",
-      "srt",
-      "-",
-    ],
-    { stdout: "pipe", stderr: "pipe" },
-  );
-  const [out, err] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+  const { out, err, code } = await spawnText([
+    "ffmpeg", "-v", "error", "-i", file, "-map", `0:${streamIndex}`, "-f", "srt", "-",
   ]);
-  if ((await proc.exited) !== 0) {
+  if (code !== 0) {
     throw new Error(`ffmpeg subtitle extraction failed: ${err.slice(0, 300)}`);
   }
-  if (key != null) {
-    while (extractCache.size >= EXTRACT_CACHE_MAX) {
-      const oldest = extractCache.keys().next().value;
-      if (oldest === undefined) break;
-      extractCache.delete(oldest);
-    }
-    extractCache.set(key, out);
-  }
+  if (key != null) fifoSet(extractCache, key, out, EXTRACT_CACHE_MAX);
   return out;
 }
