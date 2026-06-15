@@ -1,21 +1,28 @@
 // ---------------------------------------------------------------------------
-// Backend selector facade for the review engine (Wave 18, read path).
+// Backend selector facade for the review engine (Stage 2b-1: DB-DIRECT ONLY).
 //
-// Goal: serve the review *queue* and *counts* even when the Anki GUI window is
-// CLOSED, by reading the collection DB directly (read-only, snapshot-safe — see
-// src/lib/ankidb.ts). When the DB is absent or unreadable, fall back to the
-// existing AnkiConnect path (which requires Anki to be open).
+// The app is now fully windowless: the real backend is ALWAYS the DB-direct
+// engine (src/lib/ankidb.ts). AnkiConnect (localhost:8765) is NO LONGER CALLED
+// for any real read or write — the user closes Anki and we read/write the
+// collection.anki2 on disk directly.
 //
-// Write-back routing (`answerCardAuto`):
-//   - Anki OPEN  → route to AnkiConnect `answerCard`. The live scheduler is
-//     authoritative while the GUI holds the collection.
-//   - Anki CLOSED → route to `dbAnswerCard` (src/lib/ankidb.ts), the gated,
-//     backup-first, fail-closed windowless DB write. We rely on ankidb's own
-//     guards (Anki not running, schema understood, backup taken) to stay safe.
-//   - Neither    → refuse with a well-shaped {ok:false} result.
+// Routing for every `*Auto` function is now:
+//   - ANKI_FAKE=1   → the in-memory fake (e2e/test double; NOT AnkiConnect).
+//                     This branch MUST stay or all e2e breaks.
+//   - else (real)   → DB-direct (ankidb.ts).
 //
-// This file owns the selector only. It imports anki.ts and ankidb.ts but keeps
-// them ignorant of each other; it does not modify either.
+// Reads (queue/counts/list/progress/media) use the DB readers unconditionally.
+// While Anki is open the on-disk snapshot may lag — acceptable and safe.
+//
+// Writes (answer/delete/add) use the DB write paths unconditionally. They
+// already FAIL-CLOSED (reason like "anki-open"/"locked") when Anki holds the
+// collection, so grading/adding while Anki is open is safely REFUSED (no
+// corruption, no infinite loop because no write occurs).
+//
+// This file owns the selector only. It still imports a few anki.ts symbols for
+// the ANKI_FAKE fake branch and for shared types, but it never routes a real
+// request to AnkiConnect. The AnkiConnect functions in anki.ts are retained
+// (later shrink step) — just no longer called here.
 // ---------------------------------------------------------------------------
 
 import {
@@ -25,8 +32,6 @@ import {
   addCard as acAddCard,
   listWords as acListWords,
   getProgress as acGetProgress,
-  retrieveMedia as acRetrieveMedia,
-  ankiLocalAvailable,
   type AnkiCard,
   type ReviewCard,
 } from "./anki.ts";
@@ -54,21 +59,23 @@ export type ReviewBackend = "db" | "ankiconnect";
 const dbDirectEnabled = (): boolean => process.env.ANKI_FAKE !== "1";
 
 // ---------------------------------------------------------------------------
-// Test seam (internal). The routing in this file depends on five concrete
-// functions from anki.ts / ankidb.ts. We can't unit-test the DB-vs-AnkiConnect
-// branch via env alone (ANKI_FAKE forces every dep into fake mode at once), and
-// mock.module() in bun patches the GLOBAL module registry for the whole test
-// run without restore — it would corrupt anki.test.ts / ankidb.test.ts which
-// import these modules for real. So we expose a tiny overridable indirection
-// table: production code calls through `deps`, which points at the real imports
-// by default; `__setReviewDeps` (test-only) swaps them and returns a restore fn.
-// Public function signatures and default behavior are unchanged.
+// Test seam (internal). The routing in this file depends on concrete functions
+// from anki.ts (fake branch only) / ankidb.ts (real path). We can't unit-test
+// the routing via env alone (ANKI_FAKE forces every dep into fake mode at
+// once), and mock.module() in bun patches the GLOBAL module registry for the
+// whole test run without restore — it would corrupt anki.test.ts /
+// ankidb.test.ts which import these modules for real. So we expose a tiny
+// overridable indirection table: production code calls through `deps`, which
+// points at the real imports by default; `__setReviewDeps` (test-only) swaps
+// them and returns a restore fn. Public signatures/behavior are unchanged.
+//
+// The `ac*` deps are used ONLY by the ANKI_FAKE fake branch now — never for a
+// real AnkiConnect call.
 interface ReviewDeps {
   acReviewQueue: typeof acReviewQueue;
   acAnswerCard: typeof acAnswerCard;
   acDeleteNote: typeof acDeleteNote;
   acAddCard: typeof acAddCard;
-  ankiLocalAvailable: typeof ankiLocalAvailable;
   dbStatus: typeof dbStatus;
   dbReviewQueue: typeof dbReviewQueue;
   dbDeckCounts: typeof dbDeckCounts;
@@ -77,7 +84,6 @@ interface ReviewDeps {
   dbAddNote: typeof dbAddNote;
   acListWords: typeof acListWords;
   acGetProgress: typeof acGetProgress;
-  acRetrieveMedia: typeof acRetrieveMedia;
   dbListCards: typeof dbListCards;
   dbProgress: typeof dbProgress;
   dbGetMedia: typeof dbGetMedia;
@@ -88,7 +94,6 @@ const realDeps: ReviewDeps = {
   acAnswerCard,
   acDeleteNote,
   acAddCard,
-  ankiLocalAvailable,
   dbStatus,
   dbReviewQueue,
   dbDeckCounts,
@@ -97,7 +102,6 @@ const realDeps: ReviewDeps = {
   dbAddNote,
   acListWords,
   acGetProgress,
-  acRetrieveMedia,
   dbListCards,
   dbProgress,
   dbGetMedia,
@@ -120,9 +124,9 @@ export function __setReviewDeps(overrides: Partial<ReviewDeps>): () => void {
 /**
  * Refusal reason surfaced when grading cannot proceed.
  *
- * `no-backend` — neither AnkiConnect nor the DB write path is available
- * (Anki closed AND the collection is absent/unreadable/unsupported). Reasons
- * other than these may also be forwarded verbatim from `dbAnswerCard`.
+ * `no-backend` — the DB write path is unavailable (fake mode / DB-direct
+ * disabled). Reasons such as "anki-open" / "locked" are forwarded verbatim
+ * from `dbAnswerCard` when Anki is holding the collection.
  */
 export type RefuseReason = "no-backend" | (string & {});
 
@@ -171,88 +175,84 @@ export interface ReviewStatus {
   ankiOpen: boolean;
   /** col.ver is a version the DB engine understands. */
   schemaOk: boolean;
-  /** A queue can be produced (DB read or AnkiConnect). */
+  /** A queue can be produced from the DB (present + schema understood). */
   canQueue: boolean;
-  /** A grade can be written back (AnkiConnect, or windowless DB write). */
+  /** A grade can be written back windowless (DB-direct, present, schema, Anki closed). */
   canAnswer: boolean;
 }
 
 /**
- * Review queue for a scope, windowless-capable.
+ * Review queue for a scope, windowless (DB-direct only).
  *
- * Prefers the DB-direct engine: if the collection is present AND its schema is
- * understood, `dbReviewQueue` reads a read-only snapshot that works even while
- * Anki is open. If that read is unavailable or fails (returns available:false,
- * or throws), fall back to AnkiConnect. The returned shape is identical to the
- * AnkiConnect path; `backend` is added for logging and is stripped by the
- * server before it hits the wire.
+ * Reads the read-only DB snapshot unconditionally. While Anki is open the
+ * on-disk file may lag (Anki buffers edits in WAL) — that's acceptable and
+ * safe, because grading then fails-closed at the write step (see
+ * `answerCardAuto`), so no graded card is lost and no infinite loop occurs.
+ * `backend` is informational and stripped by the server before the wire.
  */
 export async function reviewQueueAuto(
   scope: ReviewScope = "zehntage",
   limit = 50,
 ): Promise<ReviewQueueResult> {
-  // Try the windowless DB read first.
+  // Fake/e2e mode: serve the in-memory fake queue (NOT AnkiConnect — its fake
+  // branch is fully offline). This branch MUST stay or all review e2e breaks.
+  if (process.env.ANKI_FAKE === "1") {
+    const r = await deps.acReviewQueue(scope, limit);
+    return {
+      available: r.available,
+      due: r.due,
+      cards: r.cards,
+      backend: "ankiconnect",
+    };
+  }
+
+  // Real path: read the read-only DB snapshot. No AnkiConnect fallback.
   try {
     const st = deps.dbStatus();
-    // Use the DB-direct snapshot ONLY when Anki is CLOSED. While Anki is open it
-    // holds edits in memory (WAL), so the on-disk file lags AnkiConnect's live
-    // state — reading the snapshot then grading via AnkiConnect makes graded
-    // cards reappear (an infinite review loop). When Anki is open, AnkiConnect is
-    // authoritative for BOTH read and write.
-    if (dbDirectEnabled() && st.present && st.schemaOk && !st.ankiOpen) {
+    if (dbDirectEnabled() && st.present && st.schemaOk) {
       const r = deps.dbReviewQueue(scope, limit);
       if (r.available) {
         return { available: true, due: r.due, cards: r.cards, backend: "db" };
       }
     }
   } catch {
-    // fall through to AnkiConnect
+    // fall through to unavailable
   }
 
-  // Fallback: AnkiConnect (requires Anki open).
-  const r = await deps.acReviewQueue(scope, limit);
-  return {
-    available: r.available,
-    due: r.due,
-    cards: r.cards,
-    backend: "ankiconnect",
-  };
+  // DB unavailable (collection absent/unreadable/unsupported, or an empty
+  // snapshot). There is no AnkiConnect fallback anymore.
+  return { available: false, due: 0, cards: [], backend: "db" };
 }
 
 /**
- * Due counts {new, learning, review}, windowless-capable.
+ * Due counts {new, learning, review}, windowless (DB-direct only).
  *
- * Prefers the DB-direct engine. On failure, falls back to AnkiConnect-derived
- * counts; if even that is unreachable, returns zeros so callers always get a
- * well-shaped object.
+ * Reads the DB snapshot unconditionally. Returns zeros when the DB is
+ * unavailable (fake mode / absent / unreadable) so callers always get a
+ * well-shaped object. No AnkiConnect fallback.
  */
 export async function deckCountsAuto(
   scope: ReviewScope = "zehntage",
 ): Promise<DeckCountsResult> {
-  // Try the windowless DB read first.
-  try {
-    const st = deps.dbStatus();
-    // Use the DB-direct snapshot ONLY when Anki is CLOSED. While Anki is open it
-    // holds edits in memory (WAL), so the on-disk file lags AnkiConnect's live
-    // state — reading the snapshot then grading via AnkiConnect makes graded
-    // cards reappear (an infinite review loop). When Anki is open, AnkiConnect is
-    // authoritative for BOTH read and write.
-    if (dbDirectEnabled() && st.present && st.schemaOk && !st.ankiOpen) {
-      const c: DeckCounts = deps.dbDeckCounts(scope);
-      return { new: c.new, learning: c.learning, review: c.review };
+  // Fake/e2e mode: derive counts from the in-memory fake queue (review-only
+  // signal; the fake has no new/learning split). Surfaces the due total under
+  // `review`. This branch MUST stay or review-count e2e breaks.
+  if (process.env.ANKI_FAKE === "1") {
+    try {
+      const q = await deps.acReviewQueue(scope, 0);
+      if (q.available) return { new: 0, learning: 0, review: q.due };
+    } catch {
+      // fall through to zeros
     }
-  } catch {
-    // fall through to AnkiConnect
+    return { new: 0, learning: 0, review: 0 };
   }
 
-  // Fallback: derive counts from the AnkiConnect queue (review-only signal).
-  // AnkiConnect's `is:due` queue does not distinguish new/learning/review
-  // cheaply, so we surface the due total under `review` and leave the rest at 0
-  // rather than fabricating a breakdown.
+  // Real path: read the DB snapshot. No AnkiConnect fallback.
   try {
-    const q = await deps.acReviewQueue(scope, 0);
-    if (q.available) {
-      return { new: 0, learning: 0, review: q.due };
+    const st = deps.dbStatus();
+    if (dbDirectEnabled() && st.present && st.schemaOk) {
+      const c: DeckCounts = deps.dbDeckCounts(scope);
+      return { new: c.new, learning: c.learning, review: c.review };
     }
   } catch {
     // fall through to zeros
@@ -262,52 +262,31 @@ export async function deckCountsAuto(
 }
 
 /**
- * Grade a card, windowless-capable.
+ * Grade a card, windowless (DB-direct only).
  *
- *   - Anki OPEN (AnkiConnect reachable) → route to AnkiConnect `answerCard`.
- *     The live scheduler owns the collection while the GUI is up.
- *   - Anki CLOSED → route to `dbAnswerCard`, the gated, backup-first,
- *     fail-closed DB write. ankidb performs its own safety checks (Anki not
- *     running, schema understood, backup taken) and is the authority on whether
- *     the write may proceed; we forward its {ok, error?, reason?} verbatim.
- *   - Neither    → refuse with {ok:false, reason:"no-backend"}.
- *
- * The DB-write path is suppressed in fake mode (ANKI_FAKE=1) so e2e never
- * touches the real collection.anki2.
+ *   - ANKI_FAKE=1 → the in-memory fake (records the grade, drains the fake
+ *     queue). Never touches the real collection or the DB write.
+ *   - else → `dbAnswerCard`, the gated, backup-first, fail-closed DB write.
+ *     ankidb performs its own safety checks (Anki not running, schema
+ *     understood, backup taken) and is the authority on whether the write may
+ *     proceed; we forward its {ok, error?, reason?} verbatim. When Anki is open
+ *     it refuses (e.g. reason "anki-open"/"locked") — grading is safely blocked,
+ *     no corruption, no infinite loop (no write occurs).
+ *   - DB-direct disabled (fake mode) → refuse with {ok:false, reason:"no-backend"}.
  */
 export async function answerCardAuto(
   cardId: number,
   ease: 1 | 2 | 3 | 4,
 ): Promise<AnswerResult> {
-  // Fake/e2e mode: route to the in-memory fake AnkiConnect (records the grade,
-  // drains the fake queue). Never touches the real collection or the DB write.
+  // Fake/e2e mode: route to the in-memory fake (NOT AnkiConnect). Never touches
+  // the real collection or the DB write.
   if (process.env.ANKI_FAKE === "1") {
     const r = await deps.acAnswerCard(cardId, ease);
     return { ok: r.ok, error: r.error, backend: "ankiconnect" };
   }
-  // Is Anki up? If so, AnkiConnect is authoritative.
-  let ankiConnectUp = false;
-  try {
-    ankiConnectUp = await deps.ankiLocalAvailable();
-  } catch {
-    ankiConnectUp = false;
-  }
 
-  if (ankiConnectUp) {
-    const r = await deps.acAnswerCard(cardId, ease);
-    if (r.ok) {
-      return { ok: true, backend: "ankiconnect" };
-    }
-    // Surface a CLEAR reason so the UI never silently loops on a failed grade.
-    return {
-      ok: false,
-      error: r.error ?? "AnkiConnect not available",
-      reason: "ankiconnect-failed",
-      backend: "ankiconnect",
-    };
-  }
-
-  // Anki closed → windowless DB write (unless fake mode, which must not write).
+  // Real path: windowless DB write. dbAnswerCard fails-closed when Anki holds
+  // the collection, so grading while Anki is open is safely refused.
   if (dbDirectEnabled()) {
     try {
       // `await` tolerates either a sync result or a Promise, so this stays
@@ -329,26 +308,25 @@ export async function answerCardAuto(
     }
   }
 
-  // No backend available (Anki closed and DB-direct disabled/unavailable).
+  // DB-direct disabled (fake mode without the fake branch — unreachable in
+  // practice) → no backend.
   return {
     ok: false,
-    error: "No grading backend available (Anki closed)",
+    error: "No grading backend available",
     reason: "no-backend",
-    backend: "ankiconnect",
+    backend: "db",
   };
 }
 
 /**
- * Delete a note from Anki, windowless-capable. Same routing shape as
+ * Delete a note from Anki, windowless (DB-direct only). Same routing shape as
  * `answerCardAuto`:
  *
- *   - ANKI_FAKE=1 → call the fake delete on the in-memory stub (always ok:true
- *     if the stub doesn't implement deleteNotes; graceful).
- *   - Anki OPEN (AnkiConnect reachable) → AnkiConnect: map card→note via
- *     `cardsToNotes`, then `deleteNotes`. The live collection is authoritative.
- *   - Anki CLOSED → `dbDeleteNote`, the gated, backup-first, fail-closed
- *     windowless DB write. ankidb performs all safety checks.
- *   - Neither → refuse with {ok:false, reason:"no-backend"}.
+ *   - ANKI_FAKE=1 → call the fake delete stub (graceful: ok:true if the stub
+ *     doesn't implement deleteNotes).
+ *   - else → `dbDeleteNote`, the gated, backup-first, fail-closed windowless DB
+ *     write. ankidb performs all safety checks and refuses when Anki is open.
+ *   - DB-direct disabled → refuse with {ok:false, reason:"no-backend"}.
  */
 export async function deleteNoteAuto(cardId: number): Promise<DeleteResult> {
   // Fake/e2e mode: call the fake delete stub; never touch the real collection.
@@ -363,28 +341,7 @@ export async function deleteNoteAuto(cardId: number): Promise<DeleteResult> {
     }
   }
 
-  // Is Anki up? If so, AnkiConnect is authoritative.
-  let ankiConnectUp = false;
-  try {
-    ankiConnectUp = await deps.ankiLocalAvailable();
-  } catch {
-    ankiConnectUp = false;
-  }
-
-  if (ankiConnectUp) {
-    const r = await deps.acDeleteNote(cardId);
-    if (r.ok) {
-      return { ok: true, backend: "ankiconnect" };
-    }
-    return {
-      ok: false,
-      error: r.error ?? "AnkiConnect delete failed",
-      reason: "ankiconnect-failed",
-      backend: "ankiconnect",
-    };
-  }
-
-  // Anki closed → windowless DB write (unless fake mode, which must not write).
+  // Real path: windowless DB write. dbDeleteNote fails-closed when Anki is open.
   if (dbDirectEnabled()) {
     try {
       const r = await deps.dbDeleteNote(cardId);
@@ -404,33 +361,29 @@ export async function deleteNoteAuto(cardId: number): Promise<DeleteResult> {
     }
   }
 
-  // No backend available.
+  // DB-direct disabled → no backend.
   return {
     ok: false,
-    error: "No delete backend available (Anki closed)",
+    error: "No delete backend available",
     reason: "no-backend",
-    backend: "ankiconnect",
+    backend: "db",
   };
 }
 
 /**
- * Add a note (mine a card), windowless-capable. Mirrors answerCardAuto routing:
+ * Add a note (mine a card), windowless (DB-direct only). Mirrors answerCardAuto:
  *
  *   - ANKI_FAKE=1 → route to the in-memory fake add (acAddCard's fake branch).
  *     Never touches the real collection or the DB write.
- *   - Anki OPEN (AnkiConnect reachable) → AnkiConnect `addCard` (UNCHANGED). The
- *     live collection is authoritative; media was already stored via storeMedia
- *     and inlined into `card.context` by the caller.
- *   - Anki CLOSED → `dbAddNote`, the gated, backup-first, fail-closed windowless
- *     DB write. Media for the closed path (audio via dbStoreMedia, images inline
- *     as data:URI) is handled by the caller BEFORE this routes, so the card here
- *     already carries the final field text.
- *   - Neither → refuse with {ok:false, reason:"no-backend"}.
- *
- * The DB-write path is suppressed in fake mode (ANKI_FAKE=1).
+ *   - else → `dbAddNote`, the gated, backup-first, fail-closed windowless DB
+ *     write. Media for the windowless path (audio via dbStoreMedia, images
+ *     inline as data:URI) is handled by the caller BEFORE this routes, so the
+ *     card here already carries the final field text. dbAddNote refuses when
+ *     Anki is open.
+ *   - DB-direct disabled → refuse with {ok:false, reason:"no-backend"}.
  */
 export async function addNoteAuto(card: AnkiCard): Promise<AddResult> {
-  // Fake/e2e mode: route to the in-memory fake AnkiConnect add.
+  // Fake/e2e mode: route to the in-memory fake add.
   if (process.env.ANKI_FAKE === "1") {
     try {
       await deps.acAddCard(card);
@@ -445,29 +398,7 @@ export async function addNoteAuto(card: AnkiCard): Promise<AddResult> {
     }
   }
 
-  // Is Anki up? If so, AnkiConnect is authoritative (UNCHANGED path).
-  let ankiConnectUp = false;
-  try {
-    ankiConnectUp = await deps.ankiLocalAvailable();
-  } catch {
-    ankiConnectUp = false;
-  }
-
-  if (ankiConnectUp) {
-    try {
-      await deps.acAddCard(card);
-      return { ok: true, backend: "ankiconnect" };
-    } catch (e) {
-      return {
-        ok: false,
-        error: e instanceof Error ? e.message : String(e),
-        reason: "ankiconnect-failed",
-        backend: "ankiconnect",
-      };
-    }
-  }
-
-  // Anki closed → windowless DB write (unless fake mode, which must not write).
+  // Real path: windowless DB write. dbAddNote fails-closed when Anki is open.
   if (dbDirectEnabled()) {
     try {
       const r = await deps.dbAddNote({
@@ -493,22 +424,20 @@ export async function addNoteAuto(card: AnkiCard): Promise<AddResult> {
     }
   }
 
-  // No backend available (Anki closed and DB-direct disabled/unavailable).
+  // DB-direct disabled → no backend.
   return {
     ok: false,
-    error: "No add backend available (Anki closed)",
+    error: "No add backend available",
     reason: "no-backend",
-    backend: "ankiconnect",
+    backend: "db",
   };
 }
 
 /**
- * List the Mixed-deck cards for the Cards tab, windowless-capable.
+ * List the Mixed-deck cards for the Cards tab, windowless (DB-direct only).
  *
  *   - ANKI_FAKE=1 → existing fake (acListWords reads the in-memory fake map).
- *   - Anki OPEN (AnkiConnect reachable) → existing AnkiConnect path
- *     (acListWords → acListCards, UNCHANGED).
- *   - Anki CLOSED → dbListCards (read-only DB snapshot).
+ *   - else → dbListCards (read-only DB snapshot).
  *
  * Returns AnkiCard[] in the SAME shape both paths produce
  * ({front, back, notes, context, noteId, tags}). On any DB failure it returns
@@ -518,17 +447,7 @@ export async function listCardsAuto(): Promise<AnkiCard[]> {
   if (process.env.ANKI_FAKE === "1") {
     return deps.acListWords();
   }
-  let ankiConnectUp = false;
-  try {
-    ankiConnectUp = await deps.ankiLocalAvailable();
-  } catch {
-    ankiConnectUp = false;
-  }
-  if (ankiConnectUp) {
-    // UNCHANGED AnkiConnect path (acListWords → acListCards when Anki is open).
-    return deps.acListWords();
-  }
-  // Anki closed → windowless DB read (suppressed in fake mode, handled above).
+  // Real path: windowless DB read.
   if (dbDirectEnabled()) {
     const cards = deps.dbListCards("all");
     return cards.map((c): AnkiCard => ({
@@ -544,12 +463,10 @@ export async function listCardsAuto(): Promise<AnkiCard[]> {
 }
 
 /**
- * Per-word scheduling/progress map for token coloring, windowless-capable.
+ * Per-word scheduling/progress map for token coloring, windowless (DB-direct).
  *
  *   - ANKI_FAKE=1 → existing fake (acGetProgress returns {}).
- *   - Anki OPEN → existing AnkiConnect path (acGetProgress → acProgress,
- *     UNCHANGED).
- *   - Anki CLOSED → dbProgress (read-only DB snapshot).
+ *   - else → dbProgress (read-only DB snapshot).
  *
  * The returned map is keyed identically (by the raw `front` field value) and
  * each entry carries the SAME fields acProgress emits
@@ -560,16 +477,7 @@ export async function progressAuto(): Promise<Record<string, unknown> | null> {
   if (process.env.ANKI_FAKE === "1") {
     return deps.acGetProgress();
   }
-  let ankiConnectUp = false;
-  try {
-    ankiConnectUp = await deps.ankiLocalAvailable();
-  } catch {
-    ankiConnectUp = false;
-  }
-  if (ankiConnectUp) {
-    // UNCHANGED AnkiConnect path (acGetProgress → acProgress when Anki is open).
-    return deps.acGetProgress();
-  }
+  // Real path: windowless DB read.
   if (dbDirectEnabled()) {
     return deps.dbProgress("all") as Record<string, unknown>;
   }
@@ -577,33 +485,20 @@ export async function progressAuto(): Promise<Record<string, unknown> | null> {
 }
 
 /**
- * Read a media file's bytes for the /api/anki/media proxy, windowless-capable.
+ * Read a media file's bytes for the /api/anki/media proxy, windowless (DB-direct).
  *
  *   - ANKI_FAKE=1 → null (no media in fake mode; mirrors retrieveMedia).
- *   - Anki OPEN → existing AnkiConnect retrieveMedia (UNCHANGED). content-type
- *     is left to the server's extension map (acRetrieveMedia returns only bytes).
- *   - Anki CLOSED → dbGetMedia (reads collection.media/ on disk; returns bytes
- *     + content-type).
+ *   - else → dbGetMedia (reads collection.media/ on disk; returns bytes +
+ *     content-type).
  *
- * Returns { bytes, contentType? } or null on miss (same graceful posture as
- * retrieveMedia, which returns null). The server applies its own content-type
- * map, so contentType here is advisory.
+ * Returns { bytes, contentType? } or null on miss (graceful). The server
+ * applies its own content-type map, so contentType here is advisory.
  */
 export async function mediaAuto(
   filename: string,
 ): Promise<{ bytes: Uint8Array; contentType?: string } | null> {
   if (process.env.ANKI_FAKE === "1") return null;
-  let ankiConnectUp = false;
-  try {
-    ankiConnectUp = await deps.ankiLocalAvailable();
-  } catch {
-    ankiConnectUp = false;
-  }
-  if (ankiConnectUp) {
-    // UNCHANGED AnkiConnect path.
-    const bytes = await deps.acRetrieveMedia(filename);
-    return bytes ? { bytes } : null;
-  }
+  // Real path: windowless DB media read.
   if (dbDirectEnabled()) {
     const r: DbMediaResult | null = deps.dbGetMedia(filename);
     return r ? { bytes: r.bytes, contentType: r.contentType } : null;
@@ -612,13 +507,15 @@ export async function mediaAuto(
 }
 
 /**
- * Combined read/write capability snapshot for the UI.
+ * Combined read/write capability snapshot for the UI (DB-direct only).
  *
- * `canQueue` is true when either the DB read or AnkiConnect can produce a
- * queue. `canAnswer` is true when EITHER AnkiConnect is reachable (Anki open)
- * OR the DB write path is usable (Anki closed + collection present + schema
- * understood) — grading now works windowless. The DB write path is gated off
- * in fake mode (ANKI_FAKE=1).
+ * `canQueue` is true when the on-disk collection can produce a queue
+ * (present + schema understood) — reads work even while Anki is open (the
+ * snapshot may lag, which is acceptable). `canAnswer` is true only for the
+ * windowless DB write: DB-direct enabled (not fake mode) + collection present +
+ * schema understood + Anki CLOSED. `ankiOpen` is retained so the UI can tell
+ * the user to close Anki to sync/review windowlessly. AnkiConnect is no longer
+ * consulted.
  */
 export async function reviewStatus(): Promise<ReviewStatus> {
   let dbPresent = false;
@@ -633,17 +530,9 @@ export async function reviewStatus(): Promise<ReviewStatus> {
     // leave defaults
   }
 
-  let ankiConnectUp = false;
-  try {
-    ankiConnectUp = await deps.ankiLocalAvailable();
-  } catch {
-    ankiConnectUp = false;
-  }
-
-  const canQueue = (dbPresent && schemaOk) || ankiConnectUp;
+  const canQueue = dbPresent && schemaOk;
   // Windowless DB write is usable when Anki is closed, the collection is
   // present with an understood schema, and we are not in fake mode.
-  const dbWritable = dbDirectEnabled() && dbPresent && schemaOk && !ankiOpen;
-  const canAnswer = ankiConnectUp || dbWritable;
+  const canAnswer = dbDirectEnabled() && dbPresent && schemaOk && !ankiOpen;
   return { dbPresent, ankiOpen, schemaOk, canQueue, canAnswer };
 }

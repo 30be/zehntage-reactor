@@ -507,17 +507,18 @@ export const api = {
   // deck). Anki's own scheduler decides what's due; we just render + grade.
   reviewQueue: (scope: "zehntage" | "all") =>
     jget<ReviewQueueResponse>(`/api/review/queue?scope=${scope}`),
-  // Grade a card against Anki's scheduler. ease: 1=Again 2=Hard 3=Good 4=Easy.
+  // Grade a card windowless (DB-direct). ease: 1=Again 2=Hard 3=Good 4=Easy.
+  // Refused (ok:false, reason "anki-open"/"locked") while Anki holds the file.
   reviewAnswer: (cardId: number, ease: number) =>
-    jpost<{ ok: boolean; error?: string }>(
+    jpost<{ ok: boolean; error?: string; reason?: string }>(
       "/api/review/answer",
       { cardId, ease },
       dbTokenHeaders(),
     ),
   // Delete the note that owns cardId from Anki (DESTRUCTIVE — records graves
-  // for sync). Routed: AnkiConnect when open, windowless DB write when closed.
+  // for sync). Windowless DB write; refused while Anki is open.
   reviewDelete: (cardId: number) =>
-    jpost<{ ok: boolean; error?: string }>(
+    jpost<{ ok: boolean; error?: string; reason?: string }>(
       "/api/review/delete",
       { cardId },
       dbTokenHeaders(),

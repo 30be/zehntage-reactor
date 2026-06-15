@@ -2171,8 +2171,9 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         if (ease !== 1 && ease !== 2 && ease !== 3 && ease !== 4) {
           return err("ease must be 1, 2, 3 or 4", 400);
         }
-        // Write-back routes to AnkiConnect only; no DB-write path. On failure
-        // `reason` is passed through (e.g. anki-closed-db-write-not-enabled).
+        // Write-back is DB-direct (windowless) only — AnkiConnect is never
+        // called. When Anki is open the DB write fails-closed and `reason`
+        // (e.g. "anki-open"/"locked") is passed through so the UI can message it.
         const res = await answerCardAuto(cardId, ease);
         // A recorded grade changes due state — refresh words/cards caches.
         if (res.ok) bustAnkiWordsCache();

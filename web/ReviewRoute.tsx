@@ -175,13 +175,20 @@ export function Review({
       // queue forever → silent infinite loop. Now a failed grade surfaces a
       // visible banner (+ toast if available) and we DON'T advance.
       void (async () => {
-        const FAIL_MSG = "Couldn’t record grade — is Anki reachable?";
+        const FAIL_MSG = "Couldn’t record grade — is the server running?";
+        // When Anki is open it holds the collection, so the windowless DB write
+        // fails-closed. Tell the user to close Anki rather than blaming the net.
+        const ANKI_OPEN_MSG =
+          "Anki is open — close it to review/sync windowlessly, then grade again.";
+        const isAnkiOpen = (reason?: string) =>
+          reason === "anki-open" || reason === "locked";
         try {
           const res = await api.reviewAnswer(gradedId, ease);
           if (!res.ok) {
-            console.error("reviewAnswer not ok:", res.error);
-            setGradeErr(FAIL_MSG);
-            toast?.(FAIL_MSG);
+            console.error("reviewAnswer not ok:", res.error, res.reason);
+            const msg = isAnkiOpen(res.reason) ? ANKI_OPEN_MSG : FAIL_MSG;
+            setGradeErr(msg);
+            toast?.(msg);
             gradingRef.current = false; // allow a retry on the same card
             return;
           }
@@ -236,13 +243,18 @@ export function Review({
     const deletedId = card.cardId;
 
     void (async () => {
-      const FAIL_MSG = "Couldn't delete note — is Anki reachable?";
+      const FAIL_MSG = "Couldn't delete note — is the server running?";
+      const ANKI_OPEN_MSG =
+        "Anki is open — close it to delete windowlessly, then try again.";
+      const isAnkiOpen = (reason?: string) =>
+        reason === "anki-open" || reason === "locked";
       try {
         const res = await api.reviewDelete(deletedId);
         if (!res.ok) {
-          console.error("reviewDelete not ok:", res.error);
-          setGradeErr(FAIL_MSG);
-          toast?.(FAIL_MSG);
+          console.error("reviewDelete not ok:", res.error, res.reason);
+          const msg = isAnkiOpen(res.reason) ? ANKI_OPEN_MSG : FAIL_MSG;
+          setGradeErr(msg);
+          toast?.(msg);
           deletingRef.current = false;
           return;
         }
@@ -361,11 +373,11 @@ export function Review({
   if (phase === "offline")
     return (
       <div className="empty review-empty">
-        {err ?? "Open Anki to review — the scheduler runs there."}
+        {err ?? "No cards available — close Anki to review windowlessly."}
         <span className="muted review-empty-sub">
           {err
             ? "Then try again."
-            : "This client grades against your own Anki collection, so Anki (with AnkiConnect) needs to be open."}
+            : "This client reads and grades your Anki collection directly on disk. Anki must be CLOSED so it isn’t holding the collection."}
         </span>
         <div className="review-actions">
           <button className="btn sm retry" onClick={() => void load()}>
@@ -447,7 +459,7 @@ export function Review({
         <div className="review-error" role="alert">
           {gradeErr}
           <span className="muted review-empty-sub">
-            Open Anki (with AnkiConnect), then grade again to retry.
+            Make sure Anki is closed, then grade again to retry.
           </span>
         </div>
       )}

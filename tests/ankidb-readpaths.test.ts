@@ -17,7 +17,7 @@
 // SAME object keys (and key-by-front semantics) acListCards/acProgress emit, so
 // Stage 2b can drop AnkiConnect without changing the wire shape.
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -587,21 +587,27 @@ describe("parity: dbProgress shape == acProgress shape", () => {
 // ===========================================================================
 describe("listCardsAuto / progressAuto / mediaAuto routing", () => {
   let restore: (() => void) | null = null;
+  // Defensive: clear any ANKI_FAKE leaked by another test file so the non-fake
+  // DB-direct routing (dbDirectEnabled() === true) is exercised as intended.
+  beforeEach(() => {
+    delete process.env.ANKI_FAKE;
+  });
   afterEach(() => {
     restore?.();
     restore = null;
     delete process.env.ANKI_FAKE;
   });
 
-  test("Anki OPEN -> AnkiConnect path, DB readers untouched", async () => {
+  test("Anki OPEN -> DB readers used anyway (snapshot may lag, AnkiConnect never called)", async () => {
+    // Stage 2b-1: list/progress/media are DB-direct ONLY. Even when Anki is
+    // open we read the on-disk snapshot — AnkiConnect is never consulted.
     let acList = 0,
       acProg = 0,
-      acMedia = 0,
       dbList = 0,
       dbProg = 0,
       dbMedia = 0;
     restore = __setReviewDeps({
-      ankiLocalAvailable: async () => true,
+      dbStatus: () => ({ present: true, ankiOpen: true, ver: 18, schemaOk: true }),
       acListWords: async () => {
         acList++;
         return [{ front: "ac", back: "b", notes: "", context: "", noteId: 1, tags: [] }];
@@ -610,44 +616,53 @@ describe("listCardsAuto / progressAuto / mediaAuto routing", () => {
         acProg++;
         return { ac: 1 } as unknown as Record<string, number>;
       },
-      acRetrieveMedia: async () => {
-        acMedia++;
-        return new Uint8Array([9, 9]);
-      },
       dbListCards: () => {
         dbList++;
-        return [];
+        return [
+          { front: "db", back: "b", notes: "n", context: "c", noteId: 7, tags: ["zehntage"] },
+        ];
       },
       dbProgress: () => {
         dbProg++;
-        return {};
+        return {
+          db: {
+            interval: 1,
+            due: 1,
+            reps: 0,
+            lapses: 0,
+            ease: 0,
+            queue: 0,
+            type: 0,
+            isDue: false,
+            daysOverdue: 0,
+          },
+        };
       },
       dbGetMedia: () => {
         dbMedia++;
-        return null;
+        return { bytes: new Uint8Array([9, 9]), contentType: "image/png" };
       },
     });
 
     const list = await listCardsAuto();
-    expect(list[0]!.front).toBe("ac");
+    expect(list[0]!.front).toBe("db"); // DB reader, not AnkiConnect
     const prog = await progressAuto();
-    expect(prog).toEqual({ ac: 1 });
+    expect(prog).toHaveProperty("db");
     const media = await mediaAuto("x.png");
     expect(Array.from(media!.bytes)).toEqual([9, 9]);
 
-    expect([acList, acProg, acMedia]).toEqual([1, 1, 1]);
-    expect([dbList, dbProg, dbMedia]).toEqual([0, 0, 0]);
+    expect([acList, acProg]).toEqual([0, 0]); // AnkiConnect NEVER called
+    expect([dbList, dbProg, dbMedia]).toEqual([1, 1, 1]);
   });
 
   test("Anki CLOSED -> DB readers, AnkiConnect untouched", async () => {
     let acList = 0,
       acProg = 0,
-      acMedia = 0,
       dbList = 0,
       dbProg = 0,
       dbMedia = 0;
     restore = __setReviewDeps({
-      ankiLocalAvailable: async () => false,
+      dbStatus: () => ({ present: true, ankiOpen: false, ver: 18, schemaOk: true }),
       acListWords: async () => {
         acList++;
         return [];
@@ -655,10 +670,6 @@ describe("listCardsAuto / progressAuto / mediaAuto routing", () => {
       acGetProgress: async () => {
         acProg++;
         return {};
-      },
-      acRetrieveMedia: async () => {
-        acMedia++;
-        return null;
       },
       dbListCards: () => {
         dbList++;
@@ -697,7 +708,7 @@ describe("listCardsAuto / progressAuto / mediaAuto routing", () => {
     expect(Array.from(media!.bytes)).toEqual([7]);
     expect(media!.contentType).toBe("image/png");
 
-    expect([acList, acProg, acMedia]).toEqual([0, 0, 0]);
+    expect([acList, acProg]).toEqual([0, 0]);
     expect([dbList, dbProg, dbMedia]).toEqual([1, 1, 1]);
   });
 
