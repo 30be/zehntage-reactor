@@ -30,6 +30,7 @@ import {
   deckCountsAuto,
   answerCardAuto,
   deleteNoteAuto,
+  addNoteAuto,
   reviewStatus,
 } from "../src/lib/review.ts";
 
@@ -65,6 +66,8 @@ interface Spy {
   dbDeckCounts: number;
   dbAnswerCard: number;
   dbDeleteNote: number;
+  acAddCard: number;
+  dbAddNote: number;
 }
 
 // Install a fully-stubbed dep set for a given world; returns {restore, spy}.
@@ -82,6 +85,9 @@ function world(opts: {
   acDeleteError?: string;
   dbDeleteResult?: { ok: boolean; error?: string; reason?: string };
   dbDeleteThrows?: boolean;
+  acAddThrows?: boolean;
+  dbAddResult?: { ok: boolean; error?: string; reason?: string; noteId?: number; cardIds?: number[] };
+  dbAddThrows?: boolean;
 }) {
   const spy: Spy = {
     acReviewQueue: 0,
@@ -91,6 +97,8 @@ function world(opts: {
     dbDeckCounts: 0,
     dbAnswerCard: 0,
     dbDeleteNote: 0,
+    acAddCard: 0,
+    dbAddNote: 0,
   };
   const restore = __setReviewDeps({
     dbStatus: () =>
@@ -132,6 +140,15 @@ function world(opts: {
       spy.dbDeleteNote++;
       if (opts.dbDeleteThrows) throw new Error("disk ablaze");
       return opts.dbDeleteResult ?? { ok: true };
+    },
+    acAddCard: async (_card) => {
+      spy.acAddCard++;
+      if (opts.acAddThrows) throw new Error("ankiconnect add boom");
+    },
+    dbAddNote: async (_card, _hooks) => {
+      spy.dbAddNote++;
+      if (opts.dbAddThrows) throw new Error("disk inferno");
+      return opts.dbAddResult ?? { ok: true, noteId: 12345, cardIds: [12346] };
     },
   });
   return { restore, spy };
@@ -426,5 +443,78 @@ describe("deleteNoteAuto routing", () => {
     expect(r.backend).toBe("ankiconnect");
     expect(w.spy.acDeleteNote).toBe(1);
     expect(w.spy.dbDeleteNote).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("addNoteAuto routing", () => {
+  const sampleCard = {
+    front: "言葉 [ことば]",
+    back: "word",
+    notes: "n",
+    context: "c",
+    tags: ["zehntage"],
+  };
+
+  test("Anki OPEN -> AnkiConnect add (acAddCard), never dbAddNote", async () => {
+    const w = world({ ankiOpen: true, ankiConnectUp: true });
+    restore = w.restore;
+    const r = await addNoteAuto(sampleCard);
+    expect(r.ok).toBe(true);
+    expect(r.backend).toBe("ankiconnect");
+    expect(w.spy.acAddCard).toBe(1);
+    expect(w.spy.dbAddNote).toBe(0);
+  });
+
+  test("Anki CLOSED -> windowless dbAddNote, never AnkiConnect", async () => {
+    const w = world({ ankiOpen: false, ankiConnectUp: false });
+    restore = w.restore;
+    const r = await addNoteAuto(sampleCard);
+    expect(r.ok).toBe(true);
+    expect(r.backend).toBe("db");
+    expect(w.spy.dbAddNote).toBe(1);
+    expect(w.spy.acAddCard).toBe(0);
+  });
+
+  test("Anki CLOSED + dbAddNote refuses -> reason forwarded", async () => {
+    const w = world({
+      ankiOpen: false,
+      ankiConnectUp: false,
+      dbAddResult: { ok: false, reason: "duplicate" },
+    });
+    restore = w.restore;
+    const r = await addNoteAuto(sampleCard);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("duplicate");
+    expect(r.backend).toBe("db");
+  });
+
+  test("Anki CLOSED + dbAddNote throws -> db-write-threw", async () => {
+    const w = world({ ankiOpen: false, ankiConnectUp: false, dbAddThrows: true });
+    restore = w.restore;
+    const r = await addNoteAuto(sampleCard);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("db-write-threw");
+    expect(r.backend).toBe("db");
+  });
+
+  test("Anki OPEN + acAddCard throws -> ankiconnect-failed", async () => {
+    const w = world({ ankiOpen: true, ankiConnectUp: true, acAddThrows: true });
+    restore = w.restore;
+    const r = await addNoteAuto(sampleCard);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("ankiconnect-failed");
+    expect(r.backend).toBe("ankiconnect");
+  });
+
+  test("ANKI_FAKE=1 -> fake add branch (acAddCard called)", async () => {
+    process.env.ANKI_FAKE = "1";
+    const w = world({ ankiOpen: false, ankiConnectUp: false });
+    restore = w.restore;
+    const r = await addNoteAuto(sampleCard);
+    expect(r.ok).toBe(true);
+    expect(r.backend).toBe("ankiconnect");
+    expect(w.spy.acAddCard).toBe(1);
+    expect(w.spy.dbAddNote).toBe(0);
   });
 });

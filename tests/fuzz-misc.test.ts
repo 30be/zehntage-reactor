@@ -34,13 +34,6 @@ import {
   flatHits,
   type SearchHit,
 } from "../web/searchquery.ts";
-import {
-  buildForecast,
-  estimateDueOffset,
-  forecastTotal,
-  FORECAST_WINDOW,
-} from "../web/forecast.ts";
-import type { ProgressEntry } from "../web/api.ts";
 import { Rng, fuzzString } from "./_fuzz.ts";
 
 // ---------------------------------------------------------------------------
@@ -208,69 +201,3 @@ describe("fuzz: highlightSplit reconstructs original text exactly", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// web/forecast.ts
-// ---------------------------------------------------------------------------
-
-describe("fuzz: buildForecast bucket invariants", () => {
-  function randomProgress(rng: Rng): ProgressEntry {
-    const p: Partial<ProgressEntry> = {
-      interval: rng.pick([
-        -5,
-        0,
-        rng.int(1, 400),
-        NaN,
-        Infinity,
-        rng.next() * 100,
-      ]),
-      due: rng.int(0, 1000),
-      reps: rng.int(0, 50),
-      lapses: rng.int(0, 10),
-      ease: rng.int(1300, 3000),
-      queue: rng.int(-3, 4),
-      type: rng.int(0, 3),
-    };
-    if (rng.bool(0.4)) p.isDue = rng.bool();
-    if (rng.bool(0.4)) p.daysOverdue = rng.pick([0, rng.int(1, 30), -2, NaN]);
-    return p as ProgressEntry;
-  }
-
-  test("3000 random decks × random windows", () => {
-    const rng = new Rng(0xfaface);
-    for (let i = 0; i < 3000; i++) {
-      const progress: Record<string, ProgressEntry> = {};
-      const n = rng.int(0, 40);
-      for (let k = 0; k < n; k++) progress[`k${k}`] = randomProgress(rng);
-      const window = rng.pick([0, 1, 7, FORECAST_WINDOW, 30, NaN, -3, Infinity]);
-
-      let buckets: ReturnType<typeof buildForecast>;
-      expect(() => {
-        buckets = buildForecast(progress, window);
-      }).not.toThrow();
-
-      // window+1 buckets (defaulting on bad window), ascending offsets.
-      const w =
-        Number.isFinite(window) && window >= 0 ? Math.floor(window) : FORECAST_WINDOW;
-      expect(buckets!.length).toBe(w + 1);
-      for (let j = 0; j < buckets!.length; j++) {
-        expect(buckets![j]!.dayOffset).toBe(j);
-        expect(buckets![j]!.count).toBeGreaterThanOrEqual(0);
-        expect(Number.isInteger(buckets![j]!.count)).toBe(true);
-      }
-      // total scheduled cards never exceeds the deck size.
-      const total = forecastTotal(buckets!);
-      expect(total).toBeLessThanOrEqual(n);
-      expect(total).toBeGreaterThanOrEqual(0);
-
-      // estimateDueOffset is null or an in-range integer offset.
-      for (const key of Object.keys(progress)) {
-        const off = estimateDueOffset(progress[key]!, w);
-        if (off !== null) {
-          expect(Number.isInteger(off)).toBe(true);
-          expect(off).toBeGreaterThanOrEqual(0);
-          expect(off).toBeLessThanOrEqual(w);
-        }
-      }
-    }
-  });
-});

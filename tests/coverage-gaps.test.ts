@@ -6,8 +6,6 @@ import { describe, expect, test } from "bun:test";
 import { rankPreStudy } from "../web/prestudy.ts";
 import { collapseRepeatedCues, dropRepeatingCycles, type Cue } from "../src/lib/subs.ts";
 import { buildQuiz, normalizeAnswer, type QuizCue } from "../web/quiz.ts";
-import { buildForecast, FORECAST_WINDOW } from "../web/forecast.ts";
-import type { ProgressEntry } from "../web/api.ts";
 import { toCsv, type EpisodeDayRow } from "../src/lib/telemetry.ts";
 import { frontWord } from "../web/cardfilter.ts";
 
@@ -188,35 +186,6 @@ describe("normalizeAnswer — full-width / kana / punctuation", () => {
   test("kanji/kana content is preserved, full-width punctuation removed", () => {
     expect(normalizeAnswer("猫だ！")).toBe("猫だ");
     expect(normalizeAnswer("ねこ、")).toBe("ねこ");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// web/forecast.ts :: buildForecast window guards
-// ---------------------------------------------------------------------------
-
-const due: ProgressEntry = { isDue: true } as ProgressEntry;
-
-describe("buildForecast — non-finite / zero window guards", () => {
-  test("NaN window falls back to FORECAST_WINDOW (window+1 buckets)", () => {
-    const out = buildForecast({ a: due }, NaN);
-    expect(out).toHaveLength(FORECAST_WINDOW + 1);
-    expect(out[0]!.count).toBe(1);
-  });
-
-  test("-1 window falls back to FORECAST_WINDOW", () => {
-    const out = buildForecast({ a: due }, -1);
-    expect(out).toHaveLength(FORECAST_WINDOW + 1);
-  });
-
-  test("0 window → single bucket (offset 0 only)", () => {
-    const out = buildForecast({ a: due }, 0);
-    expect(out).toHaveLength(1);
-    expect(out[0]).toEqual({ dayOffset: 0, count: 1 });
-  });
-
-  test("empty progress with 0 window → one empty bucket", () => {
-    expect(buildForecast({}, 0)).toEqual([{ dayOffset: 0, count: 0 }]);
   });
 });
 

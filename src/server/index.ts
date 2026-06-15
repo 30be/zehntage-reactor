@@ -53,10 +53,7 @@ import { guessEpisode } from "../lib/episode.ts";
 import {
   listWords,
   getProgress,
-  addCard,
   deleteCard,
-  uploadMedia,
-  resolveMediaName,
   ankiLocalAvailable,
   storeMedia,
   retrieveMedia,
@@ -69,7 +66,9 @@ import {
   deleteNoteAuto,
   deckCountsAuto,
   reviewStatus,
+  addNoteAuto,
 } from "../lib/review.ts";
+import { dbStoreMedia, collectionPath } from "../lib/ankidb.ts";
 import { readSettings, writeSettings } from "../lib/settings.ts";
 import { parseEnvText } from "../lib/env.ts";
 import {
@@ -1790,6 +1789,11 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       }
 
       if (req.method === "POST" && path === "/api/anki/add") {
+        // Same safety gate as the review write endpoints: constant-time token
+        // check when ZEHNTAGE_DB_TOKEN is set, open when unset. Mining is now a
+        // real (windowless-capable) write path, so it gets the same gating.
+        const denied = await requireDbToken(req);
+        if (denied) return denied;
         const body = (await req.json()) as {
           word?: string;
           reading?: string;
@@ -1860,9 +1864,18 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
                   const name = await storeMedia(audio, `zr-${slug}-${stamp}.mp3`);
                   soundLine = `[sound:${name}]`;
                 } else {
-                  const path = await uploadMedia(audio, "audio/mpeg", "sentence.mp3");
-                  const mediaName = await resolveMediaName(path);
-                  if (mediaName) soundLine = `[sound:${mediaName}]`;
+                  // Anki closed: write the audio straight into the local
+                  // collection.media/ + media.db2 (windowless, Option A). This
+                  // preserves sentence audio without AnkiConnect. Non-fatal on
+                  // failure — the card still goes through without [sound:].
+                  const stored = await dbStoreMedia(
+                    audio,
+                    `zr-${slug}-${stamp}.mp3`,
+                    { path: collectionPath() },
+                  );
+                  if (stored.ok && stored.filename) {
+                    soundLine = `[sound:${stored.filename}]`;
+                  }
                 }
               } catch {
                 // no audio — card still goes through
@@ -1882,7 +1895,11 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
 
         const front = body.reading ? `${body.word} [${body.reading}]` : body.word;
         const _addT0 = Date.now();
-        await addCard({
+        // Windowless-capable add: AnkiConnect when Anki is open, direct DB write
+        // (dbAddNote) when Anki is closed, fake add under ANKI_FAKE. Media is
+        // already inlined into `context` (data:URI image / [sound:] from
+        // dbStoreMedia) above, so the card carries final field text.
+        const addRes = await addNoteAuto({
           front,
           back: body.translation,
           notes: body.notes ?? "",
@@ -1891,13 +1908,17 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
           ...(image ? { image, image_field: "context" } : {}),
         });
         const _addMs = Date.now() - _addT0;
-        bustAnkiWordsCache();
+        if (addRes.ok) bustAnkiWordsCache();
         void logEvent("perf.anki", { op: "add", ms: _addMs });
-        void logEvent("anki_add", { word: body.word, mediaId: body.mediaId });
+        void logEvent("anki_add", {
+          word: body.word,
+          mediaId: body.mediaId,
+          ok: addRes.ok,
+        });
         if (_addMs > 3000) {
           void logEvent("anomaly.anki_slow", { op: "add", ms: _addMs });
         }
-        return json({ ok: true });
+        return json({ ok: addRes.ok, error: addRes.error, reason: addRes.reason });
       }
 
       if (req.method === "POST" && path === "/api/anki/delete") {

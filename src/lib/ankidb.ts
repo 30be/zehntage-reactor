@@ -35,16 +35,18 @@
 
 import { Database } from "bun:sqlite";
 import { execFileSync } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import {
   copyFileSync,
   existsSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 // Reuse the project's existing safety/openness helpers (read-only, never write).
 import {
@@ -1296,6 +1298,531 @@ export async function dbDeleteNote(
     db.close();
     db = null;
     return { ok: true };
+  } catch (e) {
+    if (db) {
+      if (began) {
+        try {
+          db.exec("ROLLBACK");
+        } catch {
+          /* ignore */
+        }
+      }
+      try {
+        db.close();
+      } catch {
+        /* ignore */
+      }
+    }
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+// ===========================================================================
+// WRITE — dbAddNote (windowless, offline-only). See:
+//   /tmp/zehntage-dbaddnote-spec.md  (empirically verified, schema ver 18)
+//
+// Creates EXACTLY the note + card(s) AnkiConnect's addNote would create, but by
+// writing the on-disk collection directly (Anki closed). Identical safety
+// posture to dbAnswerCard / dbDeleteNote: fail-closed via canWrite(), backup
+// first, ONE BEGIN IMMEDIATE txn, integrity_check inside the txn (rollback on
+// failure; collation-missing → skip+warn), usn=-1 on every new row, bump
+// col.mod (ms), NEVER touch col.scm / col.usn / col.ver.
+// ===========================================================================
+
+/** The notetype zehntage cards use; resolved BY NAME at runtime (never the id). */
+const ZR_NOTETYPE_NAME = "Back+Front+Usage";
+/** The deck zehntage cards live in; resolved BY NAME at runtime. */
+const ZR_DECK_NAME = "Mixed";
+/** The single tag this app stamps mined cards with. */
+const ZR_TAG = "zehntage";
+
+/**
+ * Anki's base91 GUID alphabet (pylib `anki/utils.py` _base91 / rslib base91).
+ * 62 alphanumerics then 29 symbols — verified against real guids in the spec.
+ */
+const B91 =
+  "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!#$%&()*+,-./:;<=>?@[]^_`{|}~";
+
+/**
+ * Anki's `guid64()`: a random 64-bit unsigned int encoded in base91,
+ * least-significant-digit first. Yields ~10 chars (91^10 > 2^64). Uniqueness is
+ * for dupe/import detection, not a DB constraint.
+ */
+function guid64(): string {
+  // 8 random bytes → unsigned 64-bit BigInt.
+  const b = randomBytes(8);
+  let n = 0n;
+  for (let i = 0; i < 8; i++) n = (n << 8n) | BigInt(b[i] as number);
+  const base = 91n;
+  if (n === 0n) return B91[0] as string;
+  let s = "";
+  while (n > 0n) {
+    s += B91[Number(n % base)] as string;
+    n = n / base;
+  }
+  return s;
+}
+
+/** Lowercase 40-char SHA1 hex of a UTF-8 string. */
+function sha1hex(s: string): string {
+  return createHash("sha1").update(s, "utf8").digest("hex");
+}
+
+/** Lowercase 40-char SHA1 hex of raw bytes (media checksum). */
+function sha1hexBytes(bytes: Uint8Array): string {
+  return createHash("sha1").update(bytes).digest("hex");
+}
+
+/**
+ * Strip a field exactly the way Anki's `fieldChecksum` (strip_html_media) does
+ * for the FIRST field: remove `[sound:...]` / `[anki:...]` media tokens and HTML
+ * tags, decode `&nbsp;`, but do NOT collapse internal whitespace (Anki doesn't
+ * for the checksum). Our first field is `word [reading]` (no HTML), so this
+ * matches the verified samples; the dedicated helper stays Anki-faithful even if
+ * a reading ever contains markup.
+ */
+function stripForChecksum(s: string): string {
+  return s
+    .replace(/\[(?:sound|anki):[^\]]*\]/g, "")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&nbsp;/g, " ");
+}
+
+/**
+ * Anki's `fieldChecksum`: int(sha1(strip_html_media(firstField))[:8], 16).
+ * Verified exact against 5 real notes (spec §4.2).
+ */
+function fieldChecksum(firstFieldText: string): number {
+  const hex = sha1hex(stripForChecksum(firstFieldText));
+  return parseInt(hex.slice(0, 8), 16);
+}
+
+/** Format Anki's space-padded tag string, e.g. `" zehntage "`; `""` if none. */
+function formatTags(tags: string[] | undefined): string {
+  const clean = (tags ?? [])
+    .map((t) => t.replace(/\s+/g, "_"))
+    .filter((t) => t.length > 0);
+  if (clean.length === 0) return "";
+  return ` ${clean.join(" ")} `;
+}
+
+export interface AddNoteResult {
+  ok: boolean;
+  error?: string;
+  reason?: string;
+  noteId?: number;
+  cardIds?: number[];
+}
+
+/**
+ * Create a note (+ one card per template) directly in the real collection
+ * (offline only). Field mapping mirrors AnkiConnect's acAddCard:
+ *   Front ← card.front, Back ← card.back, notes ← card.notes, context ← card.context
+ * Tags default to ["zehntage"]. Deck = "Mixed", notetype = "Back+Front+Usage"
+ * (both resolved BY NAME from the DB; fail-closed if missing).
+ *
+ * @returns {ok:true, noteId, cardIds} on a committed, integrity-checked write;
+ *          {ok:false, reason} for a refused write (gate failed / duplicate /
+ *          locked); {ok:false, error} for an operational failure (rolled back).
+ *
+ * SAFETY: refuses unless canWrite() passes (Anki closed, no hot WAL/journal,
+ * schema 18). Backs up before writing. One BEGIN IMMEDIATE txn; rollback on any
+ * error. usn=-1 on note + cards; bumps col.mod (ms); never touches col.scm.
+ */
+export async function dbAddNote(
+  card: {
+    front: string;
+    back: string;
+    notes?: string;
+    context?: string;
+    tags?: string[];
+  },
+  testHooks?: {
+    path?: string;
+    canWrite?: (p: string) => { ok: boolean; reason?: string };
+    backup?: (p: string) => Promise<unknown>;
+    /** Skip the AnkiConnect-parity duplicate guard (default: enforced). */
+    allowDuplicate?: boolean;
+  },
+): Promise<AddNoteResult> {
+  const path = testHooks?.path ?? collectionPath();
+  const gateFn = testHooks?.canWrite ?? ((p: string) => canWrite(p));
+  const backupFn = testHooks?.backup ?? ((p: string) => backupCollection(p));
+  const allowDuplicate = testHooks?.allowDuplicate ?? false;
+
+  // 1. REFUSE-TO-WRITE gates (fail-closed). NEVER proceed if Anki is open.
+  const gate = gateFn(path);
+  if (!gate.ok) return { ok: false, reason: gate.reason ?? "refused" };
+
+  // 2. Backup BEFORE any write.
+  try {
+    await backupFn(path);
+  } catch (e) {
+    return { ok: false, error: `backup failed: ${(e as Error).message}` };
+  }
+
+  // 3. Open the REAL collection read-WRITE only inside the write path.
+  let db: Database | null = null;
+  let began = false;
+  try {
+    db = new Database(path, { readwrite: true });
+    db.exec("PRAGMA busy_timeout = 1000");
+    db.exec("PRAGMA journal_mode = wal");
+    db.exec("PRAGMA synchronous = FULL");
+    // Register unicase so PREPARE against notetypes/fields/templates/decks
+    // (name TEXT COLLATE unicase) succeeds.
+    const haveUnicase = tryRegisterUnicase(db);
+
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      began = true;
+    } catch {
+      try {
+        db.close();
+      } catch {
+        /* ignore */
+      }
+      return { ok: false, reason: "locked" };
+    }
+
+    const fail = (out: AddNoteResult): AddNoteResult => {
+      try {
+        db?.exec("ROLLBACK");
+      } catch {
+        /* ignore */
+      }
+      began = false;
+      try {
+        db?.close();
+      } catch {
+        /* ignore */
+      }
+      db = null;
+      return out;
+    };
+
+    // -- Resolve mid (notetype by name). Requires unicase. --
+    if (!haveUnicase) {
+      return fail({
+        ok: false,
+        error: "unicase collation unavailable; cannot resolve notetype by name",
+      });
+    }
+    const ntRow = db
+      .query("SELECT id FROM notetypes WHERE name = ?")
+      .get(ZR_NOTETYPE_NAME) as { id: number } | null;
+    if (!ntRow) {
+      return fail({ ok: false, error: `notetype '${ZR_NOTETYPE_NAME}' not found` });
+    }
+    const mid = ntRow.id;
+
+    // -- Field ordinals + names (ordered). --
+    const fieldRows = db
+      .query("SELECT ord, name FROM fields WHERE ntid = ? ORDER BY ord")
+      .all(mid) as { ord: number; name: string }[];
+    if (fieldRows.length === 0) {
+      return fail({ ok: false, error: `notetype ${mid} has no fields` });
+    }
+
+    // -- Template ordinals (one card per row). --
+    const tplRows = db
+      .query("SELECT ord FROM templates WHERE ntid = ? ORDER BY ord")
+      .all(mid) as { ord: number }[];
+    if (tplRows.length === 0) {
+      return fail({ ok: false, error: `notetype ${mid} has no templates` });
+    }
+
+    // -- Deck id by name. --
+    const deckRow = db
+      .query("SELECT id FROM decks WHERE name = ?")
+      .get(ZR_DECK_NAME) as { id: number } | null;
+    if (!deckRow) {
+      return fail({ ok: false, error: `deck '${ZR_DECK_NAME}' not found` });
+    }
+    const did = deckRow.id;
+
+    // -- Build flds / sfld / csum by field ordinal. --
+    // Map our four logical fields onto the notetype's fields case-insensitively
+    // (mirrors anki.ts acFieldMap: front→/front/i, back→/back/i, notes→/note/i,
+    // context→/usage|context/i). Unmatched fields stay empty.
+    const valueFor = (name: string): string => {
+      if (/front/i.test(name)) return card.front;
+      if (/back/i.test(name)) return card.back;
+      if (/note/i.test(name)) return typeof card.notes === "string" ? card.notes : "";
+      if (/usage|context/i.test(name))
+        return typeof card.context === "string" ? card.context : "";
+      return "";
+    };
+    const parts: string[] = [];
+    for (const f of fieldRows) parts[f.ord] = valueFor(f.name);
+    for (let i = 0; i < parts.length; i++) if (parts[i] === undefined) parts[i] = "";
+    const flds = parts.join(FLD_SEP);
+    const firstField = parts[0] ?? "";
+    // sfld = first field, HTML/media stripped. Anki stores an int affinity when
+    // the stripped value is a pure integer; otherwise text. Bind accordingly.
+    const sfldText = stripForChecksum(firstField).replace(/\s+/g, " ").trim();
+    const sfldNum = Number(sfldText);
+    const sfld: string | number =
+      sfldText !== "" && Number.isInteger(sfldNum) && String(sfldNum) === sfldText
+        ? sfldNum
+        : sfldText;
+    const csum = fieldChecksum(firstField);
+    const tags = formatTags(card.tags ?? [ZR_TAG]);
+
+    // -- Duplicate guard (replicate allowDuplicate:false, duplicateScope:deck). --
+    if (!allowDuplicate) {
+      const dup = db
+        .query(
+          `SELECT 1 FROM notes n JOIN cards c ON c.nid = n.id
+           WHERE n.csum = ? AND n.mid = ? AND c.did = ? LIMIT 1`,
+        )
+        .get(csum, mid, did);
+      if (dup) {
+        return fail({ ok: false, reason: "duplicate" });
+      }
+    }
+
+    // -- guid (unique among notes; regenerate on the astronomically rare hit). --
+    const guidExists = db.query("SELECT 1 FROM notes WHERE guid = ? LIMIT 1");
+    let guid = guid64();
+    let guidTries = 0;
+    while (guidExists.get(guid) && guidTries < 16) {
+      guid = guid64();
+      guidTries++;
+    }
+
+    const nowMs = Date.now();
+    const nowSec = Math.floor(nowMs / 1000);
+
+    // -- Allocate unique ids (note + one per template, all distinct). --
+    const nExists = db.query("SELECT 1 FROM notes WHERE id = ? LIMIT 1");
+    let nid = nowMs;
+    while (nExists.get(nid)) nid += 1;
+
+    const cExists = db.query("SELECT 1 FROM cards WHERE id = ? LIMIT 1");
+    const cardIds: number[] = [];
+    let cid = Math.max(nid + 1, nowMs);
+    for (let i = 0; i < tplRows.length; i++) {
+      while (cExists.get(cid) || cid === nid || cardIds.includes(cid)) cid += 1;
+      cardIds.push(cid);
+      cid += 1;
+    }
+
+    // -- Next new-card position from config.nextPos (fallback to max(due)+1). --
+    let pos = readConfigInt(db, "nextPos");
+    const nextPosPresent = pos !== null;
+    if (pos === null) {
+      const mx = db
+        .query("SELECT COALESCE(MAX(due),0)+1 AS p FROM cards WHERE type=0")
+        .get() as { p: number };
+      pos = mx.p;
+    }
+
+    // -- INSERT note. --
+    db.query(
+      `INSERT INTO notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data)
+       VALUES (?, ?, ?, ?, -1, ?, ?, ?, ?, 0, '')`,
+    ).run(nid, guid, mid, nowSec, tags, flds, sfld, csum);
+
+    // -- INSERT one card per template ordinal. --
+    const insCard = db.query(
+      `INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl,
+         factor, reps, lapses, left, odue, odid, flags, data)
+       VALUES (?, ?, ?, ?, ?, -1, 0, 0, ?, 0, 0, 0, 0, 0, 0, 0, 0, '')`,
+    );
+    for (let i = 0; i < tplRows.length; i++) {
+      insCard.run(
+        cardIds[i] as number,
+        nid,
+        did,
+        tplRows[i]!.ord,
+        nowSec,
+        (pos as number) + i,
+      );
+    }
+
+    // -- Persist the bumped new-card position. --
+    const newPos = (pos as number) + tplRows.length;
+    if (nextPosPresent) {
+      db.query(
+        `UPDATE config SET val = ?, usn = -1, mtime_secs = ? WHERE key = 'nextPos'`,
+      ).run(new TextEncoder().encode(JSON.stringify(newPos)), nowSec);
+    } else {
+      db.query(
+        `INSERT INTO config (key, usn, mtime_secs, val) VALUES ('nextPos', -1, ?, ?)`,
+      ).run(nowSec, new TextEncoder().encode(JSON.stringify(newPos)));
+    }
+
+    // -- col bookkeeping: bump col.mod (MS). NEVER touch col.scm / col.usn. --
+    db.query("UPDATE col SET mod = ?").run(nowMs);
+
+    // -- Pre-commit invariants (inside the txn — failure → ROLLBACK). --
+    const fk = db.query("PRAGMA foreign_key_check").all();
+    if (fk.length > 0) {
+      return fail({ ok: false, error: "foreign_key_check failed" });
+    }
+
+    try {
+      const ic = db.query("PRAGMA integrity_check").get() as
+        | { integrity_check?: string }
+        | Record<string, unknown>
+        | null;
+      const icVal =
+        ic && typeof ic === "object"
+          ? String(
+              (ic as Record<string, unknown>).integrity_check ??
+                Object.values(ic)[0] ??
+                "",
+            )
+          : "";
+      if (icVal && icVal !== "ok") {
+        return fail({ ok: false, error: `integrity_check: ${icVal}` });
+      }
+    } catch (icErr) {
+      const msg = (icErr as Error).message ?? "";
+      if (msg.includes("COLLSEQ") || msg.includes("collation")) {
+        console.warn("[ankidb] dbAddNote integrity_check skipped: missing collation —", msg);
+      } else {
+        return fail({ ok: false, error: `integrity_check threw: ${msg}` });
+      }
+    }
+
+    db.exec("COMMIT");
+    began = false;
+
+    try {
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } catch {
+      /* non-fatal */
+    }
+    db.close();
+    db = null;
+    return { ok: true, noteId: nid, cardIds };
+  } catch (e) {
+    if (db) {
+      if (began) {
+        try {
+          db.exec("ROLLBACK");
+        } catch {
+          /* ignore */
+        }
+      }
+      try {
+        db.close();
+      } catch {
+        /* ignore */
+      }
+    }
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+// ===========================================================================
+// MEDIA — dbStoreMedia (windowless, offline-only; Option A from the spec).
+//
+// Writes media bytes into collection.media/ AND registers the row in
+// collection.media.db2 so the file syncs to AnkiWeb. Additive-only (new file +
+// new/updated row); never mutates note data. Fail-closed if the media dir/db is
+// missing. Best-effort callers should treat failure as non-fatal (drop audio).
+// ===========================================================================
+
+/** Path to the media dir / db2 next to a given collection.anki2. */
+function mediaPaths(collection: string): { dir: string; db2: string } {
+  const base = dirname(collection);
+  return {
+    dir: join(base, "collection.media"),
+    db2: join(base, "collection.media.db2"),
+  };
+}
+
+/** Split a filename into (stem, ext) where ext includes the leading dot. */
+function splitExt(name: string): { stem: string; ext: string } {
+  const i = name.lastIndexOf(".");
+  if (i <= 0) return { stem: name, ext: "" };
+  return { stem: name.slice(0, i), ext: name.slice(i) };
+}
+
+export interface StoreMediaResult {
+  ok: boolean;
+  error?: string;
+  reason?: string;
+  /** The canonical filename actually stored (may be disambiguated). */
+  filename?: string;
+}
+
+/**
+ * Store raw media bytes into the LOCAL collection.media/ directory and register
+ * the file in collection.media.db2 (Option A — preserves audio when Anki is
+ * closed). Dedups by filename+content: identical bytes under the same name reuse
+ * it; different bytes under a taken name get a `-<n>` suffix.
+ *
+ * @returns {ok:true, filename} on success; {ok:false, error/reason} otherwise.
+ */
+export async function dbStoreMedia(
+  bytes: Uint8Array,
+  filename: string,
+  testHooks?: {
+    path?: string;
+    canWrite?: (p: string) => { ok: boolean; reason?: string };
+  },
+): Promise<StoreMediaResult> {
+  const path = testHooks?.path ?? collectionPath();
+  const gateFn = testHooks?.canWrite ?? ((p: string) => canWrite(p));
+
+  // Same fail-closed posture: only write media when Anki is closed.
+  const gate = gateFn(path);
+  if (!gate.ok) return { ok: false, reason: gate.reason ?? "refused" };
+
+  const { dir, db2 } = mediaPaths(path);
+  if (!existsSync(dir) || !existsSync(db2)) {
+    return { ok: false, error: "media dir or media.db2 not present" };
+  }
+
+  // Sanitize (our generated names are already safe; be defensive anyway).
+  const safe = filename.replace(/[/\\\x00]+/g, "_");
+  const wantCsum = sha1hexBytes(bytes);
+
+  let db: Database | null = null;
+  let began = false;
+  try {
+    // Resolve a free / matching filename.
+    const { stem, ext } = splitExt(safe);
+    let stored = safe;
+    let n = 0;
+    while (existsSync(join(dir, stored))) {
+      // Same name on disk — compare bytes. Identical → reuse (idempotent).
+      try {
+        const existing = readFileSync(join(dir, stored));
+        if (sha1hexBytes(new Uint8Array(existing)) === wantCsum) {
+          // Reuse: keep `stored`; the media row is upserted below.
+          break;
+        }
+      } catch {
+        /* fall through to disambiguate */
+      }
+      n += 1;
+      stored = `${stem}-${n}${ext}`;
+    }
+    const fullPath = join(dir, stored);
+    const reuse = existsSync(fullPath);
+    if (!reuse) {
+      writeFileSync(fullPath, bytes);
+    }
+
+    const mtime = Date.now();
+    db = new Database(db2, { readwrite: true });
+    db.exec("PRAGMA busy_timeout = 1000");
+    db.exec("BEGIN IMMEDIATE");
+    began = true;
+    db.query(
+      `INSERT INTO media (fname, csum, mtime, dirty) VALUES (?, ?, ?, 1)
+       ON CONFLICT(fname) DO UPDATE SET csum=excluded.csum, mtime=excluded.mtime, dirty=1`,
+    ).run(stored, wantCsum, mtime);
+    db.exec("COMMIT");
+    began = false;
+    db.close();
+    db = null;
+    return { ok: true, filename: stored };
   } catch (e) {
     if (db) {
       if (began) {

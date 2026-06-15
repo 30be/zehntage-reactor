@@ -22,7 +22,9 @@ import {
   reviewQueue as acReviewQueue,
   answerCard as acAnswerCard,
   deleteNote as acDeleteNote,
+  addCard as acAddCard,
   ankiLocalAvailable,
+  type AnkiCard,
   type ReviewCard,
 } from "./anki.ts";
 import {
@@ -31,6 +33,7 @@ import {
   dbDeckCounts,
   dbAnswerCard,
   dbDeleteNote,
+  dbAddNote,
   type DeckCounts,
 } from "./ankidb.ts";
 
@@ -57,24 +60,28 @@ interface ReviewDeps {
   acReviewQueue: typeof acReviewQueue;
   acAnswerCard: typeof acAnswerCard;
   acDeleteNote: typeof acDeleteNote;
+  acAddCard: typeof acAddCard;
   ankiLocalAvailable: typeof ankiLocalAvailable;
   dbStatus: typeof dbStatus;
   dbReviewQueue: typeof dbReviewQueue;
   dbDeckCounts: typeof dbDeckCounts;
   dbAnswerCard: typeof dbAnswerCard;
   dbDeleteNote: typeof dbDeleteNote;
+  dbAddNote: typeof dbAddNote;
 }
 
 const realDeps: ReviewDeps = {
   acReviewQueue,
   acAnswerCard,
   acDeleteNote,
+  acAddCard,
   ankiLocalAvailable,
   dbStatus,
   dbReviewQueue,
   dbDeckCounts,
   dbAnswerCard,
   dbDeleteNote,
+  dbAddNote,
 };
 
 let deps: ReviewDeps = realDeps;
@@ -128,6 +135,14 @@ export interface DeckCountsResult {
   new: number;
   learning: number;
   review: number;
+}
+
+export interface AddResult {
+  ok: boolean;
+  error?: string;
+  reason?: RefuseReason;
+  /** Informational only — the server strips this before replying. */
+  backend: ReviewBackend;
 }
 
 export interface ReviewStatus {
@@ -374,6 +389,95 @@ export async function deleteNoteAuto(cardId: number): Promise<DeleteResult> {
   return {
     ok: false,
     error: "No delete backend available (Anki closed)",
+    reason: "no-backend",
+    backend: "ankiconnect",
+  };
+}
+
+/**
+ * Add a note (mine a card), windowless-capable. Mirrors answerCardAuto routing:
+ *
+ *   - ANKI_FAKE=1 → route to the in-memory fake add (acAddCard's fake branch).
+ *     Never touches the real collection or the DB write.
+ *   - Anki OPEN (AnkiConnect reachable) → AnkiConnect `addCard` (UNCHANGED). The
+ *     live collection is authoritative; media was already stored via storeMedia
+ *     and inlined into `card.context` by the caller.
+ *   - Anki CLOSED → `dbAddNote`, the gated, backup-first, fail-closed windowless
+ *     DB write. Media for the closed path (audio via dbStoreMedia, images inline
+ *     as data:URI) is handled by the caller BEFORE this routes, so the card here
+ *     already carries the final field text.
+ *   - Neither → refuse with {ok:false, reason:"no-backend"}.
+ *
+ * The DB-write path is suppressed in fake mode (ANKI_FAKE=1).
+ */
+export async function addNoteAuto(card: AnkiCard): Promise<AddResult> {
+  // Fake/e2e mode: route to the in-memory fake AnkiConnect add.
+  if (process.env.ANKI_FAKE === "1") {
+    try {
+      await deps.acAddCard(card);
+      return { ok: true, backend: "ankiconnect" };
+    } catch (e) {
+      return {
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+        reason: "fake-add-threw",
+        backend: "ankiconnect",
+      };
+    }
+  }
+
+  // Is Anki up? If so, AnkiConnect is authoritative (UNCHANGED path).
+  let ankiConnectUp = false;
+  try {
+    ankiConnectUp = await deps.ankiLocalAvailable();
+  } catch {
+    ankiConnectUp = false;
+  }
+
+  if (ankiConnectUp) {
+    try {
+      await deps.acAddCard(card);
+      return { ok: true, backend: "ankiconnect" };
+    } catch (e) {
+      return {
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+        reason: "ankiconnect-failed",
+        backend: "ankiconnect",
+      };
+    }
+  }
+
+  // Anki closed → windowless DB write (unless fake mode, which must not write).
+  if (dbDirectEnabled()) {
+    try {
+      const r = await deps.dbAddNote({
+        front: card.front,
+        back: card.back,
+        notes: typeof card.notes === "string" ? card.notes : "",
+        context: typeof card.context === "string" ? card.context : "",
+        tags: Array.isArray(card.tags) ? card.tags : ["zehntage"],
+      });
+      return {
+        ok: r.ok,
+        error: r.error,
+        reason: r.reason,
+        backend: "db",
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+        reason: "db-write-threw",
+        backend: "db",
+      };
+    }
+  }
+
+  // No backend available (Anki closed and DB-direct disabled/unavailable).
+  return {
+    ok: false,
+    error: "No add backend available (Anki closed)",
     reason: "no-backend",
     backend: "ankiconnect",
   };
