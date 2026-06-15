@@ -65,7 +65,7 @@ import {
   mediaAuto,
 } from "../lib/review.ts";
 import { dbStoreMedia, collectionPath } from "../lib/ankidb.ts";
-import { readSettings, writeSettings } from "../lib/settings.ts";
+import { readSettings, writeSettings, validateSettingsPatch } from "../lib/settings.ts";
 import { parseEnvText } from "../lib/env.ts";
 import {
   logEvent,
@@ -2327,8 +2327,17 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
           });
         }
         if (req.method === "POST") {
-          const patch = (await req.json()) as Record<string, unknown>;
-          return json(await writeSettings(patch));
+          // M20-1: malformed JSON → 400, not 500.
+          let rawBody: unknown;
+          try {
+            rawBody = await req.json();
+          } catch {
+            return err("invalid JSON body", 400);
+          }
+          // M20-2: reject non-object bodies (arrays, primitives); apply key allowlist.
+          const validated = validateSettingsPatch(rawBody);
+          if (!validated.ok) return err(validated.error, 400);
+          return json(await writeSettings(validated.patch));
         }
       }
 

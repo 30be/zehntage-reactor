@@ -56,6 +56,99 @@ function settingsFile(): string {
 
 const VALID_THEMES = new Set<Settings["theme"]>(["light", "dark", "system"]);
 
+/**
+ * The exhaustive set of known settings keys. Used as an allowlist by the
+ * POST /api/settings handler: unknown keys are silently dropped before
+ * persisting, so stale/typo/injection keys never accumulate in the file.
+ */
+export const SETTINGS_KEYS = new Set<keyof Settings>([
+  // strings
+  "targetLang",
+  "knownLang",
+  "lookupPrompt",
+  "explainPrompt",
+  "theme",
+  // booleans
+  "blurSecondary",
+  "autoQuizPrompt",
+  "whisperAutoGenerate",
+  "furigana",
+  "pitchAccent",
+  "showSecondary",
+  // numbers
+  "prestudyMinutes",
+  "shadowRepeats",
+  "autopauseMinUnknown",
+  "subScale",
+  // enum
+  "autopauseMode",
+]);
+
+// Settings whose value must be a finite number to be accepted.
+const NUMBER_KEYS = new Set<string>([
+  "prestudyMinutes",
+  "shadowRepeats",
+  "autopauseMinUnknown",
+  "subScale",
+]);
+// Settings whose value must be a boolean to be accepted.
+const BOOLEAN_KEYS = new Set<string>([
+  "blurSecondary",
+  "autoQuizPrompt",
+  "whisperAutoGenerate",
+  "furigana",
+  "pitchAccent",
+  "showSecondary",
+]);
+// Settings whose value must be a string to be accepted.
+const STRING_KEYS = new Set<string>([
+  "targetLang",
+  "knownLang",
+  "lookupPrompt",
+  "explainPrompt",
+  "theme",
+  "autopauseMode",
+]);
+
+/**
+ * Validate and coerce an incoming patch from the API.
+ *
+ * Returns `{ ok: true, patch }` with only known keys whose values pass a
+ * basic type check, or `{ ok: false, error }` when the input is not a
+ * plain object (e.g. an array or primitive).
+ *
+ * Unknown keys are silently dropped. Known keys with wrong types are also
+ * dropped (rather than 400-ing the whole request) to be forward-compatible
+ * with older clients sending partial updates.
+ */
+export function validateSettingsPatch(
+  raw: unknown,
+): { ok: true; patch: Partial<Settings> } | { ok: false; error: string } {
+  if (
+    raw === null ||
+    typeof raw !== "object" ||
+    Array.isArray(raw)
+  ) {
+    return { ok: false, error: "body must be a JSON object" };
+  }
+  const input = raw as Record<string, unknown>;
+  const patch: Partial<Settings> = {};
+  for (const k of SETTINGS_KEYS) {
+    const key = String(k);
+    if (!(key in input)) continue;
+    const val = input[key];
+    const out = patch as Record<string, unknown>;
+    if (STRING_KEYS.has(key)) {
+      if (typeof val === "string") out[key] = val;
+    } else if (BOOLEAN_KEYS.has(key)) {
+      if (typeof val === "boolean") out[key] = val;
+    } else if (NUMBER_KEYS.has(key)) {
+      if (typeof val === "number" && Number.isFinite(val)) out[key] = val;
+    }
+  }
+  return { ok: true, patch };
+}
+
 function normalize(data: Partial<Settings>): Settings {
   const merged: Settings = { ...DEFAULTS, ...data };
   if (!VALID_THEMES.has(merged.theme)) merged.theme = "light";

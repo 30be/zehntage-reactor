@@ -1527,22 +1527,42 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     // coords (captured via getBoundingClientRect); subtract the stage rect to
     // convert to stage-local coords.
     const s = stage.getBoundingClientRect();
+    // Reserve space at the bottom of the stage for the subtitle line + vbar
+    // (~64px sub-overlay bottom + ~46px vbar ≈ 110px; use 120px to be safe).
+    // The popup must never extend into this zone so it doesn't cover the subs.
+    const subReserve = 120;
+    const safeBottom = s.bottom - subReserve;
     // Available room measured against the visible STAGE box (matches fullscreen
     // letterboxing as well as windowed layout).
     const spaceAbove = popup.y - s.top;
-    const spaceBelow = s.bottom - popup.anchorBottom;
+    const spaceBelow = safeBottom - popup.anchorBottom;
     const placeBelow = spaceAbove < height + margin && spaceBelow > spaceAbove;
 
     // Anchor to the token: above by default (keeps the bottom subtitle clear),
     // flip below only when there isn't room above.
     let top = placeBelow ? popup.anchorBottom + margin : popup.y - height - margin;
-    // Clamp within the stage box, then convert to stage-local coords.
-    top = Math.max(s.top + margin, Math.min(top, s.bottom - height - margin)) - s.top;
+    // Clamp within the stage box (respecting subtitle safe zone), then convert
+    // to stage-local coords.
+    const topMin = s.top + margin;
+    // safeBottom is the lower fence: popup bottom must not exceed it.
+    const topMax = Math.max(topMin, safeBottom - height);
+    top = Math.max(topMin, Math.min(top, topMax)) - s.top;
+
+    // Tiny-viewport: if the popup is taller than the available safe area, cap
+    // its max-height so it scrolls internally rather than spilling over the sub.
+    const safeHeight = safeBottom - s.top - 2 * margin;
+    const cappedMaxHeight = height > safeHeight ? Math.max(80, safeHeight) : undefined;
 
     let left = popup.x - width / 2;
     left = Math.max(s.left + margin, Math.min(left, s.right - width - margin)) - s.left;
 
-    setPopupPos({ position: "absolute", left, top, visibility: "visible" });
+    setPopupPos({
+      position: "absolute",
+      left,
+      top,
+      visibility: "visible",
+      ...(cappedMaxHeight !== undefined ? { maxHeight: cappedMaxHeight, overflowY: "auto" } : {}),
+    });
   }, [popup, lookup, lookupLoading, explain, explainLoading, explainErr, qa]);
 
   const onAdd = useCallback(async () => {

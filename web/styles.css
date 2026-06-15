@@ -656,38 +656,7 @@ textarea.prompt {
 .today-tiles { display: flex; flex-wrap: wrap; gap: 28px; }
 .today-tiles .stat { color: var(--muted); font-size: 14px; }
 
-/* Daily-goal ring (F3) — monochrome: thin ink stroke, no fills. */
-.today-goal { display: flex; align-items: center; gap: 18px; margin: 4px 0 18px; }
-.goal-ring { width: 80px; height: 80px; flex: 0 0 auto; }
-.goal-ring-track {
-  fill: none; stroke: var(--muted-bg); stroke-width: 5;
-}
-.goal-ring-fill {
-  fill: none; stroke: var(--muted); stroke-width: 5; stroke-linecap: round;
-  transform: rotate(-90deg); transform-origin: 50% 50%;
-  transition: stroke-dashoffset .4s ease, stroke .3s ease;
-}
-.today-goal.is-met .goal-ring-fill { stroke: var(--fg); }
-.goal-ring-num {
-  fill: var(--fg); font-size: 22px; font-weight: 700;
-  text-anchor: middle; dominant-baseline: middle;
-}
-.goal-ring-sub {
-  fill: var(--muted); font-size: 10px;
-  text-anchor: middle; dominant-baseline: middle;
-}
-.today-goal-meta { display: flex; flex-direction: column; gap: 8px; }
-.today-goal-ctl { display: flex; align-items: center; gap: 10px; }
-.goal-label { color: var(--muted); font-size: 14px; }
-.goal-step {
-  width: 22px; height: 22px; line-height: 1; padding: 0;
-  border: 1px solid var(--muted); border-radius: 50%;
-  background: transparent; color: var(--fg);
-  font-size: 15px; cursor: pointer;
-  display: inline-flex; align-items: center; justify-content: center;
-}
-.goal-step:hover { border-color: var(--fg); }
-.today-goal-streak { color: var(--muted); font-size: 14px; }
+
 
 .stats-totals { display: flex; gap: 32px; margin: 6px 0 22px; }
 .stats-totals .stat { color: var(--muted); font-size: 14px; }
@@ -2720,22 +2689,6 @@ textarea:focus-visible {
    already styled above. The rules below cover the NEW class names that had no
    styling: the scope toggle, header counters, Anki HTML panes, the prominent
    grade-button row, and the empty/offline retry affordance. */
-
-/* scope toggle ("zehntage cards only") — quiet inline control in the header
-   and a calmer standalone row under the empty/offline states. */
-.review-scope {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  color: var(--muted);
-  cursor: pointer;
-  user-select: none;
-  white-space: nowrap;
-}
-.review-scope input { margin: 0; accent-color: var(--fg); }
-.review-head .review-scope { margin-left: auto; }
-.review-scope-row { margin-top: 16px; }
 
 /* header counters: due/reviewed sit as dim tabular figures next to the count */
 .review-due,

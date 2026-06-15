@@ -696,8 +696,15 @@ export async function probeStreams(file: string): Promise<FfprobeStream[]> {
 // — `ffprobe` costs ~100ms per call and /api/subs probes on every request.
 // Invalidated automatically when the file's size or mtime changes (new key).
 // Mirrors the `extractCache` scheme below and `embeddedLangCache` in library.ts.
+//
+// The value is a small immutable array (one entry per embedded subtitle track),
+// so caching every distinct file+mtime costs almost nothing in memory. We use an
+// LRU bounded well above any realistic library size (thousands of episodes): a
+// previous 64-entry FIFO thrashed on /api/library — every load probes every
+// episode, so a >64-episode library evicted entries faster than it filled them
+// and re-ffprobed the whole library on every call (O(n) ffprobe spawns/request).
 const embeddedTracksCache = new Map<string, SubTrack[]>();
-const EMBEDDED_TRACKS_CACHE_MAX = 64;
+const EMBEDDED_TRACKS_CACHE_MAX = 4096;
 
 export async function listEmbeddedSubTracks(file: string): Promise<SubTrack[]> {
   let key: string | null = null;
@@ -705,14 +712,32 @@ export async function listEmbeddedSubTracks(file: string): Promise<SubTrack[]> {
     const st = await stat(file);
     key = `${file}:${st.size}:${st.mtimeMs}`;
     const hit = embeddedTracksCache.get(key);
-    if (hit !== undefined) return hit;
+    if (hit !== undefined) {
+      // LRU touch: re-insert so this hot entry is the most-recently-used.
+      embeddedTracksCache.delete(key);
+      embeddedTracksCache.set(key, hit);
+      return hit;
+    }
   } catch {
     // unstatable — probe uncached (probeStreams throws on a real failure,
     // matching the previous always-probe behavior).
   }
   const tracks = await listEmbeddedSubTracksUncached(file);
-  if (key != null) fifoSet(embeddedTracksCache, key, tracks, EMBEDDED_TRACKS_CACHE_MAX);
+  if (key != null) lruSet(embeddedTracksCache, key, tracks, EMBEDDED_TRACKS_CACHE_MAX);
   return tracks;
+}
+
+// Insert into an LRU-capped Map. Map preserves insertion order, so the first
+// key is the least-recently-used (callers re-insert on hit to mark as MRU).
+// Evicts the oldest entries until under `max`.
+function lruSet<V>(cache: Map<string, V>, key: string, value: V, max: number): void {
+  cache.delete(key);
+  while (cache.size >= max) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+  cache.set(key, value);
 }
 
 // Insert into a FIFO-capped Map, evicting oldest entries until under `max`.
