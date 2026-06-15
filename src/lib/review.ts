@@ -23,6 +23,9 @@ import {
   answerCard as acAnswerCard,
   deleteNote as acDeleteNote,
   addCard as acAddCard,
+  listWords as acListWords,
+  getProgress as acGetProgress,
+  retrieveMedia as acRetrieveMedia,
   ankiLocalAvailable,
   type AnkiCard,
   type ReviewCard,
@@ -34,7 +37,11 @@ import {
   dbAnswerCard,
   dbDeleteNote,
   dbAddNote,
+  dbListCards,
+  dbProgress,
+  dbGetMedia,
   type DeckCounts,
+  type DbMediaResult,
 } from "./ankidb.ts";
 
 export type ReviewScope = "zehntage" | "all";
@@ -68,6 +75,12 @@ interface ReviewDeps {
   dbAnswerCard: typeof dbAnswerCard;
   dbDeleteNote: typeof dbDeleteNote;
   dbAddNote: typeof dbAddNote;
+  acListWords: typeof acListWords;
+  acGetProgress: typeof acGetProgress;
+  acRetrieveMedia: typeof acRetrieveMedia;
+  dbListCards: typeof dbListCards;
+  dbProgress: typeof dbProgress;
+  dbGetMedia: typeof dbGetMedia;
 }
 
 const realDeps: ReviewDeps = {
@@ -82,6 +95,12 @@ const realDeps: ReviewDeps = {
   dbAnswerCard,
   dbDeleteNote,
   dbAddNote,
+  acListWords,
+  acGetProgress,
+  acRetrieveMedia,
+  dbListCards,
+  dbProgress,
+  dbGetMedia,
 };
 
 let deps: ReviewDeps = realDeps;
@@ -481,6 +500,115 @@ export async function addNoteAuto(card: AnkiCard): Promise<AddResult> {
     reason: "no-backend",
     backend: "ankiconnect",
   };
+}
+
+/**
+ * List the Mixed-deck cards for the Cards tab, windowless-capable.
+ *
+ *   - ANKI_FAKE=1 → existing fake (acListWords reads the in-memory fake map).
+ *   - Anki OPEN (AnkiConnect reachable) → existing AnkiConnect path
+ *     (acListWords → acListCards, UNCHANGED).
+ *   - Anki CLOSED → dbListCards (read-only DB snapshot).
+ *
+ * Returns AnkiCard[] in the SAME shape both paths produce
+ * ({front, back, notes, context, noteId, tags}). On any DB failure it returns
+ * what dbListCards returns ([]) rather than throwing.
+ */
+export async function listCardsAuto(): Promise<AnkiCard[]> {
+  if (process.env.ANKI_FAKE === "1") {
+    return deps.acListWords();
+  }
+  let ankiConnectUp = false;
+  try {
+    ankiConnectUp = await deps.ankiLocalAvailable();
+  } catch {
+    ankiConnectUp = false;
+  }
+  if (ankiConnectUp) {
+    // UNCHANGED AnkiConnect path (acListWords → acListCards when Anki is open).
+    return deps.acListWords();
+  }
+  // Anki closed → windowless DB read (suppressed in fake mode, handled above).
+  if (dbDirectEnabled()) {
+    const cards = deps.dbListCards("all");
+    return cards.map((c): AnkiCard => ({
+      front: c.front,
+      back: c.back,
+      notes: c.notes,
+      context: c.context,
+      noteId: c.noteId,
+      tags: c.tags,
+    }));
+  }
+  return [];
+}
+
+/**
+ * Per-word scheduling/progress map for token coloring, windowless-capable.
+ *
+ *   - ANKI_FAKE=1 → existing fake (acGetProgress returns {}).
+ *   - Anki OPEN → existing AnkiConnect path (acGetProgress → acProgress,
+ *     UNCHANGED).
+ *   - Anki CLOSED → dbProgress (read-only DB snapshot).
+ *
+ * The returned map is keyed identically (by the raw `front` field value) and
+ * each entry carries the SAME fields acProgress emits
+ * ({interval,due,reps,lapses,ease,queue,type,isDue,daysOverdue}). Returns {} on
+ * failure / when no backend is available.
+ */
+export async function progressAuto(): Promise<Record<string, unknown> | null> {
+  if (process.env.ANKI_FAKE === "1") {
+    return deps.acGetProgress();
+  }
+  let ankiConnectUp = false;
+  try {
+    ankiConnectUp = await deps.ankiLocalAvailable();
+  } catch {
+    ankiConnectUp = false;
+  }
+  if (ankiConnectUp) {
+    // UNCHANGED AnkiConnect path (acGetProgress → acProgress when Anki is open).
+    return deps.acGetProgress();
+  }
+  if (dbDirectEnabled()) {
+    return deps.dbProgress("all") as Record<string, unknown>;
+  }
+  return {};
+}
+
+/**
+ * Read a media file's bytes for the /api/anki/media proxy, windowless-capable.
+ *
+ *   - ANKI_FAKE=1 → null (no media in fake mode; mirrors retrieveMedia).
+ *   - Anki OPEN → existing AnkiConnect retrieveMedia (UNCHANGED). content-type
+ *     is left to the server's extension map (acRetrieveMedia returns only bytes).
+ *   - Anki CLOSED → dbGetMedia (reads collection.media/ on disk; returns bytes
+ *     + content-type).
+ *
+ * Returns { bytes, contentType? } or null on miss (same graceful posture as
+ * retrieveMedia, which returns null). The server applies its own content-type
+ * map, so contentType here is advisory.
+ */
+export async function mediaAuto(
+  filename: string,
+): Promise<{ bytes: Uint8Array; contentType?: string } | null> {
+  if (process.env.ANKI_FAKE === "1") return null;
+  let ankiConnectUp = false;
+  try {
+    ankiConnectUp = await deps.ankiLocalAvailable();
+  } catch {
+    ankiConnectUp = false;
+  }
+  if (ankiConnectUp) {
+    // UNCHANGED AnkiConnect path.
+    const bytes = await deps.acRetrieveMedia(filename);
+    return bytes ? { bytes } : null;
+  }
+  if (dbDirectEnabled()) {
+    const r: DbMediaResult | null = deps.dbGetMedia(filename);
+    return r ? { bytes: r.bytes, contentType: r.contentType } : null;
+  }
+  return null;
 }
 
 /**

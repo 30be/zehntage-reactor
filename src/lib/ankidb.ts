@@ -651,6 +651,368 @@ export function dbDeckCounts(scope: ReviewScope = "zehntage"): DeckCounts {
 }
 
 // ===========================================================================
+// WINDOWLESS READ PATHS (Stage 2a — remove AnkiConnect dependency for reads).
+//
+// These mirror, byte-for-byte in output shape, the three AnkiConnect-only reads:
+//   acListCards()  → dbListCards()   (Cards tab note list)
+//   acProgress()   → dbProgress()    (per-word scheduling state for coloring)
+//   retrieveMedia()→ dbGetMedia()    (card image/audio bytes)
+//
+// All are read-only: they open the collection via openReadOnly (snapshot-copy
+// when Anki holds the WAL lock), never write, take no backup, and never throw —
+// returning an empty/neutral result on any failure so the caller degrades to the
+// AnkiConnect path or an empty list. Field names are resolved BY NAME from the
+// notetype (reuse of the dbAddNote spec's resolution), so the mapping survives a
+// field rename the same way acFieldMap does.
+// ===========================================================================
+
+/** Anki note tags are stored space-padded (" a b c "); split to a string[]. */
+function parseTags(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  return raw.trim().split(/\s+/).filter(Boolean);
+}
+
+/**
+ * Resolve the field-name → ordinal map for a notetype, matching acFieldMap()'s
+ * case-insensitive resolution exactly:
+ *   front   = /front/i  (else ord 0)
+ *   back    = /back/i   (else ord 1)
+ *   notes   = /note/i   (optional)
+ *   context = /usage|context/i and != the notes field (optional)
+ * Returns ordinals into the FLD_SEP-split flds array. Requires unicase (the
+ * `fields` table carries a unicase TEXT name column). Returns null otherwise.
+ */
+interface DbFieldMap {
+  front: number;
+  back: number;
+  notes?: number;
+  context?: number;
+}
+function resolveFieldMap(h: OpenDb, ntid: number): DbFieldMap | null {
+  if (!h.unicase) return null;
+  try {
+    const rows = h.db
+      .query("SELECT ord, name FROM fields WHERE ntid = ? ORDER BY ord")
+      .all(ntid) as { ord: number; name: string }[];
+    if (rows.length === 0) return null;
+    const names = rows.map((r) => r.name ?? "");
+    const findOrd = (re: RegExp): number | undefined => {
+      const i = names.findIndex((n) => re.test(n));
+      return i >= 0 ? rows[i]!.ord : undefined;
+    };
+    const front = findOrd(/front/i) ?? rows[0]!.ord;
+    const back = findOrd(/back/i) ?? rows[1]?.ord ?? rows[0]!.ord;
+    const map: DbFieldMap = { front, back };
+    const notesOrd = findOrd(/note/i);
+    if (notesOrd !== undefined) map.notes = notesOrd;
+    // context = /usage|context/i AND not the same field as notes (mirrors acFieldMap).
+    const ctxIdx = names.findIndex(
+      (n, i) => /usage|context/i.test(n) && rows[i]!.ord !== notesOrd,
+    );
+    if (ctxIdx >= 0) map.context = rows[ctxIdx]!.ord;
+    return map;
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve a deck id by name (unicase TEXT). Falls back to the known Mixed id. */
+function resolveDeckId(h: OpenDb, name: string): number {
+  if (h.unicase) {
+    try {
+      const row = h.db.query("SELECT id FROM decks WHERE name = ?").get(name) as
+        | { id: number }
+        | null;
+      if (row && Number.isFinite(row.id)) return row.id;
+    } catch {
+      /* fall through */
+    }
+  }
+  return MIXED_DECK_ID;
+}
+
+/**
+ * Days a review card is overdue (>= 0), decoded identically to anki.ts
+ * decodeDaysOverdue: only queue===2; nextDue = mod*1000 + ivl*DAY_MS;
+ * floor((now - nextDue)/DAY_MS), clamped >= 0. mod is epoch SECONDS.
+ */
+function decodeDaysOverdueDb(
+  interval: number,
+  queue: number,
+  mod: number,
+  now: number = Date.now(),
+): number {
+  if (queue !== 2) return 0;
+  if (
+    typeof interval !== "number" ||
+    typeof mod !== "number" ||
+    !Number.isFinite(interval) ||
+    !Number.isFinite(mod) ||
+    interval < 0 ||
+    mod <= 0
+  ) {
+    return 0;
+  }
+  const DAY_MS = 86_400_000;
+  const nextDueMs = mod * 1000 + interval * DAY_MS;
+  const overdue = Math.floor((now - nextDueMs) / DAY_MS);
+  if (!Number.isFinite(overdue) || overdue < 0) return 0;
+  return overdue;
+}
+
+/** AnkiCard subset returned by dbListCards (matches acListCards's output). */
+export interface DbListedCard {
+  front: string;
+  back: string;
+  notes: string;
+  context: string;
+  noteId: number;
+  tags: string[];
+}
+
+/**
+ * Read every note in the Mixed deck and return the SAME shape acListCards
+ * returns: { front, back, notes, context, noteId, tags } with RAW field values
+ * (HTML intact — the Cards tab strips/render-decides itself). Read-only; returns
+ * [] on any failure (caller falls back to AnkiConnect / remote).
+ *
+ * Notes are selected via their cards' deck membership (a note may back several
+ * cards; DISTINCT by note id). Field ordinals are resolved per-notetype by name.
+ */
+export function dbListCards(scope: ReviewScope = "all"): DbListedCard[] {
+  const h = openReadOnly(collectionPath());
+  if (!h) return [];
+  try {
+    const deckId = resolveDeckId(h, "Mixed");
+    const { join: joinSql, where, params } = scope === "zehntage"
+      ? {
+          join: "JOIN notes n ON c.nid = n.id",
+          where: "(' ' || n.tags || ' ') LIKE '% zehntage %'",
+          params: [] as (string | number)[],
+        }
+      : {
+          join: "JOIN notes n ON c.nid = n.id",
+          where: "c.did = ?",
+          params: [deckId] as (string | number)[],
+        };
+    const rows = h.db
+      .query(
+        `SELECT DISTINCT n.id AS id, n.mid AS mid, n.flds AS flds, n.tags AS tags
+         FROM cards c ${joinSql}
+         WHERE ${where}`,
+      )
+      .all(...params) as { id: number; mid: number; flds: string; tags: string }[];
+
+    const fmCache = new Map<number, DbFieldMap | null>();
+    const out: DbListedCard[] = [];
+    for (const r of rows) {
+      let fm = fmCache.get(r.mid);
+      if (fm === undefined) {
+        fm = resolveFieldMap(h, r.mid);
+        fmCache.set(r.mid, fm);
+      }
+      const v = r.flds.split(FLD_SEP);
+      const at = (ord: number | undefined): string =>
+        ord === undefined ? "" : v[ord] ?? "";
+      if (fm) {
+        out.push({
+          front: at(fm.front),
+          back: at(fm.back),
+          notes: at(fm.notes),
+          context: at(fm.context),
+          noteId: r.id,
+          tags: parseTags(r.tags),
+        });
+      } else {
+        // No unicase → can't resolve names. Fall back to positional fields so
+        // the list still renders (front/back/notes/context = ord 0..3).
+        out.push({
+          front: v[0] ?? "",
+          back: v[1] ?? "",
+          notes: v[2] ?? "",
+          context: v[3] ?? "",
+          noteId: r.id,
+          tags: parseTags(r.tags),
+        });
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  } finally {
+    closeDb(h);
+  }
+}
+
+/** ProgressEntry shape — identical to acProgress's per-word value. */
+export interface DbProgressEntry {
+  interval: number;
+  due: number;
+  reps: number;
+  lapses: number;
+  ease: number;
+  queue: number;
+  type: number;
+  isDue: boolean;
+  daysOverdue: number;
+}
+
+/**
+ * Read scheduling state for ALL Mixed-deck cards and return the SAME per-word
+ * map acProgress returns, KEYED BY THE RAW `front` FIELD VALUE (exactly as
+ * acProgress keys by `c.fields[fm.front].value`). Each entry carries
+ * { interval, due, reps, lapses, ease(=factor), queue, type, isDue, daysOverdue }.
+ *
+ * isDue is computed with Anki's own due semantics (mirrors selectDue):
+ *   queue 1 (learning) → due <= now (epoch seconds)
+ *   queue 2/3 (review/day-learn) → due <= today (day-number)
+ * daysOverdue uses decodeDaysOverdue's algorithm on (ivl, queue, mod).
+ *
+ * When a note backs several cards with the same front, the last one wins — the
+ * same as acProgress, which overwrites out[front] per card. Read-only; returns
+ * {} on any failure.
+ */
+export function dbProgress(
+  scope: ReviewScope = "all",
+  now: number = Date.now(),
+): Record<string, DbProgressEntry> {
+  const h = openReadOnly(collectionPath());
+  if (!h) return {};
+  try {
+    const deckId = resolveDeckId(h, "Mixed");
+    const today = todayDayNumber(h.db, Math.floor(now / 1000));
+    const nowSec = Math.floor(now / 1000);
+    const { join: joinSql, where, params } = scope === "zehntage"
+      ? {
+          join: "JOIN notes n ON c.nid = n.id",
+          where: "(' ' || n.tags || ' ') LIKE '% zehntage %'",
+          params: [] as (string | number)[],
+        }
+      : {
+          join: "JOIN notes n ON c.nid = n.id",
+          where: "c.did = ?",
+          params: [deckId] as (string | number)[],
+        };
+    const rows = h.db
+      .query(
+        `SELECT c.ivl AS ivl, c.due AS due, c.reps AS reps, c.lapses AS lapses,
+                c.factor AS factor, c.queue AS queue, c.type AS type, c.mod AS mod,
+                n.mid AS mid, n.flds AS flds
+         FROM cards c ${joinSql}
+         WHERE ${where}`,
+      )
+      .all(...params) as {
+        ivl: number;
+        due: number;
+        reps: number;
+        lapses: number;
+        factor: number;
+        queue: number;
+        type: number;
+        mod: number;
+        mid: number;
+        flds: string;
+      }[];
+
+    const fmCache = new Map<number, DbFieldMap | null>();
+    const out: Record<string, DbProgressEntry> = {};
+    for (const r of rows) {
+      let fm = fmCache.get(r.mid);
+      if (fm === undefined) {
+        fm = resolveFieldMap(h, r.mid);
+        fmCache.set(r.mid, fm);
+      }
+      const v = r.flds.split(FLD_SEP);
+      const front = fm ? v[fm.front] ?? "" : v[0] ?? "";
+      // acProgress skips cards whose front is empty/falsy (`if (!front) continue`).
+      if (!front) continue;
+      const isDue =
+        r.queue === 1
+          ? r.due <= nowSec
+          : r.queue === 2 || r.queue === 3
+            ? r.due <= today
+            : false;
+      out[front] = {
+        interval: r.ivl,
+        due: r.due,
+        reps: r.reps,
+        lapses: r.lapses,
+        ease: r.factor,
+        queue: r.queue,
+        type: r.type,
+        isDue,
+        daysOverdue: decodeDaysOverdueDb(r.ivl, r.queue, r.mod, now),
+      };
+    }
+    return out;
+  } catch {
+    return {};
+  } finally {
+    closeDb(h);
+  }
+}
+
+/** Content-type for a media filename (mirrors the server's extension map). */
+function mediaContentType(name: string): string {
+  const i = name.lastIndexOf(".");
+  const ext = i >= 0 ? name.slice(i).toLowerCase() : "";
+  const types: Record<string, string> = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".avif": "image/avif",
+    ".mp3": "audio/mpeg",
+    ".ogg": "audio/ogg",
+    ".oga": "audio/ogg",
+    ".opus": "audio/ogg",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".flac": "audio/flac",
+    ".webm": "video/webm",
+  };
+  return types[ext] ?? "application/octet-stream";
+}
+
+export interface DbMediaResult {
+  bytes: Uint8Array;
+  contentType: string;
+}
+
+/**
+ * Read raw bytes of a media file from the on-disk collection.media/ directory,
+ * equivalent to retrieveMedia (AnkiConnect retrieveMediaFile). Returns null when
+ * the file is missing or unreadable — same graceful posture as retrieveMedia
+ * (which returns null on miss). Path-traversal-safe: refuses names containing a
+ * slash, backslash, NUL, or "..".
+ */
+export function dbGetMedia(
+  filename: string,
+  testHooks?: { path?: string },
+): DbMediaResult | null {
+  const path = testHooks?.path ?? collectionPath();
+  if (
+    !filename ||
+    filename.includes("/") ||
+    filename.includes("\\") ||
+    filename.includes("\0") ||
+    filename.includes("..")
+  ) {
+    return null;
+  }
+  try {
+    const { dir } = mediaPaths(path);
+    const full = join(dir, filename);
+    if (!existsSync(full)) return null;
+    const bytes = new Uint8Array(readFileSync(full));
+    return { bytes, contentType: mediaContentType(filename) };
+  } catch {
+    return null;
+  }
+}
+
+// ===========================================================================
 // WRITE-BACK — dbAnswerCard (windowless, offline-only). See:
 //   /tmp/wave18-fsrs-writeback.md  (exact mutation recipe, schema ver 18)
 //   /tmp/wave18-db-safety.md       (refuse-to-write / backup / atomicity)

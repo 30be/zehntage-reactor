@@ -51,12 +51,9 @@ import {
 import { loadGlossary } from "../lib/glossary.ts";
 import { guessEpisode } from "../lib/episode.ts";
 import {
-  listWords,
-  getProgress,
   deleteCard,
   ankiLocalAvailable,
   storeMedia,
-  retrieveMedia,
   bustListWordsCache,
   fakeResetQueue,
 } from "../lib/anki.ts";
@@ -67,6 +64,9 @@ import {
   deckCountsAuto,
   reviewStatus,
   addNoteAuto,
+  listCardsAuto,
+  progressAuto,
+  mediaAuto,
 } from "../lib/review.ts";
 import { dbStoreMedia, collectionPath } from "../lib/ankidb.ts";
 import { readSettings, writeSettings } from "../lib/settings.ts";
@@ -382,7 +382,7 @@ function refreshAnkiWordsCache(): Promise<AnkiWordsCacheEntry> {
     const gen = ankiWordsGen;
     const p = (async () => {
       const _wordsT0 = Date.now();
-      const [words, progress] = await Promise.all([listWords(), getProgress()]);
+      const [words, progress] = await Promise.all([listCardsAuto(), progressAuto()]);
       void logEvent("perf.anki", { op: "words", ms: Date.now() - _wordsT0 });
       const body = JSON.stringify({ words, progress });
       const entry: AnkiWordsCacheEntry = {
@@ -434,7 +434,7 @@ function refreshAnkiCardsCache(): Promise<AnkiCardsCacheEntry> {
   if (!ankiCardsInflight) {
     const gen = ankiCardsGen;
     const p = (async () => {
-      const cards = (await listWords()).filter(
+      const cards = (await listCardsAuto()).filter(
         (c) =>
           (Array.isArray(c.tags) && c.tags.includes("zehntage")) ||
           /\.(mkv|mp4)\s*@\s*\d+:\d{2}/i.test(c.context ?? ""),
@@ -1757,10 +1757,10 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         }
         let bytes = ankiMediaGet(name);
         if (!bytes) {
-          const fetched = await retrieveMedia(name);
+          const fetched = await mediaAuto(name);
           if (!fetched) return err("media not found", 404); // don't cache misses
-          ankiMediaPut(name, fetched);
-          bytes = fetched;
+          ankiMediaPut(name, fetched.bytes);
+          bytes = fetched.bytes;
         }
         const types: Record<string, string> = {
           ".jpg": "image/jpeg",
