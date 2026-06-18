@@ -75,6 +75,9 @@ export interface ReadProps {
   onCursorActivate?: (paraIndex: number) => void;
   /** % known words in this doc (0-100), shown in header if provided. */
   knownPct?: number | null;
+  /** True while a word popup is open. The popup owns `k` (mark-known), so the
+   * reading-cursor `k` handler must stand down to avoid a double action. */
+  popupOpen?: boolean;
   settings?: ReadSettings;
 }
 
@@ -147,6 +150,7 @@ export function Read({
   onJump,
   onCursorActivate,
   knownPct,
+  popupOpen,
   settings,
 }: ReadProps) {
   const [showSecondary, , toggleSecondary] = usePersistedToggle(
@@ -170,8 +174,10 @@ export function Read({
   // refs so keyboard handler is stable
   const cursorRef = useRef(cursor);
   const paraCountRef = useRef(paragraphs.length);
+  const popupOpenRef = useRef(popupOpen);
   cursorRef.current = cursor;
   paraCountRef.current = paragraphs.length;
+  popupOpenRef.current = popupOpen;
 
   const paraRefs = useRef<(HTMLDivElement | null)[]>([]);
 
@@ -217,6 +223,9 @@ export function Read({
         e.preventDefault();
         moveCursor(+1);
       } else if (e.code === "KeyK" || e.key === "ArrowUp") {
+        // While a word popup is open, the popup owns `k` (mark-known). Stand
+        // down so a single `k` press doesn't ALSO move the reading cursor.
+        if (popupOpenRef.current && e.code === "KeyK") return;
         e.preventDefault();
         moveCursor(-1);
       } else if (e.key === "Enter" && cursorRef.current >= 0) {

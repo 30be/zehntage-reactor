@@ -8,6 +8,9 @@ import { guessEpisode } from "../src/lib/episode.ts";
 import {
   api,
   type BatchStatus,
+  type CacheAllEstimate,
+  type CacheAllStatus,
+  type CacheEpisodeStatus,
   type LibraryEntry,
 } from "./api.ts";
 import {
@@ -525,7 +528,13 @@ export function Library({ go, toast }: { go: (h: string) => void; toast: (m: str
       // known set = local zr.known + Anki card lemmas (front sans reading)
       const anki = ankiData ?? await api.ankiWords().catch(() => ({ words: [], progress: {} }));
       if (!ankiData) setAnkiData(anki as Awaited<ReturnType<typeof api.ankiWords>>);
-      const known = new Set<string>([...readKnownWords(), ...readBlacklist()]);
+      // Local known/blacklist are stored as homograph-aware vocabKeys
+      // (`lemma|reading|pos`), but the server index matches on lemma only
+      // (comprehensibility() does knownSet.has(lemma)). Strip the suffix so the
+      // keys line up — otherwise known% is understated. Local to this sort path.
+      const known = new Set<string>(
+        [...readKnownWords(), ...readBlacklist()].map((k) => k.split("|")[0]!),
+      );
       for (const w of anki.words) known.add(w.front.replace(/\s*\[.*$/, "").trim());
       const rows = await api.indexComprehensibility([...known]);
       setKnownPct(new Map(rows.map((r) => [r.mediaId, r.pctKnown])));
@@ -578,10 +587,144 @@ export function Library({ go, toast }: { go: (h: string) => void; toast: (m: str
     void api.batchStatus().then(setStatus).catch(() => {});
   }, []);
 
+  // --- offline lookup cache ("Cache all"): cost estimate + run status ---
+  const [cacheEst, setCacheEst] = useState<CacheAllEstimate | null>(null);
+  const [cacheStatus, setCacheStatus] = useState<CacheAllStatus | null>(null);
+  const refreshCacheEstimate = useCallback(() => {
+    void api.cacheAllEstimate().then(setCacheEst).catch(() => {});
+  }, []);
+  const cacheRunning =
+    cacheStatus?.state === "pending" || cacheStatus?.state === "running";
+
+  // --- per-episode offline lookup cache: status map + true unique new-word
+  // count. Polled while any episode is pending/running OR the global cache-all
+  // is active (globalActive).
+  const [epStatus, setEpStatus] = useState<CacheEpisodeStatus | null>(null);
+  const refreshEpStatus = useCallback(() => {
+    void api.cacheEpisodeStatus().then(setEpStatus).catch(() => {});
+    // Keep the global "Cache all" estimate in lockstep with per-episode status:
+    // per-episode caching shrinks the same uncached-word pool that drives
+    // cacheEst.wordCount, so without this the global estimate goes stale and
+    // "Cache all" can stay disabled (wordCount===0) while per-episode buttons
+    // are still enabled.
+    refreshCacheEstimate();
+  }, [refreshCacheEstimate]);
+  const epActive = useMemo(() => {
+    if (!epStatus) return false;
+    if (epStatus.globalActive) return true;
+    for (const s of Object.values(epStatus.episodes)) {
+      if (s.state === "pending" || s.state === "running") return true;
+    }
+    return false;
+  }, [epStatus]);
+
+  const onCacheEpisode = useCallback(
+    async (id: string) => {
+      try {
+        const r = await api.cacheEpisode(id);
+        if (!r.started) return;
+        // Optimistically flip this entry to "pending" so the button shows
+        // "Caching…" immediately, then let the poll take over.
+        setEpStatus((prev) =>
+          prev
+            ? {
+                ...prev,
+                episodes: {
+                  ...prev.episodes,
+                  [id]: {
+                    total: r.total || prev.episodes[id]?.total || 0,
+                    cached: prev.episodes[id]?.cached ?? 0,
+                    state: "pending",
+                  },
+                },
+              }
+            : prev,
+        );
+        refreshEpStatus();
+      } catch (e) {
+        toast(`Cache episode failed: ${e instanceof Error ? e.message : e}`);
+      }
+    },
+    [refreshEpStatus, toast],
+  );
+
   useEffect(() => {
     loadEntries();
     refreshStatus();
-  }, [loadEntries, refreshStatus]);
+    refreshCacheEstimate();
+    refreshEpStatus();
+    // Resume-on-mount: if a cache-all batch is already in flight server-side
+    // (e.g. after a page reload), re-attach to it so the progress indicator and
+    // the 3s poll come back without needing an in-session click.
+    void api
+      .cacheAllStatus()
+      .then((s) => {
+        if (s.state === "pending" || s.state === "running") setCacheStatus(s);
+      })
+      .catch(() => {});
+  }, [loadEntries, refreshStatus, refreshCacheEstimate, refreshEpStatus]);
+
+  // Poll per-episode cache status every 3s while any episode is pending/running
+  // or the global cache-all is active; stop when nothing is active.
+  useEffect(() => {
+    if (!epActive) return;
+    const t = window.setInterval(refreshEpStatus, 3000);
+    return () => window.clearInterval(t);
+  }, [epActive, refreshEpStatus]);
+
+  // Poll the cache run every 3s while pending/running; toast + refresh on settle.
+  useEffect(() => {
+    if (!cacheRunning) return;
+    const t = window.setInterval(() => {
+      void api
+        .cacheAllStatus()
+        .then((s) => {
+          setCacheStatus(s);
+          if (s.state === "done" || s.state === "succeeded") {
+            toast(`Cached ${s.done} word lookups for offline use`);
+            refreshCacheEstimate();
+          } else if (
+            s.state === "failed" ||
+            s.state === "expired" ||
+            s.state === "cancelled"
+          ) {
+            toast(`Cache all ${s.state}: ${s.error ?? "unknown error"}`);
+            refreshCacheEstimate();
+          }
+        })
+        .catch(() => {});
+    }, 3000);
+    return () => window.clearInterval(t);
+  }, [cacheRunning, toast, refreshCacheEstimate]);
+
+  const onCacheAll = useCallback(async () => {
+    const est = cacheEst;
+    if (!est || est.wordCount === 0) return;
+    const ok = window.confirm(
+      `Cache ${est.wordCount} words via Gemini batch (~$${est.estCostUsd.toFixed(
+        2,
+      )})? This only caches lookups, it does not add cards.`,
+    );
+    if (!ok) return;
+    try {
+      const r = await api.cacheAllStart();
+      if (!r.started) {
+        toast("Cache all: nothing to do");
+        return;
+      }
+      setCacheStatus({ state: "running", total: r.total, done: 0, costUsd: 0 });
+    } catch (e) {
+      toast(`Cache all failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }, [cacheEst, toast]);
+
+  const cacheTitle = cacheEst
+    ? cacheEst.wordCount === 0
+      ? "All unknown words already cached"
+      : `Cache word lookups for offline viewing · ${cacheEst.wordCount} new words · ~$${cacheEst.estCostUsd.toFixed(
+          2,
+        )} (Gemini batch) · ${cacheEst.alreadyCached} already cached`
+    : "Cache word lookups for offline viewing";
 
   // Poll every 3s while anything is active; refresh entries when work settles
   // (new sidecar langs appear on the cards).
@@ -640,7 +783,11 @@ export function Library({ go, toast }: { go: (h: string) => void; toast: (m: str
   return (
     <>
       <div className="lib-head">
-        <RootChooser toast={toast} onChanged={loadEntries} newWords={newWordsTotal} />
+        <RootChooser
+          toast={toast}
+          onChanged={loadEntries}
+          newWords={epStatus?.uniqueNewWords ?? newWordsTotal}
+        />
         {continueWatching.length > 0 && (() => {
           const { rec, entry } = continueWatching[0]!;
           return (
@@ -701,6 +848,16 @@ export function Library({ go, toast }: { go: (h: string) => void; toast: (m: str
           Transcribe &amp; translate all
         </button>
         <button
+          className="btn sm"
+          title={cacheTitle}
+          disabled={cacheRunning || cacheEst?.wordCount === 0}
+          onClick={() => void onCacheAll()}
+        >
+          {cacheRunning && cacheStatus
+            ? `Caching… ${cacheStatus.done}/${cacheStatus.total}`
+            : "Cache all"}
+        </button>
+        <button
           className="btn sm sort-toggle"
           disabled={sortBusy}
           title="Sort by name or by comprehensibility (known-word %)"
@@ -709,6 +866,27 @@ export function Library({ go, toast }: { go: (h: string) => void; toast: (m: str
           {sortBusy ? "sort: …" : `sort: ${sortMode === "name" ? "name" : "known %"}`}
         </button>
       </div>
+      {cacheRunning && cacheStatus && (
+        <div
+          className={`cache-progress${cacheStatus.state === "pending" ? " indeterminate" : ""}`}
+          title="Caching word lookups for offline viewing — this keeps running server-side even if you reload or close the page"
+        >
+          <div
+            className="cache-progress-fill"
+            style={{
+              width:
+                cacheStatus.state === "pending" || !cacheStatus.total
+                  ? "100%"
+                  : `${Math.round((cacheStatus.done / cacheStatus.total) * 100)}%`,
+            }}
+          />
+          <span className="cache-progress-label">
+            {cacheStatus.state === "pending"
+              ? `Caching… queued at Gemini (${cacheStatus.total} words)`
+              : `Caching… ${cacheStatus.done}/${cacheStatus.total} words`}
+          </span>
+        </div>
+      )}
       <div className="grid">
         {ordered.map((e) => {
           const resume = savedPositions.get(e.id) ?? null;
@@ -753,6 +931,58 @@ export function Library({ go, toast }: { go: (h: string) => void; toast: (m: str
                 {(() => {
                   const b = entryBadge(status, e.id);
                   return b ? <span className="badge jobstatus">{b}</span> : null;
+                })()}
+                {(() => {
+                  const es = epStatus?.episodes[e.id];
+                  // Nothing to cache → render nothing.
+                  if (!es || es.total === 0) return null;
+                  const globalActive = epStatus?.globalActive ?? false;
+                  const fullyCached = es.cached >= es.total;
+                  const busy =
+                    es.state === "pending" || es.state === "running";
+                  // Already done → inert "Cached" chip.
+                  if (fullyCached) {
+                    return (
+                      <button
+                        type="button"
+                        className="btn sm ep-cache"
+                        disabled
+                        title="All unknown words in this episode are cached for offline viewing"
+                        onClick={(ev) => ev.stopPropagation()}
+                      >
+                        Cached
+                      </button>
+                    );
+                  }
+                  // In flight (this episode, or the global cache-all sweeping
+                  // everything) → disabled progress label, no redundant click.
+                  if (busy || globalActive) {
+                    return (
+                      <button
+                        type="button"
+                        className="btn sm ep-cache"
+                        disabled
+                        title="Caching word lookups for offline viewing"
+                        onClick={(ev) => ev.stopPropagation()}
+                      >
+                        Caching… {es.cached}/{es.total}
+                      </button>
+                    );
+                  }
+                  // Idle with uncached words → offer the click.
+                  return (
+                    <button
+                      type="button"
+                      className="btn sm ep-cache"
+                      title={`Cache ${es.total - es.cached} word lookup(s) for this episode (offline)`}
+                      onClick={(ev) => {
+                        ev.stopPropagation();
+                        void onCacheEpisode(e.id);
+                      }}
+                    >
+                      Cache
+                    </button>
+                  );
                 })()}
                 {(() => {
                   const n = dueCounts.get(e.id) ?? 0;

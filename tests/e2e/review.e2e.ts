@@ -8,12 +8,10 @@
 // all the way to the done state.
 //
 // IMPORTANT — single shared queue: the fake queue is a module-level singleton on
-// the server that drains as cards are graded and is NEVER reseeded mid-process
-// (there is no reset endpoint). So this spec runs as ONE test in a single pass:
-// it does every non-destructive assertion (front-doubling guard, two-column
-// toggle + persistence) FIRST while the deck is still full, and only THEN grades
-// the deck down to the terminal "done" state. Revealing/toggling/reloading never
-// grades, so none of that drains the deck — only the final grade run does.
+// the server that drains as cards are graded. This spec resets it in
+// beforeEach, then does every non-destructive assertion (front-doubling guard,
+// single-column answer, Anki-style counters) FIRST while the deck is still full,
+// and only THEN grades the deck down to the terminal "done" state.
 //
 // What this spec guards against (real loop bugs the feature shipped with):
 //   1. The front being rendered TWICE on reveal (the question div was kept
@@ -21,18 +19,19 @@
 //      Fixed: on reveal there is NO standalone .review-question; the answer
 //      blob holds the front exactly once.
 //   2. A drained queue looping back to card 1 instead of reaching "All done".
-//   3. The two-column layout toggle (new, persisted to zr.review.twocol).
+//   3. The answer renders in a SINGLE column (the old two-column split + toggle
+//      were removed).
+//   4. Ctrl+Z undoes the last grade and re-shows the previous card.
 //
-// The scope toggle and the type-the-word input were removed; this spec asserts
-// their absence. All selectors derive from web/ReviewRoute.tsx.
+// The scope toggle, the two-column toggle, and the type-the-word input were all
+// removed; this spec asserts their absence. Selectors derive from
+// web/ReviewRoute.tsx.
 
 import { test, expect } from "./helpers.ts";
 
 // The fixed fake-Anki seed fronts (src/lib/anki.ts → fakeSeedDefaults()).
 const FRONT_1 = "勉強"; // first card
 const FRONT_2 = "図書館"; // last/second card
-
-const TWOCOL_KEY = "zr.review.twocol";
 
 test.describe("Review mode (real flow / fake-Anki queue)", () => {
   test.beforeEach(async ({ page }) => {
@@ -42,7 +41,7 @@ test.describe("Review mode (real flow / fake-Anki queue)", () => {
     if (!res.ok()) throw new Error(`reset-review-queue failed: ${res.status()}`);
   });
 
-  test("real space→reveal→grade flow: no front-doubling, two-column toggle persists, drains to All done without looping", async ({
+  test("real space→reveal→grade flow: no front-doubling, single column, Anki counters, Ctrl+Z undo, drains to All done without looping", async ({
     page,
   }) => {
     await page.goto("/#/review");
@@ -58,19 +57,21 @@ test.describe("Review mode (real flow / fake-Anki queue)", () => {
     await expect(page.locator(".review-answer")).toHaveCount(0);
     await expect(page.locator(".review-hint")).toContainText("show answer");
 
-    // No type-the-word UI and no scope toggle anywhere on the route. The ONLY
-    // checkbox present is the two-column toggle (asserted below); every
-    // text-entry control is forbidden.
+    // Anki-style counters render (New + Learning + Due). The fake queue surfaces
+    // its due total under the green "due" figure; new/learning are 0 in fake.
+    await expect(page.locator(".review-counts")).toBeVisible();
+    await expect(page.locator(".review-ct-due")).toBeVisible();
+
+    // No type-the-word UI, no scope toggle, and NO two-column toggle anywhere on
+    // the route. There are NO checkboxes at all now.
     await expect(page.locator(".review-scope")).toHaveCount(0);
+    await expect(page.locator(".review-twocol-toggle")).toHaveCount(0);
     await expect(page.locator("input[type='text']")).toHaveCount(0);
     await expect(page.locator("textarea")).toHaveCount(0);
     await expect(page.locator(".review-input")).toHaveCount(0);
     await expect(page.locator(".review-prompt")).toHaveCount(0);
     await expect(page.locator(".forecast-histogram")).toHaveCount(0);
-    await expect(page.locator("input[type='checkbox']")).toHaveCount(1);
-    await expect(
-      page.locator(".review-twocol-toggle input[type='checkbox']"),
-    ).toHaveCount(1);
+    await expect(page.locator("input[type='checkbox']")).toHaveCount(0);
 
     // ===================================================================
     // PHASE B — reveal & FRONT-DOUBLING GUARD (no grading)
@@ -102,67 +103,33 @@ test.describe("Review mode (real flow / fake-Anki queue)", () => {
     await expect(answer).toContainText("study");
 
     // ===================================================================
-    // PHASE C — two-column toggle: layout classes, persistence, revert
-    //           (revealing/toggling/reloading never grades → deck stays full)
+    // PHASE C — single column (two-column layout was removed entirely)
     // ===================================================================
-    const toggle = page.locator(".review-twocol-toggle input[type='checkbox']");
-    // default off → single column, no column wrappers.
-    await expect(toggle).not.toBeChecked();
+    await expect(page.locator(".review")).not.toHaveClass(/review-twocol-on/);
     await expect(page.locator(".review-twocol")).toHaveCount(0);
     await expect(page.locator(".review-col-left")).toHaveCount(0);
     await expect(page.locator(".review-col-right")).toHaveCount(0);
 
-    // toggle ON → two-column layout classes appear.
-    await toggle.check();
-    await expect(toggle).toBeChecked();
-    await expect(page.locator(".review")).toHaveClass(/review-twocol-on/);
-    await expect(page.locator(".review-twocol")).toBeVisible();
-    await expect(page.locator(".review-col-left")).toBeVisible();
-    await expect(page.locator(".review-col-right")).toBeVisible();
-    // front STILL appears exactly once in two-column mode (left col holds it,
-    // right col is the context block — no doubling across columns).
-    expect(
-      await countFront(FRONT_1),
-      "front once even in two-column",
-    ).toBe(1);
-    // persisted to localStorage.
-    await expect
-      .poll(() => page.evaluate((k) => localStorage.getItem(k), TWOCOL_KEY))
-      .toBe("1");
+    // ===================================================================
+    // PHASE D — grade card 1, then Ctrl+Z UNDO back to it
+    // ===================================================================
+    // Grade Good (3) → advance to card 2 (optimistic, instant).
+    await page.locator(".review-good").click();
+    await expect(question).toBeVisible();
+    await expect(question).toContainText(FRONT_2);
 
-    // PERSISTS across reloads: a fresh load reads the preference back, so the
-    // toggle comes up already checked (deck refetched, still full, pos=0).
-    await page.reload();
-    await expect(
-      page.locator(".review-twocol-toggle input[type='checkbox']"),
-    ).toBeChecked();
-    await expect(page.locator(".review")).toHaveClass(/review-twocol-on/);
-    await expect(page.locator(".review-question")).toContainText(FRONT_1);
-
-    // toggle OFF → back to single column, persisted as "0".
-    const toggle2 = page.locator(
-      ".review-twocol-toggle input[type='checkbox']",
-    );
-    await toggle2.uncheck();
-    await expect(toggle2).not.toBeChecked();
-    await expect(page.locator(".review")).not.toHaveClass(/review-twocol-on/);
-    await expect
-      .poll(() => page.evaluate((k) => localStorage.getItem(k), TWOCOL_KEY))
-      .toBe("0");
+    // Ctrl+Z → undo back to card 1, re-shown in the ANSWER phase.
+    await page.keyboard.press("Control+z");
+    await expect(page.locator(".review-answer")).toBeVisible();
+    expect(await countFront(FRONT_1), "undo restores card 1").toBe(1);
 
     // ===================================================================
-    // PHASE D — drive the WHOLE deck to "All done" (NO LOOP)
+    // PHASE E — drive the WHOLE deck to "All done" (NO LOOP)
     //           This is the destructive pass; it drains the shared queue.
     // ===================================================================
-    // We're on card 1's question after the reload. Reveal + grade it (Good=3
-    // via the click path) → advance to the SECOND, distinct card.
-    await page.locator("body").click();
-    await page.keyboard.press(" ");
-    await expect(answer).toBeVisible();
+    // We're back on card 1's answer. Grade it Good → advance to card 2.
     await page.locator(".review-good").click();
-
     await expect(question).toBeVisible();
-    await expect(page.locator(".review-answer")).toHaveCount(0);
     // NO LOOP: advanced to the SECOND card, not back to the first.
     await expect(question).toContainText(FRONT_2);
     await expect(question).not.toContainText(FRONT_1);
@@ -177,7 +144,6 @@ test.describe("Review mode (real flow / fake-Anki queue)", () => {
     const done = page.locator(".review-empty");
     await expect(done).toBeVisible();
     await expect(done).toContainText("All done");
-    await expect(done).toContainText("2 words reviewed");
     // reviewing surface is gone — we did not loop back into the queue.
     await expect(page.locator(".review-question")).toHaveCount(0);
     await expect(page.locator(".review-card")).toHaveCount(0);

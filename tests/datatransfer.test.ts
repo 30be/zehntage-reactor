@@ -104,16 +104,19 @@ describe("validateBundle", () => {
 describe("importBundle", () => {
   test("merges settings and state, skips events by default", async () => {
     // Pre-existing state with an older ts that should lose to the incoming one.
+    // Uses a non-set key (zr.pos.x) to exercise plain LWW — zr.known/zr.blacklist
+    // now use OR-Set union merge (see state.ts merge + tests/state.test.ts), so
+    // they intentionally no longer clobber.
     await Bun.write(
       join(configDir, "state.json"),
-      JSON.stringify({ "zr.known": { v: "[\"old\"]", ts: 1 } }),
+      JSON.stringify({ "zr.pos.x": { v: "old", ts: 1 } }),
     );
 
     const res = await importBundle({
       version: 1,
       exportedAt: "2026-06-13T10:00:00.000Z",
       settings: { targetLang: "fr", knownLang: "en" },
-      state: { "zr.known": { v: "[\"new\"]", ts: 999 } },
+      state: { "zr.pos.x": { v: "new", ts: 999 } },
       events: [{ ts: 5, type: "lookup" }],
     });
 
@@ -124,24 +127,25 @@ describe("importBundle", () => {
     const s = await readSettings();
     expect(s.targetLang).toBe("fr");
     const st = await readState();
-    expect(st["zr.known"]).toEqual({ v: '["new"]', ts: 999 });
+    expect(st["zr.pos.x"]).toEqual({ v: "new", ts: 999 });
     // Events were skipped.
     expect(await readEvents()).toEqual([]);
   });
 
   test("LWW keeps newer existing state over older incoming", async () => {
+    // Non-set key: plain last-write-wins (set keys union instead — see above).
     await Bun.write(
       join(configDir, "state.json"),
-      JSON.stringify({ "zr.known": { v: "[\"keep\"]", ts: 500 } }),
+      JSON.stringify({ "zr.pos.x": { v: "keep", ts: 500 } }),
     );
     await importBundle({
       version: 1,
       settings: {},
-      state: { "zr.known": { v: "[\"stale\"]", ts: 100 } },
+      state: { "zr.pos.x": { v: "stale", ts: 100 } },
       events: [],
     });
     const st = await readState();
-    expect(st["zr.known"]).toEqual({ v: '["keep"]', ts: 500 });
+    expect(st["zr.pos.x"]).toEqual({ v: "keep", ts: 500 });
   });
 
   test("imports events when opted in", async () => {

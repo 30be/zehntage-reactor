@@ -6,6 +6,8 @@ import {
   TOMBSTONE,
   type ZrState,
 } from "../web/sync.ts";
+import { parseOrSet, orSetMembers, serializeOrSet } from "../web/orset.ts";
+import { emitVocabChanged, onVocabChanged } from "../web/sync.ts";
 
 // Minimal in-memory Storage (bun:test has no DOM localStorage).
 function memStorage(): Storage {
@@ -100,12 +102,25 @@ describe("startSync", () => {
     return { fetchImpl, posts, get state() { return state; } };
   }
 
-  test("pull-on-start applies remote-newer keys", async () => {
+  test("pull-on-start applies remote-newer keys (set key migrates+merges)", async () => {
     const ls = memStorage();
+    // remote ships a LEGACY plain array; sync migrates it into the OR-Set shape
+    // and the local membership reflects it.
     const srv = fakeServer({ "zr.known": { v: '["猫"]', ts: 999 } });
     const h = startSync(srv.fetchImpl, ls);
     await h.ready;
-    expect(ls.getItem("zr.known")).toBe('["猫"]');
+    expect(orSetMembers(parseOrSet(ls.getItem("zr.known"), 0))).toEqual(
+      new Set(["猫"]),
+    );
+    h.stop();
+  });
+
+  test("pull-on-start applies a non-set remote-newer key verbatim", async () => {
+    const ls = memStorage();
+    const srv = fakeServer({ "zr.pos.x": { v: "42", ts: 999 } });
+    const h = startSync(srv.fetchImpl, ls);
+    await h.ready;
+    expect(ls.getItem("zr.pos.x")).toBe("42");
     h.stop();
   });
 
@@ -161,6 +176,124 @@ describe("startSync", () => {
     expect(ls.getItem("zr.a")).toBe("local"); // remote older, not applied
     await h.flush();
     expect(srv.state["zr.a"]!.v).toBe("local");
+    h.stop();
+  });
+});
+
+describe("applyRemote — OR-Set merge for set keys (Fix 2)", () => {
+  const os = (raw: string | null) => orSetMembers(parseOrSet(raw, 0));
+
+  test("set key: concurrent different members UNION (no loss), even if remote ts is older", () => {
+    const ls = memStorage();
+    // local already has 猫 (legacy-array migrated by sync on first touch, but
+    // here we seed the new shape directly) with a high local ts
+    ls.setItem("zr.known", serializeOrSet({ adds: { 猫: 100 }, removes: {} }));
+    seedTs(ls, { "zr.known": 100 });
+    // remote added 犬 with an OLDER ts — plain LWW would discard it entirely
+    const changed = applyRemote(
+      { "zr.known": { v: serializeOrSet({ adds: { 犬: 50 }, removes: {} }), ts: 50 } },
+      ls,
+    );
+    expect(changed).toEqual(["zr.known"]);
+    expect(os(ls.getItem("zr.known"))).toEqual(new Set(["猫", "犬"]));
+  });
+
+  test("set key: legacy plain ARRAY local value is migrated then merged (lossless)", () => {
+    const ls = memStorage();
+    ls.setItem("zr.blacklist", JSON.stringify(["a"])); // legacy shape on disk
+    seedTs(ls, { "zr.blacklist": 100 });
+    applyRemote(
+      { "zr.blacklist": { v: serializeOrSet({ adds: { b: 200 }, removes: {} }), ts: 200 } },
+      ls,
+    );
+    expect(os(ls.getItem("zr.blacklist"))).toEqual(new Set(["a", "b"]));
+  });
+
+  test("set key: remote remove (tombstone) wins over older local add", () => {
+    const ls = memStorage();
+    ls.setItem("zr.known", serializeOrSet({ adds: { a: 100 }, removes: {} }));
+    seedTs(ls, { "zr.known": 100 });
+    applyRemote(
+      { "zr.known": { v: serializeOrSet({ adds: {}, removes: { a: 200 } }), ts: 200 } },
+      ls,
+    );
+    expect(os(ls.getItem("zr.known"))).toEqual(new Set());
+  });
+
+  test("set key: idempotent — re-applying the same merged value reports no change", () => {
+    const ls = memStorage();
+    ls.setItem("zr.known", serializeOrSet({ adds: { a: 1, b: 2 }, removes: {} }));
+    seedTs(ls, { "zr.known": 10 });
+    const v = serializeOrSet({ adds: { a: 1, b: 2 }, removes: {} });
+    // remote equals local content; nothing to change
+    expect(applyRemote({ "zr.known": { v, ts: 5 } }, ls)).toEqual([]);
+  });
+
+  test("non-set zr key still uses plain LWW (no regression)", () => {
+    const ls = memStorage();
+    ls.setItem("zr.pos.x", "10");
+    seedTs(ls, { "zr.pos.x": 100 });
+    // older remote ignored
+    expect(applyRemote({ "zr.pos.x": { v: "99", ts: 50 } }, ls)).toEqual([]);
+    expect(ls.getItem("zr.pos.x")).toBe("10");
+    // newer remote wins
+    applyRemote({ "zr.pos.x": { v: "77", ts: 200 } }, ls);
+    expect(ls.getItem("zr.pos.x")).toBe("77");
+  });
+
+  test("two devices converge to the SAME members regardless of apply order", () => {
+    const mk = (raw: string) => {
+      const ls = memStorage();
+      ls.setItem("zr.known", raw);
+      seedTs(ls, { "zr.known": 100 });
+      return ls;
+    };
+    const A = serializeOrSet({ adds: { 猫: 100, 鳥: 100 }, removes: { 鳥: 150 } });
+    const B = serializeOrSet({ adds: { 犬: 120, 鳥: 200 }, removes: {} });
+    const lsA = mk(A);
+    applyRemote({ "zr.known": { v: B, ts: 200 } }, lsA);
+    const lsB = mk(B);
+    applyRemote({ "zr.known": { v: A, ts: 150 } }, lsB);
+    // 鳥: max add 200 > max remove 150 -> present
+    expect(os(lsA.getItem("zr.known"))).toEqual(
+      os(lsB.getItem("zr.known")),
+    );
+    expect(os(lsA.getItem("zr.known"))).toEqual(new Set(["猫", "犬", "鳥"]));
+  });
+});
+
+describe("vocab pub/sub (Fix 3 refresh wiring)", () => {
+  test("emitVocabChanged delivers only set keys to subscribers", () => {
+    const got: string[][] = [];
+    const off = onVocabChanged((keys) => got.push(keys));
+    emitVocabChanged(["zr.known", "zr.pos.x"]); // pos.x must be filtered out
+    emitVocabChanged(["zr.pos.x"]); // no set key -> no delivery
+    emitVocabChanged(["zr.blacklist"]);
+    off();
+    emitVocabChanged(["zr.known"]); // after unsubscribe -> ignored
+    expect(got).toEqual([["zr.known"], ["zr.blacklist"]]);
+  });
+
+  test("onRemoteApplied fires with changed set keys after a remote apply", async () => {
+    const ls = memStorage();
+    const applied: string[][] = [];
+    const srv = (() => {
+      const state: ZrState = {
+        "zr.known": { v: serializeOrSet({ adds: { 猫: 999 }, removes: {} }), ts: 999 },
+      };
+      return {
+        fetchImpl: async () =>
+          new Response(JSON.stringify(state), {
+            headers: { "Content-Type": "application/json" },
+          }),
+      };
+    })();
+    const h = startSync(srv.fetchImpl, ls, (keys) => applied.push(keys));
+    await h.ready;
+    expect(applied).toEqual([["zr.known"]]);
+    expect(orSetMembers(parseOrSet(ls.getItem("zr.known"), 0))).toEqual(
+      new Set(["猫"]),
+    );
     h.stop();
   });
 });

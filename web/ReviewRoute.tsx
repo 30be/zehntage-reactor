@@ -4,7 +4,8 @@
 //
 // One card at a time. Press SPACE to reveal the answer (this user gesture also
 // unblocks any [sound:] audio autoplay), then grade with the number row:
-//   1 = Again   2 = Hard   3 = Good   4 = Easy   (R replays the answer audio)
+//   1 = Again   2 = Hard   3 = Good   4 = Easy
+// Ctrl+Z undoes the last grade (Anki-style) — steps back to the prior card.
 //
 // State machine:  loading → (offline | empty | reviewing) → done
 // Queue scope is always "all" — reviews Anki's full due queue.
@@ -13,11 +14,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { api, type ReviewCard } from "./api.ts";
 import { sanitizeAnkiHtml } from "./ankihtml.ts";
-import { usePersistedToggle } from "./usePersisted.ts";
 
 type Phase = "loading" | "offline" | "empty" | "question" | "answer" | "done";
-
-const TWOCOL_KEY = "zr.review.twocol";
 
 /** Split a sanitized Anki answer HTML into its main part (front + back + notes)
  *  and the trailing CONTEXT block (the example sentence / image). The card
@@ -84,14 +82,15 @@ export function Review({
   const [queue, setQueue] = useState<ReviewCard[]>([]);
   const [pos, setPos] = useState(0);
   const [due, setDue] = useState(0);
+  // Anki-style deck counts {new, learning, review}, shown as the colored
+  // "<new> + <learning> + <review>" header. Sourced from /api/review/queue.
+  const [counts, setCounts] = useState({ new: 0, learning: 0, review: 0 });
   const [phase, setPhase] = useState<Phase>("loading");
   const [reviewed, setReviewed] = useState(0);
   const [err, setErr] = useState<string | null>(null);
   // visible banner shown when a grade can't be persisted (so we never silently
   // loop on the same card). Cleared on the next successful action.
   const [gradeErr, setGradeErr] = useState<string | null>(null);
-  // two-column layout toggle, persisted across sessions (default off).
-  const [twoCol, toggleTwoCol] = usePersistedToggle(TWOCOL_KEY, false);
 
   const answerRef = useRef<HTMLDivElement>(null);
   // guards optimistic advance so a double key-press can't grade the same card
@@ -99,6 +98,11 @@ export function Review({
   const gradingRef = useRef(false);
   // separate guard for Delete so a double Delete can't fire twice on the same card.
   const deletingRef = useRef(false);
+  // Undo stack (Ctrl+Z): each graded card pushes {pos, ease} so we can step the
+  // UI back to the previous card. The server grade is best-effort un-done via a
+  // compensating grade only if needed; here we restore the CLIENT position so
+  // the user sees and can re-grade the card (Anki-style "undo last answer").
+  const undoRef = useRef<{ pos: number; cardId: number }[]>([]);
 
   const card: ReviewCard | undefined = queue[pos];
 
@@ -116,7 +120,9 @@ export function Review({
       }
       setQueue(res.cards);
       setDue(res.due);
+      setCounts(res.counts ?? { new: 0, learning: 0, review: 0 });
       setPos(0);
+      undoRef.current = [];
       gradingRef.current = false;
       setPhase(res.cards.length === 0 ? "empty" : "question");
     } catch (e) {
@@ -155,12 +161,31 @@ export function Review({
       if (phase !== "answer" || !card || gradingRef.current) return;
       gradingRef.current = true;
       const gradedId = card.cardId;
+      const gradedPos = pos;
 
-      // AWAIT the grade — only advance once Anki has actually recorded it.
-      // Previously this was fire-and-forget and advanced regardless, so a
-      // backend that couldn't persist (Anki unreachable) left the card in the
-      // queue forever → silent infinite loop. Now a failed grade surfaces a
-      // visible banner (+ toast if available) and we DON'T advance.
+      // OPTIMISTIC: advance the UI IMMEDIATELY (no awaited round-trip — that was
+      // the ~0.5s stall) and persist the grade in the BACKGROUND. The graded
+      // card stays in the local `queue` array, so Ctrl+Z can step `pos` back to
+      // re-show it. A background failure surfaces a banner (+ toast) but does
+      // NOT loop us on the card — the user can Ctrl+Z to retry.
+      undoRef.current.push({ pos: gradedPos, cardId: gradedId });
+      setGradeErr(null);
+      setReviewed((n) => n + 1);
+      setDue((d) => Math.max(0, d - 1));
+
+      const nextPos = gradedPos + 1;
+      if (nextPos < queue.length) {
+        setPos(nextPos);
+        setPhase("question");
+        gradingRef.current = false;
+      } else {
+        // drained the local batch — show "done" optimistically; the background
+        // refetch below may surface more (learning steps) and re-enter review.
+        setPhase("done");
+        gradingRef.current = false;
+      }
+
+      // Persist + (if we drained) refetch, all off the critical path.
       void (async () => {
         const FAIL_MSG = "Couldn’t record grade — is the server running?";
         // When Anki is open it holds the collection, so the windowless DB write
@@ -176,51 +201,54 @@ export function Review({
             const msg = isAnkiOpen(res.reason) ? ANKI_OPEN_MSG : FAIL_MSG;
             setGradeErr(msg);
             toast?.(msg);
-            gradingRef.current = false; // allow a retry on the same card
             return;
           }
         } catch (e) {
           console.error("reviewAnswer failed:", e);
           setGradeErr(FAIL_MSG);
           toast?.(FAIL_MSG);
-          gradingRef.current = false;
           return;
         }
 
-        // success — clear any stale error and advance.
-        setGradeErr(null);
-        setReviewed((n) => n + 1);
-        setDue((d) => Math.max(0, d - 1));
-
-        const nextPos = pos + 1;
-        if (nextPos < queue.length) {
-          setPos(nextPos);
-          setPhase("question");
-          gradingRef.current = false;
-          return;
-        }
-        // drained the batch — Anki may have surfaced more (learning steps).
-        try {
-          const res = await api.reviewQueue("all");
-          if (res.available && res.cards.length > 0) {
-            setQueue(res.cards);
-            setDue(res.due);
-            setPos(0);
-            setPhase("question");
-          } else {
-            setDue(0);
-            setPhase("done");
+        // Only refetch when we drained the local batch — Anki may have surfaced
+        // more (learning steps) since we optimistically showed "done".
+        if (nextPos >= queue.length) {
+          try {
+            const more = await api.reviewQueue("all");
+            if (more.available && more.cards.length > 0) {
+              setQueue(more.cards);
+              setDue(more.due);
+              setCounts(more.counts ?? { new: 0, learning: 0, review: 0 });
+              setPos(0);
+              undoRef.current = [];
+              setPhase("question");
+            } else {
+              setDue(0);
+            }
+          } catch (e) {
+            console.error("reviewQueue refetch failed:", e);
           }
-        } catch (e) {
-          console.error("reviewQueue refetch failed:", e);
-          setPhase("done");
-        } finally {
-          gradingRef.current = false;
         }
       })();
     },
     [phase, card, pos, queue.length, toast],
   );
+
+  // Ctrl+Z — undo the last grade (Anki-style). Steps the client position back
+  // to the previously-graded card and re-shows it (answer phase) so the user can
+  // re-grade. Re-grading overwrites the schedule via a fresh dbAnswerCard, so no
+  // separate server "un-answer" is needed. Pure client-side restore.
+  const undo = useCallback(() => {
+    const last = undoRef.current.pop();
+    if (last === undefined) return;
+    if (last.pos >= queue.length) return; // queue was refetched out from under us
+    gradingRef.current = false;
+    setGradeErr(null);
+    setReviewed((n) => Math.max(0, n - 1));
+    setDue((d) => d + 1);
+    setPos(last.pos);
+    setPhase("answer");
+  }, [queue.length]);
 
   // Delete the current card's note from Anki (DESTRUCTIVE). Available on both
   // question and answer phases so the user can discard a card without revealing.
@@ -291,12 +319,19 @@ export function Review({
     if (phase !== "question" && phase !== "answer") return;
     const onKey = (e: KeyboardEvent) => {
       if (isTextTarget(e.target)) return;
+      // Ctrl+Z (or ⌘Z) — undo the last grade. Layout-independent via e.code, and
+      // valid in BOTH question and answer phases (you can undo right after
+      // advancing to the next card's question).
+      if ((e.ctrlKey || e.metaKey) && e.code === "KeyZ") {
+        e.preventDefault();
+        undo();
+        return;
+      }
       // Layout-INDEPENDENT key matching via e.code (physical key), mirroring the
-      // player (web/Player.tsx / useHotkeys.ts) so letter hotkeys still fire on
-      // a non-Latin layout — e.g. on a Russian layout the physical R key reports
-      // e.key === "к", so we'd never match. e.code is "KeyR" regardless.
-      // Digit grades accept both the number row (Digit1..4) and numpad
-      // (Numpad1..4). Delete is already layout-independent but we read e.code too.
+      // player (web/Player.tsx / useHotkeys.ts) so digit hotkeys still fire on
+      // a non-Latin layout. Digit grades accept both the number row (Digit1..4)
+      // and numpad (Numpad1..4). Delete is already layout-independent but we
+      // read e.code too.
       const gradeFor: Record<string, number> = {
         Digit1: 1,
         Numpad1: 1,
@@ -329,14 +364,11 @@ export function Review({
       } else if (e.code in gradeFor) {
         e.preventDefault();
         grade(gradeFor[e.code]!);
-      } else if (e.code === "KeyR") {
-        e.preventDefault();
-        playAnswerAudio();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [phase, reveal, grade, playAnswerAudio, deleteCard]);
+  }, [phase, reveal, grade, deleteCard, undo]);
 
   // Sanitize once per card. The answer HTML already contains the front
   // (`{{FrontSide}}<hr>…`), so when revealed we render ONLY the answer (never
@@ -345,8 +377,6 @@ export function Review({
     () => (card ? sanitizeAnkiHtml(card.answer) : ""),
     [card],
   );
-  // For two-column mode, split off the trailing CONTEXT <div> (sentence/image).
-  const split = useMemo(() => splitAnswerHtml(answerHtml), [answerHtml]);
 
   // --- non-reviewing states ---
 
@@ -415,31 +445,22 @@ export function Review({
 
   // --- reviewing (question | answer) ---
   const revealed = phase === "answer";
-  const left = Math.max(0, queue.length - pos);
 
   return (
-    <div className={`review${twoCol ? " review-twocol-on" : ""}`}>
+    <div className="review">
       <div className="review-head">
-        <span className="review-count" aria-label="cards left in batch">
-          {left} left
-        </span>
-        <span className="muted review-due" title="Cards Anki considers due">
-          due: {due}
-        </span>
-        <span className="muted review-reviewed">
-          reviewed: {reviewed}
-        </span>
-        <label
-          className={`review-twocol-toggle${twoCol ? " active" : ""}`}
-          title="Lay the card out in two columns to avoid scrolling"
+        {/* Anki-style counters: New (blue) + Learning (red) + Due/Review (green). */}
+        <span
+          className="review-counts"
+          aria-label={`${counts.new} new, ${counts.learning} learning, ${due} due`}
+          title="New + Learning + Due (Anki counts)"
         >
-          <input
-            type="checkbox"
-            checked={twoCol}
-            onChange={(e) => toggleTwoCol(e.target.checked)}
-          />
-          two-column
-        </label>
+          <span className="review-ct review-ct-new">{counts.new}</span>
+          <span className="review-ct-sep"> + </span>
+          <span className="review-ct review-ct-learning">{counts.learning}</span>
+          <span className="review-ct-sep"> + </span>
+          <span className="review-ct review-ct-due">{due}</span>
+        </span>
       </div>
 
       {gradeErr && (
@@ -461,25 +482,9 @@ export function Review({
               __html: sanitizeAnkiHtml(card!.question),
             }}
           />
-        ) : twoCol && split.right ? (
-          // ANSWER phase, two-column: main answer (front+back+notes) LEFT,
-          // CONTEXT (sentence/image) RIGHT. The answer blob already holds the
-          // front, so we never render the separate question div here.
-          <div className="review-twocol">
-            <div
-              ref={answerRef}
-              className="review-anki review-answer review-col-left"
-              lang="ja"
-              dangerouslySetInnerHTML={{ __html: split.left }}
-            />
-            <div
-              className="review-anki review-context review-col-right"
-              lang="ja"
-              dangerouslySetInnerHTML={{ __html: split.right }}
-            />
-          </div>
         ) : (
-          // ANSWER phase, one-column (default): the answer blob (contains front).
+          // ANSWER phase, single column: the answer blob (already contains the
+          // front, so we never render the separate question div here).
           <div
             ref={answerRef}
             className="review-anki review-answer"
@@ -522,12 +527,6 @@ export function Review({
             >
               <kbd>4</kbd> easy
             </button>
-            <span className="muted review-replay-hint" title="Replay audio">
-              <kbd>R</kbd> replay
-            </span>
-            <span className="muted review-delete-hint" title="Delete note from Anki">
-              <kbd>Del</kbd> delete
-            </span>
           </div>
         )}
       </div>

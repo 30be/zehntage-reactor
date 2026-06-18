@@ -16,6 +16,14 @@ import { buildWordIndex, matchFront, type WordIndex } from "./progress.ts";
 import { wordKey } from "./TokenLine.tsx";
 import { readBlacklist } from "./blacklist.ts";
 import { isJaLang } from "./lang.ts";
+import {
+  parseOrSet,
+  orSetMembers,
+  orSetAdd,
+  orSetRemove,
+  serializeOrSet,
+} from "./orset.ts";
+import { emitVocabChanged } from "./sync.ts";
 
 export interface Coverage {
   pct: number; // 0-100, rounded
@@ -158,15 +166,38 @@ export async function computeCoverage(
   return cov;
 }
 
-/** Read the local zr.known set (same storage the Player uses). */
-export function readKnownWords(): Set<string> {
+const KNOWN_KEY = "zr.known";
+
+function readKnownRaw(): string | null {
   try {
-    const raw = JSON.parse(localStorage.getItem("zr.known") ?? "[]");
-    return new Set(
-      Array.isArray(raw) ? raw.filter((w) => typeof w === "string") : [],
-    );
+    return localStorage.getItem(KNOWN_KEY);
   } catch {
-    return new Set();
+    return null;
+  }
+}
+
+/**
+ * Read the local zr.known set (same storage the Player uses). The value is an
+ * OR-Set (web/orset.ts); a legacy plain array is transparently migrated on read.
+ */
+export function readKnownWords(): Set<string> {
+  return orSetMembers(parseOrSet(readKnownRaw(), Date.now()));
+}
+
+/**
+ * Mark / un-mark a single lemma known, preserving OR-Set tombstones so removes
+ * survive a concurrent stale add. Writes through localStorage (sync picks it up)
+ * and notifies same-tab subscribers (Player/ReadRoute) to repaint.
+ */
+export function markKnown(key: string, on: boolean): void {
+  try {
+    const now = Date.now();
+    let o = parseOrSet(readKnownRaw(), now);
+    o = on ? orSetAdd(o, key, now) : orSetRemove(o, key, now);
+    localStorage.setItem(KNOWN_KEY, serializeOrSet(o));
+    emitVocabChanged([KNOWN_KEY]);
+  } catch {
+    /* ignore quota / private mode */
   }
 }
 

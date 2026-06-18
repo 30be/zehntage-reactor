@@ -59,6 +59,8 @@ export function LookupPanel({
   onExplainRetry,
   lookup,
   lookupLoading,
+  lookupErr,
+  onLookupRetry,
   pitchOn,
   accents,
   freqMap,
@@ -90,6 +92,8 @@ export function LookupPanel({
   onExplainRetry: () => void;
   lookup: WordLookup | null;
   lookupLoading: boolean;
+  lookupErr: boolean;
+  onLookupRetry: () => void;
   pitchOn: boolean;
   accents: Map<string, number> | null;
   freqMap: Map<string, number> | null;
@@ -207,10 +211,31 @@ export function LookupPanel({
             )}
           </div>
           {lookupLoading && <div className="spin">Looking up…</div>}
+          {lookupErr && !lookup && !lookupLoading && (
+            <div className="lookup-err notes">
+              Lookup unavailable.{" "}
+              <button
+                type="button"
+                className="link-btn lookup-retry"
+                onClick={onLookupRetry}
+              >
+                Retry
+              </button>
+            </div>
+          )}
           {lookup && (
             <>
               <div className="translation">{lookup.translation}</div>
-              {lookup.notes && <div className="notes">{lookup.notes}</div>}
+              {lookup.notes?.trim() ? (
+                <div className="notes">{lookup.notes}</div>
+              ) : (
+                <div
+                  className="notes empty-note"
+                  title="No note — press g to regenerate"
+                >
+                  — no note (press g)
+                </div>
+              )}
             </>
           )}
           <Encounters

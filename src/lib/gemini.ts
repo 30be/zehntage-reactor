@@ -33,7 +33,7 @@ export const WORD_SCHEMA = {
   properties: {
     reading: { type: "STRING" },
     translation: { type: "STRING" },
-    notes: { type: "STRING" },
+    notes: { type: "STRING", maxLength: 150 },
     context: { type: "STRING" },
   },
   required: ["reading", "translation", "notes", "context"],
@@ -104,10 +104,27 @@ class RetryableHttpError extends Error {
  */
 export class TranslationCountError extends Error {}
 
+/**
+ * Service tier for a `:generateContent` REST call. "standard" (default, omitted
+ * from the body) is the normal interactive price/latency; "flex" selects the
+ * Flex inference tier — SYNCHRONOUS, ~50% cheaper (same rate as the Batch API)
+ * with a best-effort ~1–15 min target latency. Used by the bulk offline-cache
+ * path so caching finishes in minutes at batch prices, without the 24h batch SLA.
+ *
+ * REST placement is verified empirically (2026-06): `serviceTier` is a TOP-LEVEL
+ * field on the request body (sibling of `contents`/`generationConfig`), NOT
+ * inside `generationConfig` (that returns HTTP 400). The response echoes the
+ * chosen tier back in `usageMetadata.serviceTier`. Both `serviceTier` (camelCase)
+ * and `service_tier` (snake_case) are accepted by the API; we send camelCase to
+ * match the existing `responseMimeType`/`responseSchema` style.
+ */
+export type ServiceTier = "standard" | "flex";
+
 async function callGemini(
   prompt: string,
   schema: unknown,
   image?: GeminiImage,
+  serviceTier: ServiceTier = "standard",
 ): Promise<unknown> {
   const { geminiApiKey } = await loadSecrets();
   if (!geminiApiKey) throw new Error("GEMINI_API_KEY not set in ~/.env");
@@ -127,7 +144,12 @@ async function callGemini(
       temperature: 0.2,
       responseMimeType: "application/json",
       responseSchema: schema,
+      maxOutputTokens: 512,
     },
+    // Top-level field; only emitted for the flex bulk-cache path. Standard tier
+    // is the API default, so we omit it entirely to keep interactive calls
+    // byte-for-byte unchanged.
+    ...(serviceTier === "flex" ? { serviceTier: "flex" } : {}),
   });
 
   const attempt = async (): Promise<unknown> => {
@@ -151,9 +173,24 @@ async function callGemini(
       throw new Error(msg);
     }
     const data = (await resp.json()) as {
-      candidates?: { content: { parts: { text?: string }[] } }[];
+      candidates?: {
+        finishReason?: string;
+        content?: { parts?: { text?: string }[] };
+      }[];
     };
-    const text = data.candidates?.[0]?.content?.parts[0]?.text;
+    // Truncated / blocked responses come back with a non-STOP finishReason and
+    // empty-or-partial JSON; surface that explicitly instead of letting
+    // JSON.parse throw a cryptic SyntaxError. These are deterministic for a
+    // given input (not transient), so they propagate as a fatal Error and are
+    // intentionally NOT retried by the loop below.
+    const finishReason = data.candidates?.[0]?.finishReason;
+    if (finishReason && finishReason !== "STOP") {
+      throw new Error(
+        `Gemini stopped early (finishReason=${finishReason}); ` +
+          `response is truncated or blocked, cannot parse JSON`,
+      );
+    }
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!text) throw new Error("Unexpected Gemini response");
     const cleaned = text.replace(/^```json\s*/, "").replace(/```\s*$/, "").trim();
     return JSON.parse(cleaned);
@@ -215,23 +252,23 @@ ${HYOUKA_RU_GLOSSARY}`;
  * Built-in word-lookup prompt template. Placeholders {word} {context} {source}
  * are substituted. Exported so the settings page can prefill / restore it.
  */
-export const DEFAULT_LOOKUP_PROMPT = `The learner is a native Russian speaker, fluent in English, learning Japanese. They are studying the word "{word}", which appeared in the subtitle lines below. The line containing the word may be marked "(current)", with the surrounding "(prev)"/"(next)" lines included for context; a translation of the current line into a language the learner knows may also be included.
+export const DEFAULT_LOOKUP_PROMPT = `The learner is a native Russian speaker, fluent in English, learning Japanese. They are studying the word "{word}". Subtitle lines are provided below: the line containing the word may be marked "(current)", with surrounding "(prev)"/"(next)" lines, and possibly a translation of the current line into a language the learner knows.
 
-${HYOUKA_NAME_NOTE}
+Source: anime Hyouka (氷菓); transliterate Japanese names with Polivanov (e.g. 千反田→Читанда, 折木→Ореки), never anglicize.
 
-Important: the word may be a quoted loanword, a proper name, or wordplay rather than its ordinary dictionary sense (e.g. もっと quoted as the loanword "motto" = девиз). Use the surrounding lines and the known-language translation line to disambiguate. If the translation line conflicts with the dictionary meaning, prefer the contextual reading and note the dictionary meaning briefly.
+Use the context lines and translation line ONLY to (a) pick which SENSE of the word to define — its dominant/most-relevant sense for this usage — and (b) detect when the word is a quoted loanword, a proper name, or wordplay rather than its ordinary dictionary sense (e.g. もっと quoted as the loanword "motto" = девиз). If the translation line conflicts with the dictionary meaning, prefer the contextual sense and note the dictionary meaning briefly.
 
-Give the most common meaning(s) of the word AS USED HERE — usually one, at most two senses. Do NOT dump an exhaustive list of every dictionary meaning. Keep every field concise and learner-useful; never produce word-salad.
+CRITICAL: write the entry as a STANDALONE, REUSABLE dictionary entry for that sense — valid in ANY context. Do NOT write "here", "in this line", "in this context", "as used here", or refer to the specific input line. Give the most common 1 (at most 2) sense(s); do NOT dump every dictionary meaning. Keep every field concise and learner-useful; never produce word-salad.
 
 Provide four fields:
 - reading: if "{word}" is Japanese, the reading of its DICTIONARY (base) form in kana — hiragana for native/Sino-Japanese words, katakana for loanwords. Otherwise an empty string.
-- translation: a natural Russian gloss of "{word}" as used here (English if the word is itself Russian) — the dictionary base form, idiomatic, not a literal calque. Expand abbreviations using the text. Where it helps, prefix the part of speech briefly (e.g. "гл." / "сущ. — ").
-- notes: If the studied word is a proper noun naming a real person, place, work, or brand, give a one-sentence encyclopedic abstract — who or what it is and what it is best known for (max ~30 words). Otherwise a short explanation (max ~25 words) that makes the word stick: when the translation loses nuance say what it actually means, and add a memory hook — a kanji breakdown, a genuine cognate or known loanword, a sound-alike, or a vivid image. Never leave this empty.
-- context: the single sentence from the text below that best shows the word in use, trimmed to just that sentence, with the studied word wrapped in <b></b>. If the text below has no usable sentence, invent a short natural one.
+- translation: a natural Russian gloss of "{word}" (English if the word is itself Russian) — the dictionary base form, idiomatic, not a literal calque. Where it helps, prefix the part of speech briefly (e.g. "гл." / "сущ. — ").
+- notes: If the word is a proper noun naming a real person, place, work, or brand, give a one-sentence encyclopedic abstract — who or what it is and what it is best known for (max ~30 words). Otherwise a short GENERAL definition (max ~25 words) that makes the word stick: when the translation loses nuance say what it actually means, and add a memory hook — a kanji breakdown, a genuine cognate or known loanword, a sound-alike, or a vivid image. Never leave this empty.
+- context: a SHORT, natural, self-contained example sentence using "{word}" (invent a simple one), with the studied word wrapped in <b></b>. It must stand alone — do NOT copy the input line or depend on it. Keep it brief.
 
 Examples:
-- "図書館" → reading: "としょかん", translation: "сущ. — библиотека", notes: "図 (рисунок/план) + 書 (книга) + 館 (здание) — 'здание для книг и документов'."
-- "気になる" → reading: "きになる", translation: "гл. — беспокоить, интересовать", notes: "буквально 'становиться ки (духом/вниманием)' — что-то засело в голове, фирменная фраза Читанды из «Хёки»."
+- "図書館" → reading: "としょかん", translation: "сущ. — библиотека", notes: "図 (рисунок/план) + 書 (книга) + 館 (здание) — 'здание для книг и документов'.", context: "放課後は<b>図書館</b>で勉強します。"
+- "気になる" → reading: "きになる", translation: "гл. — беспокоить, интересовать", notes: "буквально 'становиться ки (духом/вниманием)' — что-то засело в голове и не отпускает.", context: "彼の言葉が<b>気になる</b>。"
 
 Source: {source}
 
@@ -261,6 +298,35 @@ export function buildWordPrompt(
   return fillTemplate(tpl, word, context, source);
 }
 
+async function fakeWordLookup(word: string): Promise<WordLookup> {
+  await fakeDelay();
+  return {
+    reading: await fakeReading(word),
+    translation: `перевод(${word})`,
+    notes: `fake-notes(${word})`,
+    context: `<b>${word}</b>のテスト文です。`,
+  };
+}
+
+async function lookupWordCore(
+  word: string,
+  context: string,
+  source: string,
+  image: GeminiImage | undefined,
+  secondary: string | undefined,
+  serviceTier: ServiceTier,
+): Promise<WordLookup> {
+  if (geminiFake()) return fakeWordLookup(word);
+  const settings = await readSettings();
+  const template = typeof settings.lookupPrompt === "string" ? settings.lookupPrompt : "";
+  const ctx = secondary
+    ? `${context}\n(translation of the current line) ${secondary}`
+    : context;
+  const prompt = buildWordPrompt(word, ctx, source, template);
+  return (await callGemini(prompt, WORD_SCHEMA, image, serviceTier)) as WordLookup;
+}
+
+/** Interactive single-word lookup — STANDARD tier (default price/latency). */
 export async function lookupWord(
   word: string,
   context: string,
@@ -268,22 +334,22 @@ export async function lookupWord(
   image?: GeminiImage,
   secondary?: string,
 ): Promise<WordLookup> {
-  if (geminiFake()) {
-    await fakeDelay();
-    return {
-      reading: await fakeReading(word),
-      translation: `перевод(${word})`,
-      notes: `fake-notes(${word})`,
-      context: `<b>${word}</b>のテスト文です。`,
-    };
-  }
-  const settings = await readSettings();
-  const template = typeof settings.lookupPrompt === "string" ? settings.lookupPrompt : "";
-  const ctx = secondary
-    ? `${context}\n(translation of the current line) ${secondary}`
-    : context;
-  const prompt = buildWordPrompt(word, ctx, source, template);
-  return (await callGemini(prompt, WORD_SCHEMA, image)) as WordLookup;
+  return lookupWordCore(word, context, source, image, secondary, "standard");
+}
+
+/**
+ * Bulk-cache single-word lookup — FLEX tier (synchronous, ~50% cheaper, minutes
+ * latency). Same prompt builder + WORD_SCHEMA + retry logic as lookupWord; only
+ * the service tier differs. Text-only (no image) since the offline cache never
+ * stores frame lookups. Used exclusively by the flex bulk runner.
+ */
+export async function lookupWordFlex(
+  word: string,
+  context: string,
+  source: string,
+  secondary?: string,
+): Promise<WordLookup> {
+  return lookupWordCore(word, context, source, undefined, secondary, "flex");
 }
 
 // --- sentence-structure explain ---

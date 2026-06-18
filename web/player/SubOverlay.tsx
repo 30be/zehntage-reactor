@@ -15,6 +15,7 @@ import type { WordIndex } from "../progress.ts";
 // memo skips re-renders driven purely by unrelated Player state (popup/HUD/
 // per-tick) without ever masking a genuine update.
 export const SubOverlay = memo(function SubOverlay({
+  subRef,
   subScale,
   cuesLoading,
   primaryText,
@@ -41,6 +42,7 @@ export const SubOverlay = memo(function SubOverlay({
   secHold,
   blurOff,
 }: {
+  subRef: React.RefObject<HTMLDivElement | null>;
   subScale: number;
   cuesLoading: boolean;
   primaryText: string;
@@ -69,6 +71,7 @@ export const SubOverlay = memo(function SubOverlay({
 }) {
   return (
     <div
+      ref={subRef}
       className="sub-overlay"
       style={{ "--sub-scale": subScale } as React.CSSProperties}
     >

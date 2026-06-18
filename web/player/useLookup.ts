@@ -22,10 +22,14 @@
 // Those CONSUME this hook's return (lookup, popupFront, popupSaved,
 // popupMatchedFront, cueBoundsAt) and the moved code is wired back verbatim.
 //
-// KNOWN ISSUE preserved verbatim: the cache key DOES include `secondary`
-// (`... :: ${popup.secondary ?? ""}`) — kept exactly as-is; semantics unchanged.
-// Effect dependency array preserved VERBATIM: [popup?.kind, popup?.surface,
-// popup?.context]. onReload deps: [popup, entry.name, toast]. cueBoundsAt deps:
+// CACHE KEY: both the in-memory map and the server's persistent cache key now
+// use the homograph-aware `popup.vocabKey` (== wordKey(tok)) ALONE — context-
+// independent, so a word looked up once is reused in every sentence.
+// Effect dependency array: [popup?.kind, popup?.surface, popup?.context,
+// popup?.vocabKey, popup?.reading] — vocabKey/reading included so a homograph
+// (same surface, different reading) re-fires the lookup instead of showing the
+// previous homograph's cached entry.
+// onReload deps: [popup, entry.name, toast]. cueBoundsAt deps:
 // [] (refs only). popupFront deps: [popup, lookup]. popupMatchedFront deps:
 // [popup, wordIndex, knownFronts, popupFront].
 
@@ -53,6 +57,7 @@ export function useLookup(opts: {
 }): {
   lookup: WordLookup | null;
   lookupLoading: boolean;
+  lookupErr: boolean;
   popupFront: string | null;
   popupMatchedFront: string | null;
   popupSaved: boolean;
@@ -76,6 +81,7 @@ export function useLookup(opts: {
 
   const [lookup, setLookup] = useState<WordLookup | null>(null);
   const [lookupLoading, setLookupLoading] = useState(false);
+  const [lookupErr, setLookupErr] = useState(false);
   const lookupCache = useRef<Map<string, WordLookup>>(new Map());
   const inflight = useRef<Map<string, Promise<WordLookup>>>(new Map());
 
@@ -85,6 +91,7 @@ export function useLookup(opts: {
       setLookup(null);
       return;
     }
+    setLookupErr(false);
     sessLookupsRef.current += 1; // session-summary counter
     // Word already in the deck? Fill the popup from the existing card —
     // no Gemini call. The Regenerate button still forces a fresh lookup.
@@ -97,13 +104,43 @@ export function useLookup(opts: {
     );
     const deckCard = matched ? deckCardsRef.current.get(matched) : undefined;
     if (deckCard) {
-      setLookup(deckCardToLookup(deckCard));
-      setLookupLoading(false);
-      return;
+      // In-deck word: PREFER a cached Gemini gloss (richer than the bare card —
+      // the card's "back" is often just the kana reading). Never call Gemini
+      // here — cachedOnly returns null on a miss, and we fall back to the card.
+      let cancelled = false;
+      const card = deckCard;
+      const fallback = () => {
+        if (!cancelled) {
+          setLookup(deckCardToLookup(card));
+          setLookupLoading(false);
+        }
+      };
+      setLookupLoading(true);
+      void api
+        .lookupCached({
+          word: popup.surface,
+          vocabKey: popup.vocabKey,
+          context: popup.context,
+          source: entryName,
+        })
+        .then((cached) => {
+          if (cancelled) return;
+          if (cached) {
+            setLookup(cached);
+            setLookupLoading(false);
+          } else {
+            fallback();
+          }
+        })
+        .catch(fallback);
+      return () => {
+        cancelled = true;
+      };
     }
-    // Cache key includes the cue context so the same word in a NEW sentence
-    // gets a fresh, context-correct answer instead of a stale cached one.
-    const cacheKey = `${popup.surface} ${popup.context} :: ${popup.secondary ?? ""}`;
+    // In-memory cache key = the homograph-aware vocabKey (matches the server's
+    // persistent cache identity), so the same word dedups across ALL contexts.
+    // Fall back to surface when vocabKey is somehow absent.
+    const cacheKey = popup.vocabKey ?? popup.surface;
     const cached = lookupCache.current.get(cacheKey);
     if (cached) {
       setLookup(cached);
@@ -125,6 +162,7 @@ export function useLookup(opts: {
       const _lookupT0 = Date.now();
       p = api.lookup({
         word: surface,
+        vocabKey: popup.vocabKey,
         context: ctx,
         source: entryName,
         mediaId,
@@ -142,12 +180,14 @@ export function useLookup(opts: {
       .then((res) => {
         if (!cancelled) setLookup(res);
       })
-      .catch(() => {})
+      .catch(() => {
+        if (!cancelled) setLookupErr(true);
+      })
       .finally(() => !cancelled && setLookupLoading(false));
     return () => {
       cancelled = true;
     };
-  }, [popup?.kind, popup?.surface, popup?.context]);
+  }, [popup?.kind, popup?.surface, popup?.context, popup?.vocabKey, popup?.reading]);
 
   // Regenerate the lookup text for the same word, BYPASSING the cache (force a
   // fresh Gemini call). Replaces the panel content and updates the cache.
@@ -155,18 +195,21 @@ export function useLookup(opts: {
   const onReload = useCallback(async () => {
     if (!popup || popup.kind !== "word") return;
     setLookupLoading(true);
+    setLookupErr(false);
     try {
       const res = await api.lookup({
         word: popup.surface,
+        vocabKey: popup.vocabKey,
         context: popup.context,
         secondary: popup.secondary,
         source: entryName,
         mediaId,
         noCache: true,
       });
-      lookupCache.current.set(`${popup.surface} ${popup.context} :: ${popup.secondary ?? ""}`, res);
+      lookupCache.current.set(popup.vocabKey ?? popup.surface, res);
       setLookup(res);
     } catch (e) {
+      setLookupErr(true);
       toast(`Regenerate failed: ${e instanceof Error ? e.message : e}`);
     } finally {
       setLookupLoading(false);
@@ -218,6 +261,7 @@ export function useLookup(opts: {
   return {
     lookup,
     lookupLoading,
+    lookupErr,
     popupFront,
     popupMatchedFront,
     popupSaved,

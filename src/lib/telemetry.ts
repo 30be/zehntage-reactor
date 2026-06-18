@@ -7,7 +7,7 @@
 
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
-import { mkdir, appendFile, readFile, stat } from "node:fs/promises";
+import { mkdir, appendFile, readFile, stat, rename, unlink } from "node:fs/promises";
 
 export interface TelemetryEvent {
   ts: number;
@@ -33,6 +33,53 @@ function getOr<K, V>(map: Map<K, V>, key: K, init: () => V): V {
   return v;
 }
 
+// Size-based log rotation. events.jsonl is append-only and would otherwise grow
+// forever (linear-forever read cost + a permanent plaintext log of word-PII).
+// When the current file crosses ROTATE_MAX_BYTES we rename it to events.jsonl.1
+// (shifting the previous .1 → .2) and start a fresh empty current file. We keep
+// only ROTATE_KEEP rotated generations and delete anything older. rename(2) is
+// atomic on the same filesystem, so no in-flight line is lost: appends are
+// serialized through writeChain, and the rotation runs inside that same chain.
+const ROTATE_MAX_BYTES = 16 * 1024 * 1024; // 16 MB
+const ROTATE_KEEP = 2; // keep events.jsonl.1 and events.jsonl.2
+
+// We don't stat() on every append (that'd add a syscall per line). Instead we
+// track bytes written since the last stat and only re-check once we've appended
+// at least this much — cheap, and rotation only lags by <= this much over budget.
+const ROTATE_CHECK_EVERY_BYTES = 256 * 1024; // 256 KB
+const bytesSinceCheck = new Map<string, number>();
+
+/**
+ * Opportunistically rotate `file` if it has grown past ROTATE_MAX_BYTES. Called
+ * from inside writeChain (so it's serialized w.r.t. appends). `appended` is the
+ * byte length just written; we only stat() once that running counter crosses
+ * ROTATE_CHECK_EVERY_BYTES, then rotate if oversized. Best-effort: any error is
+ * swallowed so logging never fails because of rotation.
+ */
+async function maybeRotate(file: string, appended: number): Promise<void> {
+  const acc = (bytesSinceCheck.get(file) ?? 0) + appended;
+  if (acc < ROTATE_CHECK_EVERY_BYTES) {
+    bytesSinceCheck.set(file, acc);
+    return;
+  }
+  bytesSinceCheck.set(file, 0);
+  try {
+    const st = await stat(file);
+    if (st.size < ROTATE_MAX_BYTES) return;
+    // Shift older generations out of the way: .{KEEP-1} → .{KEEP}, …, then
+    // delete the one that falls off the end.
+    await unlink(`${file}.${ROTATE_KEEP}`).catch(() => {});
+    for (let i = ROTATE_KEEP - 1; i >= 1; i--) {
+      await rename(`${file}.${i}`, `${file}.${i + 1}`).catch(() => {});
+    }
+    // Atomically move current → .1. The next append recreates an empty current.
+    await rename(file, `${file}.1`);
+    eventsCache.delete(file); // stale: the current file is now gone/empty
+  } catch {
+    // ignore — keep logging even if rotation can't happen
+  }
+}
+
 // Serialize appends so concurrent requests never interleave partial lines.
 let writeChain: Promise<void> = Promise.resolve();
 
@@ -53,10 +100,12 @@ export function logEvents(events: TelemetryEvent[]): Promise<void> {
     .join("\n");
   if (!lines) return Promise.resolve();
   const file = eventsFilePath();
+  const chunk = lines + "\n";
   writeChain = writeChain
     .then(async () => {
       await mkdir(dirname(file), { recursive: true });
-      await appendFile(file, lines + "\n", "utf8");
+      await appendFile(file, chunk, "utf8");
+      await maybeRotate(file, Buffer.byteLength(chunk, "utf8"));
     })
     .catch(() => {});
   return writeChain;

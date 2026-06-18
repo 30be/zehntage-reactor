@@ -55,9 +55,12 @@ describe("DEFAULT_LOOKUP_PROMPT quality instructions + contract", () => {
     expect(DEFAULT_LOOKUP_PROMPT).toContain("context:");
   });
 
-  test("asks for the meaning AS USED, not an exhaustive dump", () => {
-    expect(DEFAULT_LOOKUP_PROMPT).toContain("AS USED HERE");
-    expect(DEFAULT_LOOKUP_PROMPT).toMatch(/exhaustive/i);
+  test("asks for a standalone, reusable entry — not a context-bound one", () => {
+    // Context is a disambiguation hint only; the written entry must stand alone.
+    expect(DEFAULT_LOOKUP_PROMPT).toMatch(/STANDALONE|stand alone/i);
+    expect(DEFAULT_LOOKUP_PROMPT).toMatch(/reusable/i);
+    // Explicitly forbids context-bound phrasing.
+    expect(DEFAULT_LOOKUP_PROMPT).toContain('"in this context"');
   });
 
   test("requests a natural Russian gloss, dictionary base form", () => {
@@ -65,9 +68,10 @@ describe("DEFAULT_LOOKUP_PROMPT quality instructions + contract", () => {
     expect(DEFAULT_LOOKUP_PROMPT).toContain("dictionary base form");
   });
 
-  test("embeds the shared Hyouka name glossary for consistent names", () => {
-    expect(DEFAULT_LOOKUP_PROMPT).toContain("Ореки Хотаро");
-    expect(DEFAULT_LOOKUP_PROMPT).toContain("Читанда Эру");
+  test("keeps a compact Hyouka name-transliteration rule (Polivanov)", () => {
+    expect(DEFAULT_LOOKUP_PROMPT).toContain("Hyouka");
+    expect(DEFAULT_LOOKUP_PROMPT).toContain("Читанда");
+    expect(DEFAULT_LOOKUP_PROMPT).toContain("Ореки");
     expect(DEFAULT_LOOKUP_PROMPT).toContain("Polivanov");
   });
 

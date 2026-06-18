@@ -18,6 +18,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { mkdir } from "node:fs/promises";
+import { isSetKey, mergeSerialized } from "../../web/orset.ts";
 
 export interface ZrEntry {
   /** Raw localStorage string value. */
@@ -79,6 +80,15 @@ export function merge(base: ZrState, incoming: ZrState): ZrState {
   const out: ZrState = { ...base };
   for (const [k, e] of Object.entries(incoming)) {
     const cur = out[k];
+    // zr.known / zr.blacklist are OR-Sets: value-merge element-wise so two
+    // devices' concurrent additions union instead of last-write-wins clobbering
+    // (Fix 2). Same merge code as the client (web/orset.ts) -> identical
+    // convergence. ts advances to max so a later push still re-merges cleanly.
+    if (isSetKey(k)) {
+      const v = mergeSerialized(cur?.v ?? null, e.v, cur?.ts ?? 0);
+      out[k] = { v, ts: Math.max(cur?.ts ?? 0, e.ts) };
+      continue;
+    }
     if (!cur || e.ts > cur.ts) out[k] = e;
   }
   return out;

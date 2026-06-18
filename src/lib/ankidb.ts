@@ -201,13 +201,102 @@ interface OpenDb {
   unicase: boolean;
   /** Temp dir to clean up on close (null when we opened the real file). */
   tmpDir: string | null;
+  /**
+   * Whether this handle EXCLUSIVELY owns `tmpDir` and may delete it on close.
+   * False when `tmpDir` is a SHARED cached snapshot (see snapshotCache below):
+   * such a dir is reused across reads and must only be removed by the cache
+   * when it re-copies or is invalidated — never by an individual read's close.
+   */
+  ownTmp: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot cache (perf): when Anki holds the WAL lock we must read a private
+// byte copy of collection.anki2. Copying the whole file on EVERY read (words /
+// progress / cards-list / counts all hit openReadOnly repeatedly) cost ~8s p95.
+//
+// We cache ONE snapshot, keyed by the SOURCE file's (mtimeMs, size). A read in
+// the copy path reuses the existing snapshot file iff the source's mtime AND
+// size are byte-for-byte unchanged since it was taken; otherwise it re-copies
+// and atomically replaces the cached snapshot (deleting the old temp dir).
+//
+// Correctness / no-stale-reads:
+//   - The cache key is the SOURCE's (mtimeMs, size). ANY difference in EITHER
+//     field forces a fresh copy, so a changed collection is never served stale.
+//     (Anki bumps the source file's mtime whenever it writes/checkpoints; even
+//     a same-size in-place edit changes mtime, and any content growth/shrink
+//     changes size. We re-validate the source stat on every single read.)
+//   - We open a FRESH read-only DB handle on the cached snapshot file for each
+//     read (handles are NOT shared across callers), so concurrent reads never
+//     contend on one Database object and each read still gets query_only.
+//   - Replacing the snapshot rmSync's the previous temp dir, so old copies do
+//     not accumulate.
+//   - A simple in-process boolean guard prevents two reads from copying the
+//     source simultaneously; a concurrent read that loses the guard falls back
+//     to taking its own private (uncached, self-owned) copy rather than block.
+// This affects ONLY the Anki-OPEN (copy) path. The Anki-CLOSED path still opens
+// the real file directly and is completely untouched.
+// ---------------------------------------------------------------------------
+
+interface Snapshot {
+  /** Temp dir holding the snapshot copy (owned by the cache). */
+  tmpDir: string;
+  /** Snapshot collection file inside tmpDir. */
+  dst: string;
+  /** Source file mtimeMs at copy time (cache key part 1). */
+  srcMtimeMs: number;
+  /** Source file size in bytes at copy time (cache key part 2). */
+  srcSize: number;
+}
+
+let snapshotCache: Snapshot | null = null;
+/** In-process guard: a snapshot copy is currently in flight. */
+let snapshotCopying = false;
+
+/** stat the source; null if it vanished mid-flight. */
+function statSource(path: string): { mtimeMs: number; size: number } | null {
+  try {
+    const s = statSync(path);
+    return { mtimeMs: s.mtimeMs, size: s.size };
+  } catch {
+    return null;
+  }
+}
+
+/** rmSync a temp dir, swallowing errors (snapshot disposal boilerplate). */
+function rmDirQuiet(dir: string | null): void {
+  if (!dir) return;
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Byte-copy `path` (+ -wal/-shm) into a brand-new private temp dir and return
+ * its location. Throws on any I/O failure (caller cleans up / falls through).
+ */
+function copySnapshot(path: string): { tmpDir: string; dst: string } {
+  const tmpDir = mkdtempSync(join(tmpdir(), "zr-ankidb-"));
+  try {
+    const dst = join(tmpDir, "collection.anki2");
+    copyFileSync(path, dst);
+    for (const ext of ["-wal", "-shm"]) {
+      if (existsSync(path + ext)) copyFileSync(path + ext, dst + ext);
+    }
+    return { tmpDir, dst };
+  } catch (e) {
+    rmDirQuiet(tmpDir);
+    throw e;
+  }
 }
 
 /**
  * Open the collection read-only. First tries the real file directly; if that
- * fails (Anki holds an exclusive WAL lock → SQLITE_BUSY) we copy the file
- * (+ -wal/-shm) into a private temp dir and open the copy. The real DB is
- * NEVER opened read-write.
+ * fails (Anki holds an exclusive WAL lock → SQLITE_BUSY) we open a CACHED byte
+ * copy (see snapshotCache) — re-copying only when the source file changed. The
+ * real DB is NEVER opened read-write.
  */
 function openReadOnly(path: string): OpenDb | null {
   if (!existsSync(path)) return null;
@@ -229,31 +318,115 @@ function openReadOnly(path: string): OpenDb | null {
   // 1. Direct read-only open (works when Anki is closed / WAL checkpointed).
   try {
     const { db, unicase } = openHandle(path);
-    return { db, unicase, tmpDir: null };
+    return { db, unicase, tmpDir: null, ownTmp: false };
   } catch {
     /* fall through to copy path */
   }
 
-  // 2. Copy to a private temp dir and open the copy (Anki is mid-session).
-  let tmpDir: string | null = null;
-  try {
-    tmpDir = mkdtempSync(join(tmpdir(), "zr-ankidb-"));
-    const dst = join(tmpDir, "collection.anki2");
-    copyFileSync(path, dst);
-    for (const ext of ["-wal", "-shm"]) {
-      if (existsSync(path + ext)) copyFileSync(path + ext, dst + ext);
+  // 2. Copy path (Anki is mid-session). Reuse the cached snapshot when the
+  //    SOURCE file is unchanged (mtime+size); otherwise (re)copy.
+  const src = statSource(path);
+  if (!src) return null; // source vanished — nothing safe to open.
+
+  // 2a. Fast path: a fresh snapshot for the SAME (mtime, size) already exists.
+  const cached = snapshotCache;
+  if (
+    cached &&
+    cached.srcMtimeMs === src.mtimeMs &&
+    cached.srcSize === src.size &&
+    existsSync(cached.dst)
+  ) {
+    try {
+      // Re-validate the source ONE more time right before trusting the snapshot:
+      // if it changed between the first stat and here, fall through to re-copy
+      // so we never serve a snapshot taken against a now-stale source.
+      const recheck = statSource(path);
+      if (
+        recheck &&
+        recheck.mtimeMs === cached.srcMtimeMs &&
+        recheck.size === cached.srcSize
+      ) {
+        const { db, unicase } = openHandle(cached.dst);
+        // Shared cached snapshot dir → this handle does NOT own/delete it.
+        return { db, unicase, tmpDir: cached.tmpDir, ownTmp: false };
+      }
+    } catch {
+      // Cached snapshot file is unreadable (corrupt/removed) — drop & re-copy.
+      snapshotCache = null;
+      rmDirQuiet(cached.tmpDir);
     }
-    const { db, unicase } = openHandle(dst);
-    return { db, unicase, tmpDir };
-  } catch {
-    if (tmpDir) {
+  }
+
+  // 2b. Need a fresh copy. Use an in-process guard so two concurrent reads do
+  //     not both rebuild the shared cache. The loser takes a private copy.
+  if (snapshotCopying) {
+    let priv: { tmpDir: string; dst: string } | null = null;
+    try {
+      priv = copySnapshot(path);
+      const { db, unicase } = openHandle(priv.dst);
+      // Private, self-owned copy: delete it on close (it is NOT the cache).
+      return { db, unicase, tmpDir: priv.tmpDir, ownTmp: true };
+    } catch {
+      if (priv) rmDirQuiet(priv.tmpDir);
+      return null;
+    }
+  }
+
+  snapshotCopying = true;
+  try {
+    // Snapshot the source, then record the (mtime,size) the copy was taken AT.
+    // We re-stat AFTER copying and require it to match the pre-copy stat; if the
+    // source mutated during the copy, the bytes may be torn, so we do NOT cache
+    // them — we still serve this read from the (self-owned) copy but leave the
+    // cache empty so the next read re-copies a consistent snapshot.
+    const before = statSource(path);
+    const made = copySnapshot(path);
+    const after = statSource(path);
+
+    const consistent =
+      !!before &&
+      !!after &&
+      before.mtimeMs === after.mtimeMs &&
+      before.size === after.size;
+
+    if (consistent) {
+      // Replace the cache atomically: install the new snapshot, then dispose the
+      // previous temp dir (old in-flight reads already hold their own handles;
+      // SQLite keeps the file alive via the open fd until they close).
+      const prev = snapshotCache;
+      snapshotCache = {
+        tmpDir: made.tmpDir,
+        dst: made.dst,
+        srcMtimeMs: before.mtimeMs,
+        srcSize: before.size,
+      };
+      if (prev && prev.tmpDir !== made.tmpDir) rmDirQuiet(prev.tmpDir);
       try {
-        rmSync(tmpDir, { recursive: true, force: true });
+        const { db, unicase } = openHandle(made.dst);
+        return { db, unicase, tmpDir: made.tmpDir, ownTmp: false };
       } catch {
-        /* ignore */
+        // Snapshot bytes won't open — invalidate the cache we just set.
+        if (snapshotCache && snapshotCache.tmpDir === made.tmpDir) {
+          snapshotCache = null;
+        }
+        rmDirQuiet(made.tmpDir);
+        return null;
       }
     }
+
+    // Source moved during the copy → do NOT cache (possibly torn). Serve this
+    // read from the private copy and have it clean itself up on close.
+    try {
+      const { db, unicase } = openHandle(made.dst);
+      return { db, unicase, tmpDir: made.tmpDir, ownTmp: true };
+    } catch {
+      rmDirQuiet(made.tmpDir);
+      return null;
+    }
+  } catch {
     return null;
+  } finally {
+    snapshotCopying = false;
   }
 }
 
@@ -263,12 +436,11 @@ function closeDb(h: OpenDb): void {
   } catch {
     /* ignore */
   }
-  if (h.tmpDir) {
-    try {
-      rmSync(h.tmpDir, { recursive: true, force: true });
-    } catch {
-      /* ignore */
-    }
+  // Only delete the temp dir if THIS handle owns it. The shared cached snapshot
+  // (ownTmp === false, tmpDir set) is reused by later reads and disposed solely
+  // by the snapshot cache when it re-copies / invalidates.
+  if (h.tmpDir && h.ownTmp) {
+    rmDirQuiet(h.tmpDir);
   }
 }
 
@@ -457,19 +629,23 @@ async function withWriteTxn<R extends { ok: boolean }>(
  */
 function runIntegrityCheck(db: Database, label?: string): string | null {
   try {
-    const ic = db.query("PRAGMA integrity_check").get() as
-      | { integrity_check?: string }
+    // quick_check (not the full integrity_check) — runs per single-card write
+    // inside the txn, so it must stay fast; quick_check skips the expensive
+    // index-vs-table cross-validation but still catches the page/structure
+    // corruption that matters here. Column name is "quick_check" in this mode.
+    const ic = db.query("PRAGMA quick_check").get() as
+      | { quick_check?: string }
       | Record<string, unknown>
       | null;
     const icVal =
       ic && typeof ic === "object"
         ? String(
-            (ic as Record<string, unknown>).integrity_check ??
+            (ic as Record<string, unknown>).quick_check ??
               Object.values(ic)[0] ??
               "",
           )
         : "";
-    if (icVal && icVal !== "ok") return `integrity_check: ${icVal}`;
+    if (icVal && icVal !== "ok") return `quick_check: ${icVal}`;
     return null;
   } catch (icErr) {
     const msg = (icErr as Error).message ?? "";
@@ -887,12 +1063,92 @@ function parseTags(raw: string | null | undefined): string[] {
  * Returns ordinals into the FLD_SEP-split flds array. Requires unicase (the
  * `fields` table carries a unicase TEXT name column). Returns null otherwise.
  */
-interface DbFieldMap {
+export interface DbFieldMap {
   front: number;
   back: number;
   notes?: number;
   context?: number;
 }
+
+// A field whose name looks like a kana READING / furigana / pronunciation — the
+// thing the popup must NOT show as the "meaning". Used to skip reading fields
+// when falling back to "first non-front text field" for `back`.
+const READING_NAME_RE = /read|furigana|kana|yomi|pron|romaji|hiragana|katakana/i;
+// Name patterns that positively identify the MEANING/gloss field for `back`.
+// `/back/i` is included FIRST so classic Front/Back notetypes never regress.
+const MEANING_NAME_RE =
+  /back|meaning|translat|english|gloss|glossary|sense\b|definition|\bdef\b/i;
+// Audio/image/media fields that must never be chosen as text back/notes.
+const MEDIA_NAME_RE = /audio|image|picture|sound|video|furigana|pitch/i;
+
+/**
+ * Pure notetype field-ordinal picker — resolves front/back/notes/context
+ * ordinals from a notetype's ordered field-NAME list. Exported for unit tests.
+ *
+ * Conservative, name-based heuristics that fix the "popup shows the reading"
+ * bug WITHOUT regressing classic Front/Back/notes/context notetypes:
+ *   front   = /front/i, else ord 0.
+ *   back    = the MEANING field: first name matching MEANING_NAME_RE (which
+ *             still matches "Back"); else the first non-front, non-reading,
+ *             non-media text field; else ord 1; else ord 0. NEVER the front.
+ *   notes   = /note/i, else /example|sentence|context|usage/i — but never the
+ *             same ordinal as front or back.
+ *   context = /usage|context/i and != notes.
+ */
+export function pickFieldOrdinals(names: string[]): DbFieldMap {
+  const n = names.length;
+  const firstMatch = (re: RegExp, skip?: (i: number) => boolean): number => {
+    for (let i = 0; i < n; i++) {
+      if (skip?.(i)) continue;
+      if (re.test(names[i] ?? "")) return i;
+    }
+    return -1;
+  };
+
+  const front = (() => {
+    const i = firstMatch(/front/i);
+    return i >= 0 ? i : 0;
+  })();
+
+  const isReading = (i: number) => READING_NAME_RE.test(names[i] ?? "");
+  const isMedia = (i: number) => MEDIA_NAME_RE.test(names[i] ?? "");
+
+  const back = (() => {
+    // 1) An explicit meaning/gloss/Back field (but not the front itself).
+    const meaning = firstMatch(MEANING_NAME_RE, (i) => i === front);
+    if (meaning >= 0) return meaning;
+    // 2) First non-front, non-reading, non-media field — the meaning usually
+    //    sits right after the reading in mining notetypes lacking a "Meaning"
+    //    name (skip kana-reading fields so we never show だれ as the gloss).
+    for (let i = 0; i < n; i++) {
+      if (i === front) continue;
+      if (isReading(i) || isMedia(i)) continue;
+      return i;
+    }
+    // 3) Degenerate notetypes (front + reading only): take ord 1, else ord 0.
+    if (n > 1 && front !== 1) return 1;
+    return front === 0 ? Math.min(1, n - 1) : 0;
+  })();
+
+  const map: DbFieldMap = { front, back };
+
+  // notes: prefer an explicit /note/i field, else an example/sentence/context
+  // field — but never collapse onto the front or back ordinal.
+  const taken = (i: number) => i === front || i === back;
+  let notesOrd = firstMatch(/note/i, taken);
+  if (notesOrd < 0) notesOrd = firstMatch(/example|sentence|context|usage/i, taken);
+  if (notesOrd >= 0) map.notes = notesOrd;
+
+  // context = /usage|context/i AND not the notes/back/front field.
+  const ctxIdx = firstMatch(
+    /usage|context/i,
+    (i) => i === notesOrd || i === back || i === front,
+  );
+  if (ctxIdx >= 0) map.context = ctxIdx;
+
+  return map;
+}
+
 function resolveFieldMap(h: OpenDb, ntid: number): DbFieldMap | null {
   if (!h.unicase) return null;
   try {
@@ -900,21 +1156,19 @@ function resolveFieldMap(h: OpenDb, ntid: number): DbFieldMap | null {
       .query("SELECT ord, name FROM fields WHERE ntid = ? ORDER BY ord")
       .all(ntid) as { ord: number; name: string }[];
     if (rows.length === 0) return null;
-    const names = rows.map((r) => r.name ?? "");
-    const findOrd = (re: RegExp): number | undefined => {
-      const i = names.findIndex((n) => re.test(n));
-      return i >= 0 ? rows[i]!.ord : undefined;
+    // pickFieldOrdinals works in POSITION space; translate back to real ords
+    // (ords are usually 0..n-1 but resolve via the rows array to be safe).
+    const pos = pickFieldOrdinals(rows.map((r) => r.name ?? ""));
+    const toOrd = (i: number | undefined): number | undefined =>
+      i === undefined ? undefined : rows[i]?.ord;
+    const map: DbFieldMap = {
+      front: toOrd(pos.front) ?? rows[0]!.ord,
+      back: toOrd(pos.back) ?? rows[1]?.ord ?? rows[0]!.ord,
     };
-    const front = findOrd(/front/i) ?? rows[0]!.ord;
-    const back = findOrd(/back/i) ?? rows[1]?.ord ?? rows[0]!.ord;
-    const map: DbFieldMap = { front, back };
-    const notesOrd = findOrd(/note/i);
+    const notesOrd = toOrd(pos.notes);
     if (notesOrd !== undefined) map.notes = notesOrd;
-    // context = /usage|context/i AND not the same field as notes (mirrors acFieldMap).
-    const ctxIdx = names.findIndex(
-      (n, i) => /usage|context/i.test(n) && rows[i]!.ord !== notesOrd,
-    );
-    if (ctxIdx >= 0) map.context = rows[ctxIdx]!.ord;
+    const ctxOrd = toOrd(pos.context);
+    if (ctxOrd !== undefined) map.context = ctxOrd;
     return map;
   } catch {
     return null;

@@ -56,6 +56,7 @@ import {
 } from "../lib/anki.ts";
 import {
   reviewQueueAuto,
+  deckCountsAuto,
   answerCardAuto,
   deleteNoteAuto,
   deleteNoteByFrontAuto,
@@ -66,6 +67,22 @@ import {
 } from "../lib/review.ts";
 import { dbStoreMedia, collectionPath } from "../lib/ankidb.ts";
 import { readSettings, writeSettings, validateSettingsPatch } from "../lib/settings.ts";
+import {
+  getCachedLookup,
+  putCachedLookup,
+  getAllCachedKeys,
+} from "../lib/lookupcache.ts";
+// Cost estimation reuses the batch-tier rates: the FLEX inference tier bills at
+// the SAME 50%-off rate as the Batch API, so estimateBatchCostUsd is correct for
+// both. The submit/poll/cancel batch helpers stay in geminibatch.ts (still
+// exercised by tests) but are no longer used by the server — the offline cache
+// now runs synchronously via the flex runner below.
+import { estimateBatchCostUsd } from "../lib/geminibatch.ts";
+import { runFlexLookups, type FlexTarget } from "../lib/flexrunner.ts";
+import {
+  collectUnknownLookupTargets,
+  type LookupTarget,
+} from "../lib/wordcorpus.ts";
 import { parseEnvText } from "../lib/env.ts";
 import {
   logEvent,
@@ -345,6 +362,390 @@ function trimTranslateBatch(): void {
     }
   }
 }
+
+// --- "cache all unknown subtitle words" batch job ----------------------------
+//
+// A SINGLE, persistent background job that pre-computes Gemini lookups for every
+// unknown ja subtitle word in the library and writes ONLY to the offline lookup
+// cache (lookupcache.ts). It NEVER touches Anki — no cards, no notes, no mining;
+// pure read of subs+deck, write to the cache db.
+//
+// As of the flex migration, the heavy lifting is the SYNCHRONOUS Flex inference
+// tier driven by runFlexLookups (a bounded worker pool), NOT the async Batch API.
+// So there is no remote job to poll: the runner fires lookups in-process, writes
+// each result to the cache as it lands, and advances job.done LIVE. The whole
+// library caches in MINUTES at the same 50%-off batch price.
+//
+// NOT resumable across a restart: a flex run lives only in this process (no
+// remote batch handle). A `running` job found in the persisted snapshot on boot
+// is therefore stale — we reset it to idle (see resumeCacheAllJob). The cache
+// itself is durable (each result was written as it completed), so re-clicking
+// "Cache all" simply resumes from whatever is still uncached — cheap and safe.
+
+function zrConfigDir(): string {
+  return process.env.ZR_CONFIG_DIR || join(homedir(), ".config", "zehntage-reactor");
+}
+const CACHE_ALL_JOB_FILE = () => join(zrConfigDir(), "cache-all-job.json");
+
+// State union kept compatible with the old endpoint contract. "running" → "done"
+// is the live happy path; "cancelled"/"failed" are terminal. "pending" survives
+// only as the brief pre-running claim (synchronous enumeration). The old async
+// batch states ("succeeded"/"expired") are retained in the type for snapshot
+// back-compat but are no longer produced.
+type CacheAllState =
+  | "idle"
+  | "pending"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "expired"
+  | "done";
+
+interface CacheAllJob {
+  state: CacheAllState;
+  total: number;
+  done: number;
+  costUsd: number;
+  error?: string;
+  // Cooperative cancel flag: the flex runner checks this before starting each
+  // item, so a cancel stops new work without aborting in-flight lookups.
+  cancelRequested?: boolean;
+}
+
+let cacheAllJob: CacheAllJob | null = null;
+
+/** Active job? (pending/running blocks a second start.) */
+function cacheAllActive(): boolean {
+  return !!cacheAllJob && (cacheAllJob.state === "pending" || cacheAllJob.state === "running");
+}
+
+/** Persist a slim snapshot (best-effort). A flex run isn't resumable (no remote
+ *  job), so this is mainly so a fresh process can tell a stale `running` job
+ *  apart and reset it rather than crash on load. */
+async function persistCacheAllJob(): Promise<void> {
+  if (!cacheAllJob) return;
+  try {
+    const snap = {
+      state: cacheAllJob.state,
+      total: cacheAllJob.total,
+      done: cacheAllJob.done,
+      costUsd: cacheAllJob.costUsd,
+      error: cacheAllJob.error,
+    };
+    await Bun.write(CACHE_ALL_JOB_FILE(), JSON.stringify(snap));
+  } catch {
+    // best-effort: persistence failure must not break the in-memory job
+  }
+}
+
+/**
+ * Enumerate every unique unknown ja subtitle word in the library as a lookup
+ * target. Wires the route-scope helpers (bestJapaneseTrackId/cuesForTrack are
+ * module-level; deck fronts from listCardsAuto; known = zr.known ∪ zr.blacklist).
+ * Pure read — no writes anywhere.
+ */
+async function enumerateLookupTargets(library: Library): Promise<LookupTarget[]> {
+  const cuesFor = async (e: LibraryEntry): Promise<Cue[] | null> => {
+    const id = await bestJapaneseTrackId(e);
+    return id ? await cuesForTrack(e, id) : null;
+  };
+  const deckFronts = (await listCardsAuto()).map((c) => c.front);
+  const known = new Set<string>();
+  try {
+    const state = await readState();
+    for (const k of ["zr.known", "zr.blacklist"]) {
+      const raw = state[k]?.v;
+      if (!raw) continue;
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) for (const v of arr) if (typeof v === "string") known.add(v);
+    }
+  } catch {
+    // malformed state — treat as nothing known (worst case: a few extra lookups)
+  }
+  return collectUnknownLookupTargets({ entries: library.list(), cuesFor, deckFronts, known });
+}
+
+/** Targets not yet present in the offline cache (these are what we'd actually send). */
+function uncachedTargets(targets: LookupTarget[]): LookupTarget[] {
+  return targets.filter((t) => !getCachedLookup(t.key));
+}
+
+/**
+ * Drive the active cache-all job to completion via the FLEX runner. Fires every
+ * target through a bounded worker pool, writing each result to the offline cache
+ * as it lands (inside runFlexLookups) and advancing job.done LIVE so the status
+ * poll shows real-time progress. On finish: state → "done" (or "cancelled" if a
+ * cancel was requested mid-run). Errors per item are tolerated by the runner;
+ * a fatal run-level error marks the job failed. Runs ONCE per start — no polling.
+ */
+async function runCacheAllJob(targets: FlexTarget[]): Promise<void> {
+  const job = cacheAllJob;
+  if (!job) return;
+  try {
+    const res = await runFlexLookups(targets, {
+      onProgress: (done) => {
+        job.done = done;
+      },
+      shouldStop: () => !!job.cancelRequested,
+    });
+    if (job.cancelRequested) {
+      job.state = "cancelled";
+      if (!job.error) job.error = "cancelled by user";
+      void logEvent("lookup.cache_all_cancel", { done: res.succeeded, total: job.total });
+    } else {
+      job.state = "done";
+      job.costUsd = estimateBatchCostUsd(res.succeeded);
+      void logEvent("lookup.cache_all_done", {
+        total: job.total,
+        done: res.succeeded,
+        failed: res.failed,
+        costUsd: job.costUsd,
+      });
+    }
+  } catch (e) {
+    job.state = "failed";
+    job.error = String(e);
+    void logEvent("anomaly.cache_all_fail", { error: job.error });
+  } finally {
+    await persistCacheAllJob();
+  }
+}
+
+/**
+ * On module load: a flex run is NOT resumable (it lived only in the prior
+ * process — no remote batch handle). So a snapshot left in "pending"/"running"
+ * is stale; reset it to idle rather than try to resume (or crash). The cache
+ * itself is durable, so the user just re-clicks "Cache all" to finish whatever
+ * stayed uncached. Terminal snapshots (done/failed/cancelled) are ignored.
+ */
+async function resumeCacheAllJob(): Promise<void> {
+  try {
+    const snap = (await Bun.file(CACHE_ALL_JOB_FILE()).json()) as {
+      state?: CacheAllState;
+    };
+    if (snap && (snap.state === "pending" || snap.state === "running")) {
+      // Stale in-flight run from a previous process: drop it to idle.
+      cacheAllJob = null;
+      await Bun.write(CACHE_ALL_JOB_FILE(), JSON.stringify({ state: "idle" })).catch(() => {});
+      void logEvent("lookup.cache_all_stale_reset", { wasState: snap.state });
+    }
+  } catch {
+    // no/garbage snapshot — nothing to reset
+  }
+}
+void resumeCacheAllJob();
+
+// =====================================================================
+// PER-EPISODE offline lookup cache — additive & INDEPENDENT from the
+// global cache-all job above. Its own registry (Map<entryId, job>), its
+// own pump, its own persistence file. The global job is NEVER touched;
+// we only READ cacheAllActive() to avoid double-spending when a global
+// run already covers every episode.
+// =====================================================================
+
+const CACHE_EPISODE_JOB_FILE = () => join(zrConfigDir(), "cache-episode-jobs.json");
+
+type EpisodeCacheState = "idle" | "pending" | "running" | "done" | "failed";
+
+interface EpisodeCacheJob {
+  entryId: string;
+  state: EpisodeCacheState;
+  total: number;
+  done: number;
+  error?: string;
+}
+
+const episodeJobs = new Map<string, EpisodeCacheJob>();
+
+/** A per-episode job still running a flex run and shouldn't be re-started. */
+function episodeJobActive(id: string): boolean {
+  const j = episodeJobs.get(id);
+  return !!j && (j.state === "pending" || j.state === "running");
+}
+
+/** Persist a slim snapshot of all per-episode jobs (best-effort). Flex runs are
+ *  not resumable, so a `running` snapshot on load is reset to idle (see
+ *  resumeEpisodeJobs); the cache itself is durable. */
+async function persistEpisodeJobs(): Promise<void> {
+  try {
+    const snap = [...episodeJobs.values()].map((j) => ({
+      entryId: j.entryId,
+      state: j.state,
+      total: j.total,
+      done: j.done,
+      error: j.error,
+    }));
+    await Bun.write(CACHE_EPISODE_JOB_FILE(), JSON.stringify(snap));
+  } catch {
+    // best-effort: persistence failure must not break the in-memory registry
+  }
+}
+
+// --- memoized per-episode target sets ---------------------------------
+//
+// Tokenizing every episode's subs is expensive and the status endpoint is
+// polled ~every 3s, so cache the per-entry UNKNOWN vocabKey sets. The cache is
+// keyed by a cheap signature (currentRoot + deck-front count + known-set size):
+// a re-root, a new mined card, or a known/blacklist change all shift it and
+// force a lazy recompute on the next status request.
+let episodeTargetsCache: {
+  sig: string;
+  perEntry: Map<string, Map<string, LookupTarget>>; // entryId -> (vocabKey -> target)
+} | null = null;
+
+/** Cheap signature; any change invalidates the memoized target sets. */
+async function episodeTargetsSignature(library: Library): Promise<string> {
+  let deckCount = 0;
+  let knownCount = 0;
+  try {
+    deckCount = (await listCardsAuto()).length;
+  } catch {
+    // deck read failure — folded into the sig as 0 (recompute when it recovers)
+  }
+  try {
+    const state = await readState();
+    for (const k of ["zr.known", "zr.blacklist"]) {
+      const raw = state[k]?.v;
+      if (!raw) continue;
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) knownCount += arr.length;
+    }
+  } catch {
+    // malformed state — sig component stays 0
+  }
+  // library.root tracks re-roots (POST /api/root swaps in a new Library), so
+  // the signature shifts and the memoized target sets recompute automatically.
+  return `${library.root} ${library.list().length} ${deckCount} ${knownCount}`;
+}
+
+/**
+ * Per-entry UNKNOWN vocabKey target sets, memoized by the cheap signature.
+ * Recomputes lazily (tokenizes every entry's ja subs) when the signature shifts
+ * — same unknown definition as wordcorpus (not in deck, not in known/blacklist).
+ */
+async function getEpisodeTargets(
+  library: Library,
+): Promise<Map<string, Map<string, LookupTarget>>> {
+  const sig = await episodeTargetsSignature(library);
+  if (episodeTargetsCache && episodeTargetsCache.sig === sig) {
+    return episodeTargetsCache.perEntry;
+  }
+
+  const cuesFor = async (e: LibraryEntry): Promise<Cue[] | null> => {
+    const id = await bestJapaneseTrackId(e);
+    return id ? await cuesForTrack(e, id) : null;
+  };
+  const deckFronts = (await listCardsAuto().catch(() => [])).map((c) => c.front);
+  const known = new Set<string>();
+  try {
+    const state = await readState();
+    for (const k of ["zr.known", "zr.blacklist"]) {
+      const raw = state[k]?.v;
+      if (!raw) continue;
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) for (const v of arr) if (typeof v === "string") known.add(v);
+    }
+  } catch {
+    // malformed state — treat as nothing known
+  }
+
+  // collectUnknownLookupTargets dedups across the WHOLE entries[] array, so to
+  // get a TRUE per-episode set (a word can be "new" in two episodes) we call it
+  // once per entry with a single-entry array.
+  const perEntry = new Map<string, Map<string, LookupTarget>>();
+  for (const entry of library.list()) {
+    const targets = await collectUnknownLookupTargets({
+      entries: [entry],
+      cuesFor,
+      deckFronts,
+      known,
+    });
+    const m = new Map<string, LookupTarget>();
+    for (const t of targets) m.set(t.key, t); // key == vocabKey, already deduped
+    perEntry.set(entry.id, m);
+  }
+
+  episodeTargetsCache = { sig, perEntry };
+  return perEntry;
+}
+
+/** The UNCACHED unknown targets for one episode (what we'd actually submit). */
+function uncachedEpisodeTargets(
+  perEntry: Map<string, Map<string, LookupTarget>>,
+  entryId: string,
+  cachedKeys: Set<string>,
+): LookupTarget[] {
+  const m = perEntry.get(entryId);
+  if (!m) return [];
+  const out: LookupTarget[] = [];
+  for (const t of m.values()) if (!cachedKeys.has(t.key)) out.push(t);
+  return out;
+}
+
+/**
+ * Drive one episode's flex run to completion. Mirrors runCacheAllJob but scoped
+ * to a single entryId in the per-episode registry. Writes ONLY into the offline
+ * lookup cache (inside runFlexLookups, as each item lands) and advances job.done
+ * LIVE. Runs once per start — no polling.
+ */
+async function runEpisodeJob(id: string, targets: FlexTarget[]): Promise<void> {
+  const job = episodeJobs.get(id);
+  if (!job) return;
+  try {
+    const res = await runFlexLookups(targets, {
+      onProgress: (done) => {
+        job.done = done;
+      },
+    });
+    job.state = "done";
+    void logEvent("lookup.cache_episode_done", {
+      entryId: id,
+      total: job.total,
+      done: res.succeeded,
+      failed: res.failed,
+    });
+  } catch (e) {
+    job.state = "failed";
+    job.error = String(e);
+    void logEvent("anomaly.cache_episode_fail", { entryId: id, error: job.error });
+  } finally {
+    await persistEpisodeJobs();
+  }
+}
+
+/**
+ * On module load: flex runs are not resumable (no remote handle), so any
+ * snapshot job left in "pending"/"running" is stale — load it as "idle" so the
+ * status endpoint doesn't report a phantom in-flight job and a re-click can
+ * restart it. Terminal jobs (done/failed) are loaded as-is for status display.
+ */
+async function resumeEpisodeJobs(): Promise<void> {
+  try {
+    const snap = (await Bun.file(CACHE_EPISODE_JOB_FILE()).json()) as Array<{
+      entryId: string;
+      state?: EpisodeCacheState;
+      total?: number;
+      done?: number;
+      error?: string;
+    }>;
+    if (!Array.isArray(snap)) return;
+    for (const s of snap) {
+      const stale = s.state === "pending" || s.state === "running";
+      const job: EpisodeCacheJob = {
+        entryId: s.entryId,
+        state: stale ? "idle" : (s.state ?? "idle"),
+        total: s.total ?? 0,
+        done: s.done ?? 0,
+        error: stale ? undefined : s.error,
+      };
+      episodeJobs.set(s.entryId, job);
+    }
+  } catch {
+    // no/garbage snapshot — nothing to load
+  }
+}
+void resumeEpisodeJobs();
 
 // In-memory cache for /api/explain, keyed by sentence + secondary + source.
 // FIFO-capped so a long session can't grow it without bound.
@@ -1630,14 +2031,29 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       if (req.method === "POST" && path === "/api/lookup") {
         const body = (await req.json()) as {
           word?: string;
+          vocabKey?: string;
           context?: string;
           secondary?: string;
           source?: string;
           mediaId?: string;
           timestamp?: number;
           withFrame?: boolean;
+          noCache?: boolean;
+          cachedOnly?: boolean;
         };
         if (!body.word) return err("word required", 400);
+        // Cache identity = homograph-aware vocabKey; fall back to word for safety.
+        const vk = (body.vocabKey ?? body.word ?? "").trim();
+
+        // cachedOnly: serve the persistent cache only — NEVER call Gemini. Used
+        // by in-deck word popups that prefer a cached gloss but must not incur a
+        // paid lookup (they fall back to the Anki card on a 204 miss).
+        if (body.cachedOnly) {
+          const hit = getCachedLookup(vk);
+          if (!hit) return new Response(null, { status: 204 });
+          void logEvent("lookup.cache_hit", { word: body.word });
+          return json(hit);
+        }
 
         let image: { bytes: Uint8Array; mimeType: string } | undefined;
         if (body.withFrame && body.mediaId !== undefined && body.timestamp !== undefined) {
@@ -1649,6 +2065,17 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
             } catch {
               // no frame — fall back to text-only lookup
             }
+          }
+        }
+
+        // Persistent cache for text-only lookups. Frame lookups are visual and
+        // never served from / written to this layer.
+        if (!image && !body.noCache) {
+          const hit = getCachedLookup(vk);
+          if (hit) {
+            void logEvent("lookup", { word: body.word, mediaId: body.mediaId });
+            void logEvent("lookup.cache_hit", { word: body.word });
+            return json(hit);
           }
         }
 
@@ -1668,7 +2095,161 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
           throw e;
         }
         void logEvent("perf.gemini", { op: "lookup", ms: Date.now() - _gT0 });
+        if (!image) {
+          putCachedLookup(vk, _lookupResult, body.word, body.context ?? "");
+        }
         return json(_lookupResult);
+      }
+
+      // --- cache ALL unknown subtitle words (offline pre-cache) -------------
+      // Pre-computes Gemini lookups for every unknown ja word in the library via
+      // the async Batch API and writes ONLY to the offline lookup cache. Never
+      // creates/modifies Anki cards or mines — pure subs+deck read, cache write.
+
+      // Cost/scope preview: how many uncached targets and the estimated USD.
+      if (req.method === "GET" && path === "/api/lookup/cache-all/estimate") {
+        const targets = await enumerateLookupTargets(library);
+        const uncached = uncachedTargets(targets);
+        return json({
+          wordCount: uncached.length,
+          estCostUsd: estimateBatchCostUsd(uncached.length),
+          alreadyCached: targets.length - uncached.length,
+        });
+      }
+
+      // Kick off the flex run (no-op if one is already running or nothing to do).
+      if (req.method === "POST" && path === "/api/lookup/cache-all") {
+        if (cacheAllActive()) return json({ started: false, total: cacheAllJob!.total });
+        // Claim the slot SYNCHRONOUSLY before any await so a second concurrent
+        // POST sees a running job and bails (otherwise both could fire a full
+        // flex run -> double billing). Cleared on any early-return/throw.
+        cacheAllJob = { state: "pending", total: 0, done: 0, costUsd: 0 };
+        try {
+          const uncached = uncachedTargets(await enumerateLookupTargets(library));
+          if (uncached.length === 0) {
+            cacheAllJob = null;
+            return json({ started: false, total: 0 });
+          }
+
+          const flexTargets: FlexTarget[] = uncached.map((t) => ({
+            word: t.word,
+            context: t.context,
+            source: t.source,
+            vocabKey: t.key,
+          }));
+          cacheAllJob = {
+            state: "running",
+            total: uncached.length,
+            done: 0,
+            costUsd: 0,
+          };
+          await persistCacheAllJob();
+          void logEvent("lookup.cache_all_start", { total: uncached.length });
+          // Fire-and-forget: the flex runner drives done/total live and flips
+          // state to done/cancelled/failed when finished. We respond immediately.
+          void runCacheAllJob(flexTargets);
+          return json({ started: true, total: uncached.length });
+        } catch (e) {
+          // Don't wedge the guard if startup failed mid-flight.
+          if (cacheAllJob && cacheAllJob.state === "pending") cacheAllJob = null;
+          throw e;
+        }
+      }
+
+      // Progress poll for the frontend.
+      if (req.method === "GET" && path === "/api/lookup/cache-all/status") {
+        if (!cacheAllJob) return json({ state: "idle", total: 0, done: 0, costUsd: 0 });
+        return json({
+          state: cacheAllJob.state,
+          total: cacheAllJob.total,
+          done: cacheAllJob.done,
+          costUsd: cacheAllJob.costUsd,
+          ...(cacheAllJob.error ? { error: cacheAllJob.error } : {}),
+        });
+      }
+
+      // Request cancellation of the running flex run. Cooperative: the runner
+      // checks cancelRequested before starting each item, so new work stops and
+      // in-flight lookups finish; runCacheAllJob then flips state to "cancelled".
+      // Everything already written to the cache stays (it's durable).
+      if (req.method === "POST" && path === "/api/lookup/cache-all/cancel") {
+        if (!cacheAllJob || !cacheAllActive()) return json({ cancelled: false });
+        cacheAllJob.cancelRequested = true;
+        return json({ cancelled: true });
+      }
+
+      // --- PER-EPISODE offline lookup cache (additive; independent registry) ---
+
+      // Status poll (UI polls ~every 3s, so this must be cheap): memoized
+      // per-episode target sets intersected in-memory against ONE getAllCachedKeys.
+      if (req.method === "GET" && path === "/api/lookup/cache-episode/status") {
+        const perEntry = await getEpisodeTargets(library);
+        const cachedKeys = getAllCachedKeys();
+        const uniqueNew = new Set<string>();
+        const episodes: Record<
+          string,
+          { total: number; cached: number; state: EpisodeCacheState }
+        > = {};
+        for (const [entryId, targets] of perEntry) {
+          let cached = 0;
+          for (const k of targets.keys()) {
+            uniqueNew.add(k); // dedup across episodes -> library-wide unique
+            if (cachedKeys.has(k)) cached++;
+          }
+          const job = episodeJobs.get(entryId);
+          episodes[entryId] = {
+            total: targets.size,
+            cached,
+            state: job ? job.state : "idle",
+          };
+        }
+        return json({
+          uniqueNewWords: uniqueNew.size,
+          globalActive: cacheAllActive(),
+          episodes,
+        });
+      }
+
+      // Kick off a per-episode batch for one entry's UNCACHED unknown words.
+      if (req.method === "POST" && path === "/api/lookup/cache-episode") {
+        const body = await bodyJson<{ id?: string }>(req, {});
+        const id = (body.id ?? "").trim();
+        if (!id) return err("id required", 400);
+        if (!library.get(id)) return err(`unknown entry: ${id}`, 404);
+
+        // Already an active per-episode job for this id? Report its total.
+        if (episodeJobActive(id)) {
+          return json({ started: false, total: episodeJobs.get(id)!.total });
+        }
+        // The GLOBAL cache-all run already covers every episode -> don't
+        // double-spend a batch. (Pure read of the global guard; never mutates it.)
+        if (cacheAllActive()) return json({ started: false, total: 0 });
+
+        const perEntry = await getEpisodeTargets(library);
+        const cachedKeys = getAllCachedKeys();
+        const uncached = uncachedEpisodeTargets(perEntry, id, cachedKeys);
+        if (uncached.length === 0) return json({ started: false, total: 0 });
+
+        const flexTargets: FlexTarget[] = uncached.map((t) => ({
+          word: t.word,
+          context: t.context,
+          source: t.source,
+          vocabKey: t.key,
+        }));
+
+        // Claim the slot so a concurrent POST for this id sees it running.
+        episodeJobs.set(id, {
+          entryId: id,
+          state: "running",
+          total: uncached.length,
+          done: 0,
+        });
+        await persistEpisodeJobs();
+        void logEvent("lookup.cache_episode_start", { entryId: id, total: uncached.length });
+        // Fire-and-forget: the flex runner drives done/total live and flips
+        // state to done/failed when finished.
+        void runEpisodeJob(id, flexTargets);
+        return json({ started: true, total: uncached.length });
       }
 
       // --- directory browser (root navigator in the Library view) ---
@@ -2112,7 +2693,9 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         // Selector: DB-direct read (works with Anki closed) → AnkiConnect.
         // `backend` is informational and stripped from the wire response.
         const { available, due, cards } = await reviewQueueAuto(scope);
-        return json({ scope, available, due, cards });
+        // Anki-style deck counts {new, learning, review} for the colored header.
+        const counts = await deckCountsAuto(scope);
+        return json({ scope, available, due, cards, counts });
       }
 
       if (req.method === "POST" && path === "/api/review/answer") {

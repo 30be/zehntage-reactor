@@ -22,7 +22,7 @@ import { matchFront } from "./progress.ts";
 import { wordKey } from "./TokenLine.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 import { loadAccents } from "./accent.ts";
-import { readBlacklist, writeBlacklist } from "./blacklist.ts";
+import { readBlacklist, markBlacklist } from "./blacklist.ts";
 import { freqRank, loadFreq } from "./freq.ts";
 import { tmHeartbeat, tmEvent, tmAnomaly } from "./telemetry.ts";
 import {
@@ -35,7 +35,8 @@ import { registerCommands } from "./commands.ts";
 import { rankPreStudy } from "./prestudy.ts";
 import { nextIPlusOne } from "./iplusone.ts";
 import { isJaLang } from "./lang.ts";
-import { readKnownWords } from "./coverage.ts";
+import { readKnownWords, markKnown } from "./coverage.ts";
+import { onVocabChanged } from "./sync.ts";
 import {
   cueTokensGet,
   cueTokensPut,
@@ -92,6 +93,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   // The stage wraps the video + subtitle overlay + lookup popup; fullscreen
   // targets THIS element so the overlays stay visible in fullscreen.
   const stageRef = useRef<HTMLDivElement>(null);
+  // The `.sub-overlay` block; measured so the popup never overlaps the subs.
+  const subOverlayRef = useRef<HTMLDivElement>(null);
 
   const [tracks, setTracks] = useState<SubTrackInfo[]>([]);
   const [primaryId, setPrimaryId] = useState<string>("");
@@ -194,13 +197,13 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   const toggleKnown = useCallback((key: string) => {
     setKnownWords((prev) => {
       const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
+      const wasKnown = next.has(key);
+      if (wasKnown) next.delete(key);
       else next.add(key);
-      try {
-        localStorage.setItem("zr.known", JSON.stringify([...next]));
-      } catch {
-        /* ignore */
-      }
+      // markKnown writes an OR-Set add/remove (tombstone-preserving) to storage
+      // and notifies the vocab bus — never a whole-array overwrite (the data-
+      // loss bug).
+      markKnown(key, !wasKnown);
       return next;
     });
   }, []);
@@ -217,11 +220,23 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   const toggleBlacklist = useCallback((key: string) => {
     setBlacklist((prev) => {
       const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
+      const wasBl = next.has(key);
+      if (wasBl) next.delete(key);
       else next.add(key);
-      writeBlacklist(next);
+      markBlacklist(key, !wasBl);
       return next;
     });
+  }, []);
+
+  // Re-read the vocab Sets from storage whenever they change underneath us —
+  // a remote sync apply OR a write from another tab/route (Fix 3). Without
+  // this the next local toggle would persist a stale set and drop those edits.
+  useEffect(() => {
+    const off = onVocabChanged((keys) => {
+      if (keys.includes("zr.known")) setKnownWords(readKnownWords());
+      if (keys.includes("zr.blacklist")) setBlacklist(readBlacklist());
+    });
+    return off;
   }, []);
 
   // --- pitch accent: lazy Kanjium map; settings toggle (default on) ---
@@ -1455,6 +1470,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   const {
     lookup,
     lookupLoading,
+    lookupErr,
     popupFront,
     popupMatchedFront,
     popupSaved,
@@ -1527,31 +1543,50 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     // coords (captured via getBoundingClientRect); subtract the stage rect to
     // convert to stage-local coords.
     const s = stage.getBoundingClientRect();
-    // Reserve space at the bottom of the stage for the subtitle line + vbar
-    // (~64px sub-overlay bottom + ~46px vbar ≈ 110px; use 120px to be safe).
-    // The popup must never extend into this zone so it doesn't cover the subs.
-    const subReserve = 120;
-    const safeBottom = s.bottom - subReserve;
+    // Fence the popup above the ACTUAL subtitle block: measure the live
+    // `.sub-overlay` top rather than guessing a fixed reserve, since the subs
+    // grow with --sub-scale, furigana and multi-line wrapping and would
+    // otherwise poke out above a fixed reserve and get covered. Fall back to a
+    // 120px reserve (~64px sub bottom + ~46px vbar) if the ref isn't ready.
+    const subRect = subOverlayRef.current?.getBoundingClientRect();
+    const safeBottom =
+      subRect && subRect.height > 0
+        ? subRect.top - margin
+        : s.bottom - 120;
     // Available room measured against the visible STAGE box (matches fullscreen
     // letterboxing as well as windowed layout).
     const spaceAbove = popup.y - s.top;
     const spaceBelow = safeBottom - popup.anchorBottom;
     const placeBelow = spaceAbove < height + margin && spaceBelow > spaceAbove;
 
-    // Anchor to the token: above by default (keeps the bottom subtitle clear),
-    // flip below only when there isn't room above.
-    let top = placeBelow ? popup.anchorBottom + margin : popup.y - height - margin;
-    // Clamp within the stage box (respecting subtitle safe zone), then convert
-    // to stage-local coords.
-    const topMin = s.top + margin;
-    // safeBottom is the lower fence: popup bottom must not exceed it.
-    const topMax = Math.max(topMin, safeBottom - height);
-    top = Math.max(topMin, Math.min(top, topMax)) - s.top;
+    // The two fences the panel must stay inside, in stage-local coords.
+    const topMin = margin;
+    // `safeBottom` is the lower fence: the panel's bottom edge must never cross
+    // it. Express it stage-local (distance from stage bottom up to safeBottom)
+    // so we can pin via CSS `bottom` rather than `top`.
+    const bottomMax = s.bottom - safeBottom; // stage-local gap below safeBottom
 
-    // Tiny-viewport: if the popup is taller than the available safe area, cap
-    // its max-height so it scrolls internally rather than spilling over the sub.
+    let style: React.CSSProperties;
+    if (placeBelow) {
+      // Below the word: pin the TOP. Growth here is downward, but spaceBelow was
+      // checked, and the maxHeight cap below prevents crossing safeBottom.
+      const top = Math.max(topMin, popup.anchorBottom + margin - s.top);
+      style = { top };
+    } else {
+      // Above the word: pin the BOTTOM at safeBottom (via CSS `bottom`). This is
+      // the fix for the overlap bug: the panel's height keeps growing after this
+      // effect runs (async notes / furigana reflow), and pinning `top` from a
+      // stale measured height let the extra height spill DOWN over the subtitle.
+      // Anchoring the bottom edge makes any later growth expand UPWARD instead,
+      // so the panel can never cross into the subtitle block.
+      style = { bottom: bottomMax };
+    }
+
+    // Always cap the panel to the room available between the top fence and
+    // safeBottom, so even unbounded content growth scrolls internally rather
+    // than overflowing either fence (covers tiny viewports AND late growth).
     const safeHeight = safeBottom - s.top - 2 * margin;
-    const cappedMaxHeight = height > safeHeight ? Math.max(80, safeHeight) : undefined;
+    const cappedMaxHeight = Math.max(80, safeHeight);
 
     let left = popup.x - width / 2;
     left = Math.max(s.left + margin, Math.min(left, s.right - width - margin)) - s.left;
@@ -1559,9 +1594,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     setPopupPos({
       position: "absolute",
       left,
-      top,
       visibility: "visible",
-      ...(cappedMaxHeight !== undefined ? { maxHeight: cappedMaxHeight, overflowY: "auto" } : {}),
+      maxHeight: cappedMaxHeight,
+      overflowY: "auto",
+      ...style,
     });
   }, [popup, lookup, lookupLoading, explain, explainLoading, explainErr, qa]);
 
@@ -1995,6 +2031,7 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           onClick={togglePlay}
         />
         <SubOverlay
+          subRef={subOverlayRef}
           subScale={subScale}
           cuesLoading={cuesLoading}
           primaryText={primaryText}
@@ -2124,6 +2161,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           onExplainRetry={() => setExplainReload((n) => n + 1)}
           lookup={lookup}
           lookupLoading={lookupLoading}
+          lookupErr={lookupErr}
+          onLookupRetry={() => void onReload()}
           pitchOn={pitchOn}
           accents={accents}
           freqMap={freqMap}

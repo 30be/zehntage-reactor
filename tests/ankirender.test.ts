@@ -227,6 +227,34 @@ describe("renderCard", () => {
     const { question } = renderCard(f, "<x>{{Front}}</x>", "", "");
     expect(question).toContain("<x>a {{b}} c</x>");
   });
+
+  // {{furigana:Field}} converts Anki's `kanji[reading]` bracket notation into
+  // <ruby> markup (NOT the raw field). Two real notetypes rely on it: Kaishi
+  // 1.5k (1487 cards: Word/Sentence Furigana) and Japanese Radicals (Japanese
+  // Name). Before the fix the reader showed the literal `私[わたし]` brackets.
+  test("furigana: filter converts kanji[reading] to <ruby>", () => {
+    const f = { Word: "私[わたし]" };
+    const { question } = renderCard(f, "{{furigana:Word}}", "", "");
+    expect(question).toContain("<ruby><rb>私</rb><rt>わたし</rt></ruby>");
+    // the literal bracket notation must NOT survive
+    expect(question).not.toContain("私[わたし]");
+  });
+
+  test("furigana: keeps surrounding HTML and handles multiple tokens", () => {
+    const f = { S: "<b>私[わたし]</b>は 日本[にほん]です" };
+    const { question } = renderCard(f, "{{furigana:S}}", "", "");
+    // the <b> wrapper is preserved; the kanji capture stops at '>'
+    expect(question).toContain("<b><ruby><rb>私</rb><rt>わたし</rt></ruby></b>");
+    expect(question).toContain("<ruby><rb>日本</rb><rt>にほん</rt></ruby>");
+    expect(question).not.toMatch(/\[にほん\]|\[わたし\]/);
+  });
+
+  test("furigana: leaves [sound:..] tokens untouched", () => {
+    const f = { S: "[sound:a.mp3]" };
+    const { question } = renderCard(f, "{{furigana:S}}", "", "");
+    expect(question).toContain("[sound:a.mp3]");
+    expect(question).not.toContain("<ruby");
+  });
 });
 
 // ---------------------------------------------------------------------------

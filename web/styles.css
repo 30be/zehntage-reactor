@@ -194,6 +194,14 @@ a { color: inherit; }
                      ~3.6:1 = fails AA); #b35454 is the hue intent, not a literal. */
   --learn-blue: oklch(0.46 0.15 250);
   --tok-unk: #9e2f3a;
+  /* Anki "due/review" green for the review header counters. AA on white. */
+  --review-green: #1a7a3a;
+}
+:root[data-theme="dark"] {
+  --review-green: #5dd07e;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] { --review-green: #5dd07e; }
 }
 .tok:hover { background: rgba(255,255,255,0.18); }
 /* unknown (not in deck, not marked known/blacklisted) */
@@ -318,6 +326,39 @@ textarea.prompt {
   display: flex;
   gap: 8px;
   margin-bottom: 14px;
+}
+
+/* ---- offline lookup-cache ("Cache all") progress ---- */
+.cache-progress {
+  position: relative;
+  height: 4px;
+  margin: -8px 0 10px;
+  border-radius: 999px;
+  background: var(--muted-bg);
+  overflow: hidden;
+}
+.cache-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--fg);
+  opacity: 0.55;
+  transition: width 0.4s ease;
+}
+.cache-progress.indeterminate .cache-progress-fill {
+  animation: cache-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes cache-shimmer {
+  0%, 100% { opacity: 0.18; }
+  50% { opacity: 0.5; }
+}
+.cache-progress-label {
+  display: block;
+  margin-top: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--fg);
+  opacity: 0.55;
 }
 
 /* ---- whisper streaming progress (Player controls) ---- */
@@ -2318,6 +2359,23 @@ textarea:focus-visible {
   line-height: 1.3;
   padding: 0 5px;
 }
+/* per-episode "Cache" button: subtle monochrome chip that sits in the lang
+   cluster. No color accent — ink edge on transparent, muted when inert. */
+.container .lib-langs .btn.ep-cache {
+  font-size: 10px;
+  line-height: 1.3;
+  padding: 1px 6px;
+  color: var(--muted);
+  background: transparent;
+  border-color: var(--border);
+}
+.container .lib-langs .btn.ep-cache:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--muted-bg);
+}
+.container .lib-langs .btn.ep-cache:disabled {
+  opacity: 0.6;
+}
 /* secondary meta (relPath · size · coverage), if still emitted, stays quiet */
 .container .lib-row .meta {
   flex: 1 1 auto;
@@ -2465,7 +2523,6 @@ textarea:focus-visible {
   gap: 12px;
   margin-bottom: 16px;
 }
-.review-count { font-weight: 800; font-variant-numeric: tabular-nums; }
 .review-src { font-size: 12px; }
 .review-card {
   border: 1px solid var(--border);
@@ -2684,17 +2741,27 @@ textarea:focus-visible {
 /* ---- review client + new-feature states ---- */
 
 /* The #/review flashcard client (web/ReviewRoute.tsx). It reuses some earlier
-   .review-* tokens (.review, .review-head, .review-count, .review-card,
-   .review-hint, .review-empty, .review-empty-sub, .review-actions) — those are
-   already styled above. The rules below cover the NEW class names that had no
-   styling: the scope toggle, header counters, Anki HTML panes, the prominent
-   grade-button row, and the empty/offline retry affordance. */
+   .review-* tokens (.review, .review-head, .review-card, .review-hint,
+   .review-empty, .review-empty-sub, .review-actions) — those are already styled
+   above. The rules below cover the Anki-style header counters, the Anki HTML
+   panes, the prominent grade-button row, and the empty/offline retry
+   affordance. */
 
-/* header counters: due/reviewed sit as dim tabular figures next to the count */
-.review-due,
-.review-reviewed {
-  font-size: 13px;
+/* Anki-style header counters: New (blue) + Learning (red) + Due (green), shown
+   as bold tabular figures separated by dim "+" signs. Mirrors Anki's deck
+   overview "46 + 0 + 214" line so the numbers read at a glance. */
+.review-counts {
+  font-weight: 800;
   font-variant-numeric: tabular-nums;
+  font-size: 16px;
+  letter-spacing: 0.01em;
+}
+.review-ct-new { color: var(--learn-blue); }
+.review-ct-learning { color: var(--tok-unk); }
+.review-ct-due { color: var(--review-green); }
+.review-ct-sep {
+  color: var(--muted);
+  font-weight: 600;
 }
 
 /* Anki-rendered question/answer HTML. Centered, comfortable reading size; we
@@ -2708,11 +2775,11 @@ textarea:focus-visible {
 .review-anki img { max-width: 100%; height: auto; }
 .review-anki audio { display: none; } /* audio is gesture-played, not shown */
 .review-question {
-  font-size: 28px;
+  font-size: 22px;
   font-weight: 600;
 }
 .review-answer {
-  font-size: 20px;
+  font-size: 17px;
   font-weight: 400;
   color: var(--fg);
 }
@@ -2762,15 +2829,6 @@ textarea:focus-visible {
 }
 .review-grade .review-good:hover { opacity: 0.9; }
 .review-grade .review-good kbd { opacity: 0.85; }
-/* dim "R replay" affordance trailing the grade buttons */
-.review-replay-hint {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  margin-left: auto;
-}
-.review-replay-hint kbd,
 .review-hint kbd {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 11px;
@@ -2812,6 +2870,9 @@ textarea:focus-visible {
   font-size: 13px;
   color: #fafafa;
 }
+/* word-lookup placeholder when the deck card / Gemini note is blank
+   (web/player/LookupPanel.tsx) — muted so it reads as an absence, not content. */
+.lookup .empty-note { opacity: .55; }
 
 /* Player: "no subtitles" overlay hint — dim, centered, non-intrusive, never
    intercepts clicks on the video below it (web/Player.tsx). */
@@ -2850,101 +2911,7 @@ textarea:focus-visible {
     width: 100%;
     min-height: 52px;
   }
-  .review-replay-hint { margin-left: 0; justify-content: center; }
 }
-
-/* ---- Two-column review mode ---- */
-
-/* .review-twocol: overrides the default single-column .review layout.
-   Sits at viewport height so neither column scrolls the page; the right
-   column scrolls internally when its content is tall. */
-.review-twocol {
-  display: flex;
-  flex-direction: row;
-  align-items: flex-start;
-  gap: 24px;
-  max-width: none;          /* lift the 640px cap set by .review */
-  height: calc(100vh - 200px); /* fill viewport minus real chrome: sticky sidebar top + .review-head ~40px + .review-card padding ~56px + grade row ~72px ≈ 200px */
-  overflow: hidden;
-}
-
-/* Left column: front sentence + revealed answer-main.
-   Flex ~1, allows the grade row to anchor at the bottom via column layout. */
-.review-col-left {
-  flex: 1 1 0;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  overflow-y: auto;
-}
-
-/* Right column: notes, context, example sentence, image.
-   Scrolls internally when content exceeds the viewport height. */
-.review-col-right {
-  flex: 1 1 0;
-  min-width: 0;
-  min-height: 0;
-  max-height: 100%;
-  overflow-y: auto;
-  padding-right: 4px; /* room for scrollbar without layout shift */
-}
-
-/* Narrow screens: collapse back to a single stacked column. */
-@media (max-width: 768px) {
-  .review-twocol {
-    flex-direction: column;
-    height: auto;
-    overflow: visible;
-    max-width: 640px;
-    margin: 0 auto;
-  }
-  .review-col-left,
-  .review-col-right {
-    width: 100%;
-    max-height: none;
-    overflow-y: visible;
-  }
-  .review-twocol-toggle { display: none; }
-}
-
-/* Two-column toggle button in .review-head — subtle, monochrome, matches
-   the .review-scope style so both controls read as quiet header affordances. */
-.review-twocol-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 13px;
-  font-family: inherit;
-  color: var(--muted);
-  background: none;
-  border: 1px solid transparent;
-  border-radius: 5px;
-  padding: 2px 6px;
-  cursor: pointer;
-  user-select: none;
-  white-space: nowrap;
-  transition: color 0.1s, border-color 0.1s;
-}
-.review-twocol-toggle:hover {
-  color: var(--fg);
-  border-color: var(--border);
-}
-.review-twocol-toggle.active {
-  color: var(--fg);
-  border-color: var(--border);
-  background: var(--muted-bg);
-}
-/* icon inside the toggle (e.g. an SVG or a Unicode glyph) */
-.review-twocol-toggle svg,
-.review-twocol-toggle .icon {
-  width: 14px;
-  height: 14px;
-  flex-shrink: 0;
-  opacity: 0.7;
-}
-.review-twocol-toggle input[type="checkbox"] { margin: 0; accent-color: var(--fg); }
 
 /* Error / error-banner for ReviewRoute. Dim, established-red text, small —
    consistent with .explain-err and .search-route-error treatments. */

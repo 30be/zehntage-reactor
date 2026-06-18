@@ -193,6 +193,52 @@ export interface RootInfo {
   count: number;
 }
 
+// --- offline lookup cache: precompute word-lookup notes for all unknown subtitle
+// words via a paid Gemini batch, stored persistently so hovers resolve instantly
+// and OFFLINE. Caches lookups only — never touches the Anki deck.
+export interface CacheAllEstimate {
+  wordCount: number; // words that WOULD be sent (not yet cached)
+  estCostUsd: number; // dollar estimate (float)
+  alreadyCached: number; // already in cache
+}
+
+export interface CacheAllStart {
+  started: boolean;
+  total: number;
+}
+
+export interface CacheAllStatus {
+  state:
+    | "idle"
+    | "pending"
+    | "running"
+    | "succeeded"
+    | "failed"
+    | "cancelled"
+    | "expired"
+    | "done";
+  total: number;
+  done: number;
+  costUsd: number;
+  error?: string;
+}
+
+// --- per-episode offline lookup cache: same paid-Gemini-batch precompute as
+// CacheAll, but scoped to a single library entry. Status reports the true
+// library-wide unique new-word count (not the inflated per-episode sum), whether
+// the global Cache-all is running, and a per-entry {total, cached, state} map.
+export interface CacheEpisodeStatus {
+  uniqueNewWords: number; // true unique count across the library (de-duped)
+  globalActive: boolean; // Cache-all is caching everything right now
+  episodes: {
+    [entryId: string]: {
+      total: number; // unknown words in this episode
+      cached: number; // of those, already cached
+      state: "idle" | "pending" | "running" | "done" | "failed";
+    };
+  };
+}
+
 export interface DaySummary {
   date: string; // "YYYY-MM-DD"
   playSec: number;
@@ -357,6 +403,9 @@ export interface ReviewQueueResponse {
   available: boolean;
   due: number;
   cards: ReviewCard[];
+  // Anki-style deck counts {new, learning, review} for the colored header
+  // (New + Learning + Due). Optional for backward-compat with older servers.
+  counts?: { new: number; learning: number; review: number };
 }
 
 export const api = {
@@ -372,6 +421,8 @@ export const api = {
     jget<Cue[]>(`/api/subs/${id}/${encodeURIComponent(trackId)}`),
   lookup: (p: {
     word: string;
+    /** homograph-aware identity (wordKey(tok)); the persistent cache key */
+    vocabKey?: string;
     context: string;
     source: string;
     /** matching known-language (RU) cue text, for disambiguation */
@@ -381,6 +432,26 @@ export const api = {
     withFrame?: boolean;
     noCache?: boolean;
   }) => jpost<WordLookup>("/api/lookup", p),
+  // Cache-ONLY lookup: returns the persistent Gemini-cache entry if present,
+  // else null on a 204 miss — NEVER triggers a (paid) Gemini call. In-deck word
+  // popups use this to prefer a cached gloss before falling back to the card.
+  lookupCached: async (p: {
+    word: string;
+    vocabKey?: string;
+    context: string;
+    source: string;
+  }): Promise<WordLookup | null> => {
+    const r = await fetch("/api/lookup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...p, cachedOnly: true }),
+    });
+    if (r.status === 204) return null; // cache miss — no body
+    if (!r.ok) throw new ApiError(r.status, `/api/lookup → ${r.status}`);
+    const body = (await r.text()).trim();
+    if (!body || body === "null") return null;
+    return JSON.parse(body) as WordLookup;
+  },
   explain: (p: {
     sentence: string;
     secondary: string;
@@ -449,6 +520,20 @@ export const api = {
   batchSubtitle: () => jpost<BatchStartResult>("/api/batch/subtitle", {}),
   batchTranslate: () => jpost<BatchStartResult>("/api/batch/translate", {}),
   batchStatus: () => jget<BatchStatus>("/api/batch/status"),
+  // Offline lookup cache: estimate cost, kick off the paid Gemini batch, poll
+  // its status. Caches word lookups only — does NOT add Anki cards.
+  cacheAllEstimate: () =>
+    jget<CacheAllEstimate>("/api/lookup/cache-all/estimate"),
+  cacheAllStart: () => jpost<CacheAllStart>("/api/lookup/cache-all", {}),
+  cacheAllStatus: () => jget<CacheAllStatus>("/api/lookup/cache-all/status"),
+  // Per-episode variant: poll status (incl. true unique new-word count) and kick
+  // off caching for a single entry.
+  cacheEpisodeStatus: () =>
+    jget<CacheEpisodeStatus>("/api/lookup/cache-episode/status"),
+  cacheEpisode: (id: string) =>
+    jpost<{ started: boolean; total: number }>("/api/lookup/cache-episode", {
+      id,
+    }),
   condense: (id: string) =>
     jpost<{ ok: boolean; path: string; duration: number }>(
       `/api/condense/${id}`,

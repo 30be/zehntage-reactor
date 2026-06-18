@@ -254,6 +254,12 @@ function renderSide(
   s = s.replace(/\{\{\s*cloze:\s*([^}]+?)\s*\}\}/g, (_m, name: string) =>
     stripCloze(fields[name.trim()] ?? ""),
   );
+  // 5b. furigana: convert Anki's `kanji[reading]` notation to <ruby> markup.
+  //     Real notetypes (Kaishi 1.5k, Japanese Radicals) use this; without it the
+  //     reader shows literal `私[わたし]` brackets instead of furigana ruby.
+  s = s.replace(/\{\{\s*furigana:\s*([^}]+?)\s*\}\}/g, (_m, name: string) =>
+    furiganaFilter(fields[name.trim()] ?? ""),
+  );
   // 6. Strip any remaining filter chains down to the bare field, then substitute
   //    known fields last. Iterate over actual field names so stray "{{" in
   //    values can't break parsing.
@@ -269,6 +275,24 @@ function renderSide(
 /** Strip Anki cloze markers `{{c1::text::hint}}` -> `text`. */
 function stripCloze(s: string): string {
   return s.replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, "$1");
+}
+
+/**
+ * Anki's `{{furigana:..}}` filter: convert `kanji[reading]` bracket notation to
+ * `<ruby><rb>kanji</rb><rt>reading</rt></ruby>`. Mirrors Anki's
+ * template_filters.rs: `&nbsp;` is normalized to a space, the match is
+ * ` ?([^ >]+?)\[(.+?)\]` (the optional leading space is consumed, and the base
+ * capture stops at `>` so it never swallows an HTML tag), and a `[sound:..]`
+ * token is left untouched (it is media, not a reading).
+ */
+function furiganaFilter(s: string): string {
+  return s
+    .replace(/&nbsp;/g, " ")
+    .replace(/ ?([^ >]+?)\[(.+?)\]/g, (m, base: string, reading: string) =>
+      reading.startsWith("sound:")
+        ? m
+        : `<ruby><rb>${base}</rb><rt>${reading}</rt></ruby>`,
+    );
 }
 
 /**

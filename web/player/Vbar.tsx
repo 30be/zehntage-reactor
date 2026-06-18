@@ -95,12 +95,20 @@ export function Vbar({
       if (!ctx) return;
       ctx.fillStyle = "rgba(0,0,0,0.6)";
       ctx.fillRect(0, 0, c.width, c.height);
-      const px = c.width / Math.max(1, bins.length);
+      const w = c.width;
+      const n = Math.max(1, bins.length);
       for (let b = 0; b < bins.length; b++) {
         const a = heatAlpha(bins[b]!);
         if (a <= 0.01) continue;
+        // Snap each bin to integer pixel columns so adjacent lit bins tile
+        // seamlessly. Drawing at a fractional x (b*px) with a rounded width
+        // anti-aliases every rect across two columns at partial alpha, leaving
+        // sub-pixel slivers between bins — the "stringy" look. x0..x1 from
+        // rounded edges gives gapless, full-opacity bars.
+        const x0 = Math.round((b * w) / n);
+        const x1 = Math.round(((b + 1) * w) / n);
         ctx.fillStyle = `rgba(255,255,255,${a.toFixed(3)})`;
-        ctx.fillRect(b * px, 0, Math.ceil(px), c.height);
+        ctx.fillRect(x0, 0, Math.max(1, x1 - x0), c.height);
       }
     };
     draw();
@@ -265,6 +273,24 @@ export function Vbar({
       .map((t) => (t / videoDuration) * 100);
   }, [dueCueIndices, displayCues, videoDuration]);
 
+  // Accessibility: the player owns GLOBAL hotkeys (space = play/pause, f =
+  // fullscreen, ↑/↓ = volume). A focused <button>/<input> would otherwise
+  // swallow space/Enter/arrows as native activation and hijack those hotkeys —
+  // which is why these controls used to be tabIndex={-1} (keyboard-unreachable).
+  // Instead we keep them in the tab order but redirect space/Enter to the
+  // button's own click (so focus + space still works as expected for THAT
+  // button) and stop the native key from also bubbling to the global handler.
+  const onBtnKey = useCallback(
+    (e: React.KeyboardEvent<HTMLButtonElement>) => {
+      if (e.key === " " || e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        e.currentTarget.click();
+      }
+    },
+    [],
+  );
+
   const hasJa = tracks.some((t) => isJaLang(t.lang));
   // Only a GENERATED (synced) RU track hides the Translate button; external or
   // embedded RU tracks are often out of sync with the JA track.
@@ -343,7 +369,7 @@ export function Vbar({
       >
         <button
           className="vbar-btn vbar-play"
-          tabIndex={-1}
+          onKeyDown={onBtnKey}
           onClick={togglePlay}
           title={isPaused ? "Play (space)" : "Pause (space)"}
           aria-label={isPaused ? "Play" : "Pause"}
@@ -357,7 +383,7 @@ export function Vbar({
         <button
           ref={ccBtnRef}
           className={`vbar-btn vbar-cc${ccOpen ? " on" : ""}`}
-          tabIndex={-1}
+          onKeyDown={onBtnKey}
           onClick={() => setCcOpen((o) => !o)}
           title="Subtitle tracks"
           aria-label="Subtitle tracks"
@@ -366,7 +392,7 @@ export function Vbar({
         </button>
         <button
           className="vbar-btn vbar-mute"
-          tabIndex={-1}
+          onKeyDown={onBtnKey}
           onClick={() => {
             const v = videoRef.current;
             if (v) v.muted = !v.muted;
@@ -383,7 +409,6 @@ export function Vbar({
           max={1}
           step={0.05}
           value={muted ? 0 : volume}
-          tabIndex={-1}
           aria-label="Volume"
           title="Volume (↑/↓)"
           onChange={(e) => {
@@ -395,7 +420,7 @@ export function Vbar({
         />
         <button
           className="vbar-btn vbar-fs"
-          tabIndex={-1}
+          onKeyDown={onBtnKey}
           onClick={toggleFullscreen}
           title="Fullscreen (f)"
           aria-label="Fullscreen"

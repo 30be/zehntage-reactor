@@ -121,6 +121,12 @@ export function repairHole(
   return capped.length > 0 ? capped : [clipped[0]!];
 }
 
+/** Max finished (done/error/canceled) jobs retained in the jobs Map. Older
+ * finished jobs past this cap are pruned so a long-lived server doesn't grow the
+ * Map without bound. Running/queued jobs and any job with attached SSE listeners
+ * are never counted against or evicted by this cap. */
+const MAX_FINISHED_JOBS = 100;
+
 class WhisperQueue {
   private jobs = new Map<string, WhisperJob>();
   private queue: WhisperJob[] = [];
@@ -194,6 +200,31 @@ class WhisperQueue {
     job.status = status;
     if (error !== undefined) job.error = error;
     this.emit(job, error !== undefined ? { type: "status", status, error } : { type: "status", status });
+    if (status === "done" || status === "error" || status === "canceled") {
+      this.pruneFinished();
+    }
+  }
+
+  /** Evict the oldest evictable finished jobs so the Map keeps at most
+   * MAX_FINISHED_JOBS of them. A job is evictable only if it is in a terminal
+   * state (done/error/canceled), is not the currently running job, and has no
+   * attached listeners (an attached listener means an SSE client is still
+   * streaming/replaying it). Running/queued jobs and listened-to jobs are never
+   * counted toward the cap nor removed, so in-flight work and active streams are
+   * untouched. Map iteration order is insertion order, so the first evictable
+   * matches we find are the oldest. */
+  private pruneFinished(): void {
+    const evictable: string[] = [];
+    for (const [id, j] of this.jobs) {
+      const terminal = j.status === "done" || j.status === "error" || j.status === "canceled";
+      if (terminal && j !== this.running && j.listeners.size === 0) {
+        evictable.push(id);
+      }
+    }
+    const overflow = evictable.length - MAX_FINISHED_JOBS;
+    for (let i = 0; i < overflow; i++) {
+      this.jobs.delete(evictable[i]!);
+    }
   }
 
   private async pump(): Promise<void> {

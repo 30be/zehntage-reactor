@@ -15,7 +15,7 @@ import { Search } from "./SearchRoute.tsx";
 import { Review } from "./ReviewRoute.tsx";
 import { Settings } from "./SettingsRoute.tsx";
 import { Palette } from "./Palette.tsx";
-import { startSync } from "./sync.ts";
+import { startSync, emitVocabChanged } from "./sync.ts";
 import { tmEvent, tmStart } from "./telemetry.ts";
 import {
   CardsIcon,
@@ -104,8 +104,14 @@ export function App() {
 
   // zr.* localStorage <-> server state sync (web/sync.ts contract): pull on
   // start, then push changed keys debounced. Once per app lifetime.
+  // onRemoteApplied re-broadcasts the changed set keys on the vocab bus so the
+  // Player/ReadRoute Sets re-read from storage (Fix 3) — without this a remote
+  // apply would leave those Sets stale and the next local toggle would ship a
+  // stale value back, re-losing the remote members.
   useEffect(() => {
-    const handle = startSync();
+    const handle = startSync(undefined, undefined, (keys) =>
+      emitVocabChanged(keys),
+    );
     return () => handle.stop();
   }, []);
 

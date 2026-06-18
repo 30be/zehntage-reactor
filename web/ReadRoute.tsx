@@ -28,11 +28,12 @@ import { refreshAnkiWords, subscribeAnkiWords } from "./ankicache.ts";
 import type { AnkiWordsResponse } from "./api.ts";
 import { getTokenizer, type KToken } from "./tokenizer.ts";
 import { accentOf, loadAccents } from "./accent.ts";
-import { readBlacklist, writeBlacklist } from "./blacklist.ts";
+import { readBlacklist, markBlacklist } from "./blacklist.ts";
 import { isTextInput } from "./keys.ts";
 import { tmEvent } from "./telemetry.ts";
 import { isJaLang } from "./lang.ts";
-import { CACHE_PREFIX, readKnownWords } from "./coverage.ts";
+import { CACHE_PREFIX, readKnownWords, markKnown } from "./coverage.ts";
+import { onVocabChanged } from "./sync.ts";
 import { deckCardToLookup, type QaItem } from "./player/shared.ts";
 
 interface ReadPopup {
@@ -214,13 +215,12 @@ export function ReadRoute({
   const toggleKnown = useCallback((key: string) => {
     setKnownWords((prev) => {
       const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
+      const wasKnown = next.has(key);
+      if (wasKnown) next.delete(key);
       else next.add(key);
-      try {
-        localStorage.setItem("zr.known", JSON.stringify([...next]));
-      } catch {
-        /* ignore */
-      }
+      // OR-Set add/remove (tombstone-preserving) + vocab-bus notify, never a
+      // whole-array overwrite (the sync data-loss bug).
+      markKnown(key, !wasKnown);
       return next;
     });
   }, []);
@@ -228,11 +228,23 @@ export function ReadRoute({
   const toggleBlacklist = useCallback((key: string) => {
     setBlacklist((prev) => {
       const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
+      const wasBl = next.has(key);
+      if (wasBl) next.delete(key);
       else next.add(key);
-      writeBlacklist(next);
+      markBlacklist(key, !wasBl);
       return next;
     });
+  }, []);
+
+  // Repaint when the vocab Sets change underneath us (remote sync apply or a
+  // write from another tab/route) — Fix 3. Keeps the next toggle from shipping
+  // a stale set back and re-losing remote members.
+  useEffect(() => {
+    const off = onVocabChanged((keys) => {
+      if (keys.includes("zr.known")) setKnownWords(readKnownWords());
+      if (keys.includes("zr.blacklist")) setBlacklist(readBlacklist());
+    });
+    return off;
   }, []);
 
   // close on Esc / outside click; k/x toggle known/blacklist for the popup
@@ -292,9 +304,42 @@ export function ReadRoute({
     );
     const deckCard = matched ? deckCardsRef.current.get(matched) : undefined;
     if (deckCard) {
-      setLookup(deckCardToLookup(deckCard));
-      setLookupLoading(false);
-      return;
+      // a cached/card answer already on screen stays — the wordIndex dep must
+      // not refire the cache fetch on every deck refresh.
+      if (lookupArrivedRef.current) return;
+      // In-deck word: PREFER a cached Gemini gloss (richer than the bare card,
+      // whose "back" is often just the kana reading). cachedOnly NEVER calls
+      // Gemini — on a miss we fall back to the card.
+      let cancelled = false;
+      const card = deckCard;
+      const fallback = () => {
+        if (!cancelled) {
+          setLookup(deckCardToLookup(card));
+          setLookupLoading(false);
+        }
+      };
+      setLookupLoading(true);
+      void api
+        .lookupCached({
+          word: popup.surface,
+          vocabKey: popup.vocabKey,
+          context: popup.context,
+          source: entry?.name ?? "",
+        })
+        .then((cached) => {
+          if (cancelled) return;
+          lookupArrivedRef.current = true;
+          if (cached) {
+            setLookup(cached);
+            setLookupLoading(false);
+          } else {
+            fallback();
+          }
+        })
+        .catch(fallback);
+      return () => {
+        cancelled = true;
+      };
     }
     // a Gemini answer already on screen for this popup target stays — the
     // wordIndex dep must not refire the network call on every deck refresh
@@ -609,6 +654,7 @@ export function ReadRoute({
         onJump={onJump}
         onCursorActivate={onCursorActivate}
         knownPct={knownPct}
+        popupOpen={popup != null}
       />
       {popup && (
         <div
