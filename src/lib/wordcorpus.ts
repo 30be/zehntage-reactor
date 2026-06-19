@@ -138,6 +138,14 @@ export interface CollectOptions {
   known: ReadonlySet<string>;
   /** Optional pre-built server tokenizer (else getServerTokenizer()). */
   tokenize?: Tokenize;
+  /**
+   * For the offline CACHE enumeration (not coverage): when true, DO NOT skip
+   * words already carried by a deck card — every distinct subtitle word (minus
+   * known/blacklist and punctuation) becomes a lookup target so each gets a full
+   * Gemini gloss. Coverage / "new words" callers MUST leave this false so the
+   * unknown-word semantics (not-in-deck-only) are unchanged.
+   */
+  includeDeck?: boolean;
 }
 
 /**
@@ -173,7 +181,9 @@ export async function collectUnknownLookupTargets(
         const key = vocabKey(t);
         if (seen.has(key)) continue;
         if (opts.known.has(key)) continue;
-        if (deckHasCard(fronts, t)) continue;
+        // Coverage path drops in-deck words; the cache path (includeDeck) keeps
+        // them so every subtitle word gets a full cached gloss.
+        if (!opts.includeDeck && deckHasCard(fronts, t)) continue;
         seen.add(key);
         out.push({
           word: lookupWord(t),

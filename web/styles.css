@@ -2870,9 +2870,6 @@ textarea:focus-visible {
   font-size: 13px;
   color: #fafafa;
 }
-/* word-lookup placeholder when the deck card / Gemini note is blank
-   (web/player/LookupPanel.tsx) — muted so it reads as an absence, not content. */
-.lookup .empty-note { opacity: .55; }
 
 /* Player: "no subtitles" overlay hint — dim, centered, non-intrusive, never
    intercepts clicks on the video below it (web/Player.tsx). */

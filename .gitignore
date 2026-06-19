@@ -36,3 +36,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Finder (MacOS) folder config
 .DS_Store
+diag-*.ts
+probe-*.ts
+inspect_*.ts
+zr-probe*.ts

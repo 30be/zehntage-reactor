@@ -118,6 +118,35 @@ describe("collectUnknownLookupTargets", () => {
     expect(words).toContain("水");
   });
 
+  test("includeDeck keeps in-deck words as cache targets (FIX 1)", async () => {
+    // Same input as the deck-filter test, but includeDeck:true (the cache path).
+    // The in-deck word 猫 is now a target so it gets a full Gemini gloss; known
+    // words and punctuation are STILL excluded.
+    const opts = {
+      entries: [entry("ep1")],
+      cuesFor: cuesOf({ ep1: [{ text: "猫が水を飲む" } as Cue] }),
+      deckFronts: ["猫 [ねこ]"], // already mined
+      known: new Set(["が|が|助詞", "を|を|助詞"]),
+      tokenize,
+    };
+    const cover = await collectUnknownLookupTargets(opts); // coverage: drops 猫
+    const cache = await collectUnknownLookupTargets({ ...opts, includeDeck: true });
+    const coverWords = cover.map((t) => t.word);
+    const cacheWords = cache.map((t) => t.word);
+    // coverage semantics unchanged: 猫 dropped
+    expect(coverWords).not.toContain("猫");
+    // cache semantics: 猫 INCLUDED, plus everything coverage had
+    expect(cacheWords).toContain("猫");
+    expect(cacheWords).toContain("水");
+    expect(cacheWords).toContain("飲む");
+    // still excludes known particles + punctuation
+    expect(cacheWords).not.toContain("が");
+    expect(cacheWords).not.toContain("を");
+    // includeDeck is a strict superset of coverage here (only added the in-deck word)
+    for (const w of coverWords) expect(cacheWords).toContain(w);
+    expect(cacheWords.length).toBe(coverWords.length + 1);
+  });
+
   test("verb lookup word uses dictionary (basic) form", async () => {
     const targets = await collectUnknownLookupTargets({
       entries: [entry("ep1")],

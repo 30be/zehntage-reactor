@@ -71,6 +71,7 @@ import {
   getCachedLookup,
   putCachedLookup,
   getAllCachedKeys,
+  cacheKey,
 } from "../lib/lookupcache.ts";
 // Cost estimation reuses the batch-tier rates: the FLEX inference tier bills at
 // the SAME 50%-off rate as the Batch API, so estimateBatchCostUsd is correct for
@@ -463,7 +464,16 @@ async function enumerateLookupTargets(library: Library): Promise<LookupTarget[]>
   } catch {
     // malformed state — treat as nothing known (worst case: a few extra lookups)
   }
-  return collectUnknownLookupTargets({ entries: library.list(), cuesFor, deckFronts, known });
+  // includeDeck: the offline cache covers EVERY subtitle word (in-deck or not)
+  // so each gets a full Gemini gloss. This is the cache target set, NOT the
+  // coverage / "new words" set (which stays not-in-deck-only).
+  return collectUnknownLookupTargets({
+    entries: library.list(),
+    cuesFor,
+    deckFronts,
+    known,
+    includeDeck: true,
+  });
 }
 
 /** Targets not yet present in the offline cache (these are what we'd actually send). */
@@ -589,9 +599,16 @@ async function persistEpisodeJobs(): Promise<void> {
 // keyed by a cheap signature (currentRoot + deck-front count + known-set size):
 // a re-root, a new mined card, or a known/blacklist change all shift it and
 // force a lazy recompute on the next status request.
+// Two memo slots: one for the not-in-deck "new words" set (coverage / the
+// uniqueNewWords badge) and one for the in-deck-INCLUSIVE cache set (per-episode
+// "Cache" parity with cache-all). Keyed by the same cheap signature.
 let episodeTargetsCache: {
   sig: string;
   perEntry: Map<string, Map<string, LookupTarget>>; // entryId -> (vocabKey -> target)
+} | null = null;
+let episodeTargetsCacheDeck: {
+  sig: string;
+  perEntry: Map<string, Map<string, LookupTarget>>;
 } | null = null;
 
 /** Cheap signature; any change invalidates the memoized target sets. */
@@ -626,10 +643,12 @@ async function episodeTargetsSignature(library: Library): Promise<string> {
  */
 async function getEpisodeTargets(
   library: Library,
+  includeDeck = false,
 ): Promise<Map<string, Map<string, LookupTarget>>> {
   const sig = await episodeTargetsSignature(library);
-  if (episodeTargetsCache && episodeTargetsCache.sig === sig) {
-    return episodeTargetsCache.perEntry;
+  const slot = includeDeck ? episodeTargetsCacheDeck : episodeTargetsCache;
+  if (slot && slot.sig === sig) {
+    return slot.perEntry;
   }
 
   const cuesFor = async (e: LibraryEntry): Promise<Cue[] | null> => {
@@ -660,13 +679,15 @@ async function getEpisodeTargets(
       cuesFor,
       deckFronts,
       known,
+      includeDeck,
     });
     const m = new Map<string, LookupTarget>();
     for (const t of targets) m.set(t.key, t); // key == vocabKey, already deduped
     perEntry.set(entry.id, m);
   }
 
-  episodeTargetsCache = { sig, perEntry };
+  if (includeDeck) episodeTargetsCacheDeck = { sig, perEntry };
+  else episodeTargetsCache = { sig, perEntry };
   return perEntry;
 }
 
@@ -679,7 +700,10 @@ function uncachedEpisodeTargets(
   const m = perEntry.get(entryId);
   if (!m) return [];
   const out: LookupTarget[] = [];
-  for (const t of m.values()) if (!cachedKeys.has(t.key)) out.push(t);
+  // cacheKey(t.key) trims the query key the SAME way putCachedLookup/getCachedLookup
+  // do, so a target whose vocabKey has stray whitespace (e.g. the OOV "～　" with a
+  // trailing U+3000) tests cached the same on every read path (cache-all parity).
+  for (const t of m.values()) if (!cachedKeys.has(cacheKey(t.key))) out.push(t);
   return out;
 }
 
@@ -2183,18 +2207,27 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
       // Status poll (UI polls ~every 3s, so this must be cheap): memoized
       // per-episode target sets intersected in-memory against ONE getAllCachedKeys.
       if (req.method === "GET" && path === "/api/lookup/cache-episode/status") {
-        const perEntry = await getEpisodeTargets(library);
+        // Per-episode total/cached drives the "Cache"/"Cached" button and MUST
+        // match cache-all -> use the in-deck-INCLUSIVE cache set.
+        const perEntryCache = await getEpisodeTargets(library, true);
+        // uniqueNewWords is the library-wide "new words" count (coverage
+        // semantics) -> use the not-in-deck set, unchanged from before.
+        const perEntryNew = await getEpisodeTargets(library, false);
         const cachedKeys = getAllCachedKeys();
         const uniqueNew = new Set<string>();
+        for (const targets of perEntryNew.values()) {
+          for (const k of targets.keys()) uniqueNew.add(k); // dedup -> library-wide
+        }
         const episodes: Record<
           string,
           { total: number; cached: number; state: EpisodeCacheState }
         > = {};
-        for (const [entryId, targets] of perEntry) {
+        for (const [entryId, targets] of perEntryCache) {
           let cached = 0;
           for (const k of targets.keys()) {
-            uniqueNew.add(k); // dedup across episodes -> library-wide unique
-            if (cachedKeys.has(k)) cached++;
+            // cacheKey(k) trims the same way the writer does -> parity with
+            // getCachedLookup (the cache-all read path).
+            if (cachedKeys.has(cacheKey(k))) cached++;
           }
           const job = episodeJobs.get(entryId);
           episodes[entryId] = {
@@ -2225,7 +2258,9 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         // double-spend a batch. (Pure read of the global guard; never mutates it.)
         if (cacheAllActive()) return json({ started: false, total: 0 });
 
-        const perEntry = await getEpisodeTargets(library);
+        // In-deck-INCLUSIVE cache set so the per-episode batch caches the SAME
+        // words the status button counts (and that cache-all would cover).
+        const perEntry = await getEpisodeTargets(library, true);
         const cachedKeys = getAllCachedKeys();
         const uncached = uncachedEpisodeTargets(perEntry, id, cachedKeys);
         if (uncached.length === 0) return json({ started: false, total: 0 });

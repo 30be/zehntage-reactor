@@ -226,15 +226,8 @@ export function LookupPanel({
           {lookup && (
             <>
               <div className="translation">{lookup.translation}</div>
-              {lookup.notes?.trim() ? (
+              {lookup.notes?.trim() && (
                 <div className="notes">{lookup.notes}</div>
-              ) : (
-                <div
-                  className="notes empty-note"
-                  title="No note — press g to regenerate"
-                >
-                  — no note (press g)
-                </div>
               )}
             </>
           )}
