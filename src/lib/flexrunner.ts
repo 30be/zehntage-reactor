@@ -40,6 +40,10 @@ export interface FlexRunOptions {
   onProgress?: (done: number, total: number) => void;
   /** Optional cooperative cancel: checked before each item is started. */
   shouldStop?: () => boolean;
+  /** DI seam (tests): the lookup call. Defaults to the real flex Gemini call. */
+  lookup?: typeof lookupWordFlex;
+  /** DI seam (tests): the cache write. Defaults to the real putCachedLookup. */
+  putCache?: typeof putCachedLookup;
 }
 
 export interface FlexRunResult {
@@ -73,6 +77,8 @@ export async function runFlexLookups(
   const total = targets.length;
   const concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
   const { onProgress, shouldStop } = opts;
+  const lookup = opts.lookup ?? lookupWordFlex;
+  const putCache = opts.putCache ?? putCachedLookup;
 
   let next = 0; // index of the next target to claim
   let done = 0; // settled (success + failure)
@@ -90,10 +96,10 @@ export async function runFlexLookups(
       if (i >= total) return;
       const t = targets[i]!;
       try {
-        const result = await lookupWordFlex(t.word, t.context, t.source);
+        const result = await lookup(t.word, t.context, t.source);
         // Write each result the moment it lands — survives a mid-run crash and
         // lets the per-episode/status polls see cache growth immediately.
-        putCachedLookup(t.vocabKey, result, t.word, t.context);
+        putCache(t.vocabKey, result, t.word, t.context);
         succeeded++;
       } catch {
         // Tolerate per-item failure: count it, skip it, keep going. The bulk

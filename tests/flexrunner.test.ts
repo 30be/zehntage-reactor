@@ -1,51 +1,38 @@
-import { describe, expect, test, mock, beforeEach, afterAll } from "bun:test";
+import { describe, expect, test, beforeEach } from "bun:test";
+import type { WordLookup } from "../src/lib/gemini.ts";
+import { runFlexLookups } from "../src/lib/flexrunner.ts";
 
-// Capture the GENUINE modules before the stubs below replace them in the global
-// registry. Needed to restore them in afterAll (see the note there).
-import * as realGemini from "../src/lib/gemini.ts";
-import * as realLookupcache from "../src/lib/lookupcache.ts";
-
-// Stub the two collaborators so the runner test is sandbox-safe (no network, no
-// sqlite write) and deterministic. We control lookupWordFlex's per-call outcome
+// DI stubs (NO module mocking): runFlexLookups exposes `lookup` and `putCache`
+// seams, so we inject deterministic, sandbox-safe (no network, no sqlite)
+// collaborators WITHOUT a global mock.module — which would leak the stubs into
+// every other test file loaded before this one's teardown (it poisoned
+// cache-enum-parity's real putCachedLookup). We control each lookup's outcome
 // and record every cache write.
 const calls: string[] = [];
 const written: Array<{ vocabKey: string; word: string }> = [];
-// vocabKey -> behavior: "ok" | "fail" | a delay in ms (still ok)
-let behavior: (vocabKey: string) => "ok" | "fail" = () => "ok";
+// word -> behavior: "ok" | "fail"
+let behavior: (word: string) => "ok" | "fail" = () => "ok";
 let inFlight = 0;
 let maxInFlight = 0;
 
-mock.module("../src/lib/gemini.ts", () => ({
-  lookupWordFlex: async (word: string, _ctx: string, _src: string) => {
-    inFlight++;
-    maxInFlight = Math.max(maxInFlight, inFlight);
-    calls.push(word);
-    await new Promise((r) => setTimeout(r, 5));
-    inFlight--;
-    const b = behavior(word);
-    if (b === "fail") throw new Error(`boom ${word}`);
-    return { reading: "r", translation: "t", notes: "n", context: "c" };
-  },
-}));
-mock.module("../src/lib/lookupcache.ts", () => ({
-  putCachedLookup: (vocabKey: string, _result: unknown, word: string) => {
-    written.push({ vocabKey, word });
-  },
-}));
-
-const { runFlexLookups } = await import("../src/lib/flexrunner.ts");
-
-// mock.module is GLOBAL and leaks across test files (bun runs them in one
-// process). mock.restore() does NOT undo mock.module() (it only resets
-// spies/mock fns), so the gemini/lookupcache stubs above would poison every
-// later file that imports the real modules (e.g. lookupcache.test.ts loses
-// getAllCachedKeys and getCachedLookup). Re-mock each module back to its REAL
-// implementation so the registry is whole again for the rest of the suite.
-afterAll(() => {
-  mock.module("../src/lib/gemini.ts", () => realGemini);
-  mock.module("../src/lib/lookupcache.ts", () => realLookupcache);
-  mock.restore();
-});
+const lookupStub = async (
+  word: string,
+  _ctx: string,
+  _src: string,
+): Promise<WordLookup> => {
+  inFlight++;
+  maxInFlight = Math.max(maxInFlight, inFlight);
+  calls.push(word);
+  await new Promise((r) => setTimeout(r, 5));
+  inFlight--;
+  if (behavior(word) === "fail") throw new Error(`boom ${word}`);
+  return { reading: "r", translation: "t", notes: "n", context: "c" };
+};
+const putStub = (vocabKey: string, _result: WordLookup, word = ""): void => {
+  written.push({ vocabKey, word });
+};
+// Inject both seams into every run.
+const di = { lookup: lookupStub, putCache: putStub };
 
 function mkTargets(n: number) {
   return Array.from({ length: n }, (_, i) => ({
@@ -68,6 +55,7 @@ describe("runFlexLookups", () => {
   test("writes every successful result to the cache and reports counts", async () => {
     const progress: Array<[number, number]> = [];
     const res = await runFlexLookups(mkTargets(7), {
+      ...di,
       concurrency: 3,
       onProgress: (d, t) => progress.push([d, t]),
     });
@@ -82,14 +70,14 @@ describe("runFlexLookups", () => {
   });
 
   test("respects the concurrency cap (pool size)", async () => {
-    await runFlexLookups(mkTargets(20), { concurrency: 4 });
+    await runFlexLookups(mkTargets(20), { ...di, concurrency: 4 });
     expect(maxInFlight).toBeLessThanOrEqual(4);
     expect(maxInFlight).toBeGreaterThan(1); // actually ran in parallel
   });
 
   test("tolerates per-item failures without aborting", async () => {
-    behavior = (vk) => (vk === "w2" || vk === "w5" ? "fail" : "ok");
-    const res = await runFlexLookups(mkTargets(6), { concurrency: 2 });
+    behavior = (w) => (w === "w2" || w === "w5" ? "fail" : "ok");
+    const res = await runFlexLookups(mkTargets(6), { ...di, concurrency: 2 });
     expect(res.total).toBe(6);
     expect(res.failed).toBe(2);
     expect(res.succeeded).toBe(4);
@@ -101,6 +89,7 @@ describe("runFlexLookups", () => {
   test("stops starting new work when shouldStop() flips", async () => {
     let stop = false;
     const res = await runFlexLookups(mkTargets(50), {
+      ...di,
       concurrency: 2,
       shouldStop: () => stop,
       onProgress: (d) => {
@@ -115,7 +104,10 @@ describe("runFlexLookups", () => {
 
   test("empty target list is a no-op", async () => {
     const progress: Array<[number, number]> = [];
-    const res = await runFlexLookups([], { onProgress: (d, t) => progress.push([d, t]) });
+    const res = await runFlexLookups([], {
+      ...di,
+      onProgress: (d, t) => progress.push([d, t]),
+    });
     expect(res).toEqual({ total: 0, succeeded: 0, failed: 0, stopped: false });
     expect(calls.length).toBe(0);
     expect(progress).toEqual([[0, 0]]);
