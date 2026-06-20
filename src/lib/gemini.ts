@@ -263,7 +263,7 @@ CRITICAL: write the entry as a STANDALONE, REUSABLE dictionary entry for that se
 Provide four fields:
 - reading: if "{word}" is Japanese, the reading of its DICTIONARY (base) form in kana — hiragana for native/Sino-Japanese words, katakana for loanwords. Otherwise an empty string.
 - translation: a natural Russian gloss of "{word}" (English if the word is itself Russian) — the dictionary base form, idiomatic, not a literal calque. Where it helps, prefix the part of speech briefly (e.g. "гл." / "сущ. — ").
-- notes: If the word is a proper noun naming a real person, place, work, or brand, give a one-sentence encyclopedic abstract — who or what it is and what it is best known for (max ~30 words). Otherwise a short GENERAL definition (max ~25 words) that makes the word stick: when the translation loses nuance say what it actually means, and add a memory hook — a kanji breakdown, a genuine cognate or known loanword, a sound-alike, or a vivid image. Never leave this empty.
+- notes: If the word is a proper noun naming a real person, place, work, or brand, give a one-sentence encyclopedic abstract — who or what it is and what it is best known for (max ~30 words). Otherwise a short GENERAL definition (max ~25 words) that makes the word stick: when the translation loses nuance say what it actually means, and add a memory hook — a kanji breakdown (for a single kanji, its component radicals where they tell a story), a genuine cognate or known loanword, a sound-alike, or a vivid image. Never leave this empty.
 - context: a SHORT, natural, self-contained example sentence using "{word}" (invent a simple one), with the studied word wrapped in <b></b>. It must stand alone — do NOT copy the input line or depend on it. Keep it brief.
 
 Examples:
