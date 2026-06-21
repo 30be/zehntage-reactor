@@ -373,7 +373,7 @@ export function Palette({ go, toast, settings, setSettings }: Props) {
                 <div key={scope} className="cheat-col">
                   <div className="cheat-scope">{scope}</div>
                   {HOTKEYS.filter((h) => h.scope === scope).map((h) => (
-                    <div key={h.keys} className="cheat-row">
+                    <div key={h.keys} className="cheat-row" title={h.hint ?? h.what}>
                       <kbd className="palette-kbd">{h.keys}</kbd>
                       <span className="cheat-what">{h.what}</span>
                     </div>
