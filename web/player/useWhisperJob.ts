@@ -40,6 +40,9 @@ export function useWhisperJob(opts: {
   const whisperRetryRef = useRef(0);
   const attachWhisperRef = useRef<(jobId: string) => void>(() => {});
   const retryAttachRef = useRef<() => void>(() => {});
+  // Smart-toast guards: each fires at most once per generate so we don't nag.
+  const slowToastShownRef = useRef(false);
+  const slowTimerRef = useRef<number | null>(null);
 
   // Attach the SSE stream of a whisper job (new or rediscovered after reload)
   // and drive the progress UI + live cues from it.
@@ -103,6 +106,10 @@ export function useWhisperJob(opts: {
             whisperEsRef.current = null;
             setWhisperBusy(false);
             whisperJobRef.current = null;
+            if (slowTimerRef.current != null) {
+              window.clearInterval(slowTimerRef.current);
+              slowTimerRef.current = null;
+            }
             if (data.status === "done") {
               // refresh tracks and switch to the freshly-generated JP track
               void api.subs(mediaId).then((ts) => {
@@ -165,21 +172,74 @@ export function useWhisperJob(opts: {
     retryAttachRef.current = retryAttach;
   }, [retryAttach]);
 
+  // SMART TOAST (b): poll the job's elapsed-vs-duration and, the first time
+  // transcription has run longer than the episode itself, suggest switching to
+  // the remote backend. Only meaningful for the local backend (remote returns in
+  // one shot); fires at most once per generate. Cleared on terminal status.
+  const startSlowWatch = useCallback(() => {
+    if (slowTimerRef.current != null) window.clearInterval(slowTimerRef.current);
+    slowToastShownRef.current = false;
+    slowTimerRef.current = window.setInterval(() => {
+      if (!mountedRef.current) {
+        if (slowTimerRef.current != null) window.clearInterval(slowTimerRef.current);
+        slowTimerRef.current = null;
+        return;
+      }
+      void api
+        .whisperActive(mediaId)
+        .then((r) => {
+          if (!r.jobId) return; // job finished — terminal handler clears the timer
+          if (r.backend === "remote") return; // remote isn't "slow" the same way
+          const dur = r.mediaDurationSec ?? 0;
+          const elapsed = r.elapsedMs ?? 0;
+          if (
+            !slowToastShownRef.current &&
+            dur > 0 &&
+            elapsed > dur * 1000
+          ) {
+            slowToastShownRef.current = true;
+            toast("Recognition is slow — switch to remote? (Settings → Backends)");
+            if (slowTimerRef.current != null) {
+              window.clearInterval(slowTimerRef.current);
+              slowTimerRef.current = null;
+            }
+          }
+        })
+        .catch(() => {});
+    }, 5000);
+  }, [mediaId, toast, mountedRef]);
+
   const onGenerateJa = useCallback(async () => {
     setWhisperBusy(true);
     setWhisperStatus("starting…");
     setWhisperLastEnd(0);
     setWhisperCues([]);
     whisperRetryRef.current = 0;
+    // SMART TOAST (a): if local whisper is selected but whisper-cli/model is not
+    // available, suggest the remote backend up front. Best-effort: never blocks
+    // or fails the generate (the server still queues the job either way).
+    void api
+      .whisperCapability()
+      .then((cap) => {
+        if (cap.backend === "local" && !cap.available) {
+          toast(
+            cap.remoteConfigured
+              ? "Whisper isn't installed here — switch to remote in Settings → Backends"
+              : "Whisper isn't installed here — set a remote backend in Settings → Backends",
+          );
+        }
+      })
+      .catch(() => {});
     try {
       // Server dedups: an already-active job for this file returns its id.
       const { jobId } = await api.whisperStart(mediaId, "ja");
       attachWhisper(jobId);
+      startSlowWatch();
     } catch (e) {
       setWhisperBusy(false);
       toast(`Whisper start failed: ${e instanceof Error ? e.message : e}`);
     }
-  }, [mediaId, toast, attachWhisper]);
+  }, [mediaId, toast, attachWhisper, startSlowWatch]);
 
   // Rediscover a running whisper job after a page reload and reattach its SSE
   // so the progress UI resumes instead of offering a duplicate Generate.
@@ -193,14 +253,19 @@ export function useWhisperJob(opts: {
         setWhisperStatus(r.status ?? "running");
         setWhisperLastEnd(0);
         attachWhisper(r.jobId);
+        startSlowWatch();
       })
       .catch(() => {});
     return () => {
       cancelled = true;
       whisperEsRef.current?.close();
       whisperEsRef.current = null;
+      if (slowTimerRef.current != null) {
+        window.clearInterval(slowTimerRef.current);
+        slowTimerRef.current = null;
+      }
     };
-  }, [mediaId, attachWhisper]);
+  }, [mediaId, attachWhisper, startSlowWatch]);
 
   const onCancelWhisper = useCallback(async () => {
     if (whisperJobRef.current) await api.whisperCancel(whisperJobRef.current);

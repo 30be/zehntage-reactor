@@ -38,6 +38,25 @@ export interface Settings {
    * password field on the Settings page. Empty string means "use the env var".
    */
   geminiApiKey: string;
+  /**
+   * Which backend generates subtitles when whisper must run. "local" (default)
+   * spawns whisper-cli on this machine; "remote" POSTs the extracted audio to
+   * `whisperRemoteUrl` instead (for mobile / no-whisper deployments). See
+   * src/lib/whisper.ts for the remote contract.
+   */
+  whisperBackend: "local" | "remote";
+  /**
+   * Endpoint hit when whisperBackend === "remote". POST audio/wav body →
+   * the server expects { cues: [{start,end,text}, …] } (or SRT text) back.
+   * Empty string means "not configured" (remote is then treated as unavailable).
+   */
+  whisperRemoteUrl: string;
+  /**
+   * Anki write backend. "auto" (default) uses the real windowless DB / AnkiConnect
+   * path; "fake" routes add/delete to a persisted local JSON "fake deck" so a
+   * deployment with no real Anki still works (mobile). See src/lib/anki.ts.
+   */
+  ankiBackend: "auto" | "fake";
   [key: string]: unknown;
 }
 
@@ -50,6 +69,9 @@ const DEFAULTS: Settings = {
   explainPrompt: "",
   theme: "light",
   geminiApiKey: "",
+  whisperBackend: "local",
+  whisperRemoteUrl: "",
+  ankiBackend: "auto",
 };
 
 // ZR_CONFIG_DIR override keeps tests away from the user's real settings.
@@ -77,6 +99,7 @@ export const SETTINGS_KEYS = new Set<keyof Settings>([
   "explainPrompt",
   "theme",
   "geminiApiKey",
+  "whisperRemoteUrl",
   // booleans
   "blurSecondary",
   "autoQuizPrompt",
@@ -91,6 +114,8 @@ export const SETTINGS_KEYS = new Set<keyof Settings>([
   "subScale",
   // enum
   "autopauseMode",
+  "whisperBackend",
+  "ankiBackend",
 ]);
 
 // Settings whose value must be a finite number to be accepted.
@@ -118,7 +143,16 @@ const STRING_KEYS = new Set<string>([
   "theme",
   "geminiApiKey",
   "autopauseMode",
+  "whisperBackend",
+  "whisperRemoteUrl",
+  "ankiBackend",
 ]);
+
+const VALID_WHISPER_BACKENDS = new Set<Settings["whisperBackend"]>([
+  "local",
+  "remote",
+]);
+const VALID_ANKI_BACKENDS = new Set<Settings["ankiBackend"]>(["auto", "fake"]);
 
 /**
  * Validate and coerce an incoming patch from the API.
@@ -162,6 +196,9 @@ export function validateSettingsPatch(
 function normalize(data: Partial<Settings>): Settings {
   const merged: Settings = { ...DEFAULTS, ...data };
   if (!VALID_THEMES.has(merged.theme)) merged.theme = "light";
+  if (!VALID_WHISPER_BACKENDS.has(merged.whisperBackend))
+    merged.whisperBackend = "local";
+  if (!VALID_ANKI_BACKENDS.has(merged.ankiBackend)) merged.ankiBackend = "auto";
   return merged;
 }
 

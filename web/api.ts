@@ -531,9 +531,26 @@ export const api = {
   whisperStart: (id: string, lang: string) =>
     jpost<{ jobId: string; status: string }>(`/api/whisper/${id}`, { lang }),
   whisperActive: (id: string) =>
-    jget<{ jobId: string | null; status?: string; lang?: string }>(
-      `/api/whisper/active?mediaId=${id}`,
-    ),
+    jget<{
+      jobId: string | null;
+      status?: string;
+      lang?: string;
+      backend?: "local" | "remote";
+      // For the "recognition is slow" toast: transcription wall time so far vs.
+      // the episode's own duration (absent when no job is active).
+      elapsedMs?: number;
+      mediaDurationSec?: number;
+    }>(`/api/whisper/active?mediaId=${id}`),
+  // Local-whisper capability (smart toasts): is whisper-cli + a model present,
+  // and which backend is selected. Read before transcribing to suggest remote.
+  whisperCapability: () =>
+    jget<{
+      available: boolean;
+      whisperCli: boolean;
+      model: boolean;
+      backend: "local" | "remote";
+      remoteConfigured: boolean;
+    }>("/api/whisper/capability"),
   whisperCancel: (jobId: string) =>
     jpost<{ ok: boolean }>(`/api/whisper/job/${jobId}/cancel`, {}),
   whisperEventsUrl: (jobId: string) => `/api/whisper/job/${jobId}/events`,

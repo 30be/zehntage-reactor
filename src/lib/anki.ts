@@ -1,6 +1,18 @@
 // In-memory FAKE Anki double used ONLY under ANKI_FAKE=1 by the e2e suite. All
 // real read/write paths are windowless (src/lib/ankidb.ts), routed by review.ts.
 // AnkiConnect (localhost:8765) and the remote anki-mcp backend have been removed.
+//
+// PERSISTENT FAKE DECK (ankiBackend === "fake", mobile / no-Anki deploys): the
+// `fakeDeck*` functions at the bottom of this file are a SEPARATE, on-disk store
+// (a JSON "fake deck" under $ZR_CONFIG_DIR) used when the user has no real Anki
+// at all. Unlike the e2e in-memory map above, these survive restarts so mined
+// cards are not lost. review.ts routes add/delete/list to them when the setting
+// is "fake". They are NOT gated on ANKI_FAKE (that flag is for tests only).
+
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { mkdir } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
 
 export interface AnkiCard {
   front: string;
@@ -286,4 +298,80 @@ export async function addCard(card: AnkiCard): Promise<void> {
 export async function deleteCard(front: string): Promise<void> {
   if (!ankiFake()) return;
   fakeCards.delete(front);
+}
+
+// ===========================================================================
+// PERSISTENT FAKE DECK (ankiBackend === "fake") — on-disk, survives restarts
+// ===========================================================================
+//
+// A tiny JSON-backed "deck" for deployments with NO real Anki (mobile builds).
+// review.ts routes addNoteAuto / deleteNoteByFrontAuto / listCardsAuto /
+// progressAuto here when the `ankiBackend` setting is "fake", so the rest of the
+// app (the `a` hotkey, the Cards tab, token coloring) keeps working windowless
+// without a collection.anki2. Cards are keyed by their `front` field — adding
+// the same front overwrites (idempotent un-mine/re-mine), matching dbAddNote's
+// "no duplicate" intent. This is deliberately simple (no FSRS scheduling): it is
+// a card SINK so nothing is lost, not a review engine.
+
+// $ZR_CONFIG_DIR override keeps tests/deploys off the user's real config; same
+// pattern as settings.ts / state.ts. Resolved lazily per call.
+function fakeDeckDir(): string {
+  return process.env.ZR_CONFIG_DIR || join(homedir(), ".config", "zehntage-reactor");
+}
+function fakeDeckFile(): string {
+  return join(fakeDeckDir(), "fake-deck.json");
+}
+
+/** All cards in the on-disk fake deck. Returns [] when the file is absent or
+ *  unreadable (a corrupt store must never crash a read path). Synchronous read
+ *  keeps the call sites simple; the file is small (one user's mined cards). */
+export function fakeDeckList(): AnkiCard[] {
+  try {
+    const path = fakeDeckFile();
+    if (!existsSync(path)) return [];
+    const data = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    return Array.isArray(data) ? (data as AnkiCard[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function fakeDeckWrite(cards: AnkiCard[]): Promise<void> {
+  await mkdir(fakeDeckDir(), { recursive: true });
+  await Bun.write(fakeDeckFile(), JSON.stringify(cards, null, 2));
+}
+
+/** Add (or overwrite by front) a card in the on-disk fake deck. A synthetic
+ *  noteId (creation ms) is assigned when absent so the Cards tab / progress map
+ *  have a stable key, mirroring the in-memory fake. */
+export async function fakeDeckAdd(card: AnkiCard): Promise<{ ok: boolean; noteId: number }> {
+  const cards = fakeDeckList();
+  const stored: AnkiCard = { ...card };
+  if (typeof stored.noteId !== "number") stored.noteId = Date.now();
+  if (!Array.isArray(stored.tags) || stored.tags.length === 0) stored.tags = ["zehntage"];
+  const idx = cards.findIndex((c) => c.front === card.front);
+  if (idx >= 0) cards[idx] = stored;
+  else cards.push(stored);
+  await fakeDeckWrite(cards);
+  return { ok: true, noteId: stored.noteId };
+}
+
+/** Remove the card with this `front` from the on-disk fake deck. Returns
+ *  ok:true even when nothing matched (idempotent — already-absent is success). */
+export async function fakeDeckDeleteByFront(front: string): Promise<{ ok: boolean; deleted: number }> {
+  const cards = fakeDeckList();
+  const kept = cards.filter((c) => c.front !== front);
+  const deleted = cards.length - kept.length;
+  if (deleted > 0) await fakeDeckWrite(kept);
+  return { ok: true, deleted };
+}
+
+/** Remove the card whose synthetic noteId === cardId (the review/delete path
+ *  passes a cardId). Idempotent. */
+export async function fakeDeckDeleteById(cardId: number): Promise<{ ok: boolean; deleted: number }> {
+  const cards = fakeDeckList();
+  const kept = cards.filter((c) => c.noteId !== cardId);
+  const deleted = cards.length - kept.length;
+  if (deleted > 0) await fakeDeckWrite(kept);
+  return { ok: true, deleted };
 }
