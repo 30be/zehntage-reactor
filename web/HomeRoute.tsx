@@ -194,7 +194,11 @@ export function Home({ go }: { go: (h: string) => void }) {
               <h3 className="hotkey-group-title">{g.scope}</h3>
               <div className="hotkey-items">
                 {g.rows.map((h) => (
-                  <div key={`${h.scope}:${h.keys}`} className="hotkey">
+                  <div
+                    key={`${h.scope}:${h.keys}`}
+                    className="hotkey"
+                    title={h.hint ?? h.what}
+                  >
                     <kbd className="hotkey-key">{h.keys}</kbd>
                     <span className="hotkey-desc">{h.what}</span>
                   </div>

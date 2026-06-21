@@ -1011,18 +1011,20 @@ textarea.prompt {
 /* ---- home / onboarding page ---- */
 .home-steps { margin: 0 0 24px; padding-left: 20px; color: var(--fg); }
 .home-steps li { margin: 4px 0; font-size: 14px; }
-/* each group is a self-contained block; blocks wrap and size to content so
-   group boundaries (PLAYER / READ / GLOBAL) are always obvious */
+/* Responsive auto column count: groups flow into as many columns as fit
+   (up to ~4 on wide screens), collapsing on narrow ones. Each group is a
+   labelled block; the PLAYER / READ / GLOBAL boundaries stay obvious. */
 .hotkey-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 32px 48px;
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 24px 32px;
+  align-items: start;
   margin-bottom: 24px;
 }
 /* a group is a labelled, content-sized block */
 .hotkey-group {
   margin-bottom: 0;
+  min-width: 0;
 }
 .hotkey-group-title {
   margin: 0 0 8px;
@@ -1034,25 +1036,25 @@ textarea.prompt {
   color: var(--fg);
   border-bottom: 1px solid var(--border);
 }
-/* internal multicolumn: large groups (PLAYER) split into 2-3 short
-   sub-columns under their own header; small groups stay one column */
 .hotkey-items {
-  columns: 200px;
-  column-gap: 32px;
+  display: flex;
+  flex-direction: column;
 }
-/* each hotkey is a two-column row: auto key column | description.
-   keep a single row intact so it isn't split across a sub-column break */
+/* each hotkey is ONE flowing line: keycap inline, description right after,
+   with uniform spacing so the list reads evenly regardless of keycap width. */
 .hotkey {
-  display: grid;
-  grid-template-columns: max-content 1fr;
+  display: flex;
   align-items: baseline;
-  column-gap: 14px;
+  gap: 10px;
   font-size: 13px;
-  padding: 8px 0;
-  break-inside: avoid;
+  line-height: 1.5;
+  padding: 5px 6px;
+  border-radius: 5px;
+  cursor: default;
 }
+.hotkey:hover { background: var(--muted-bg); }
 .hotkey-key {
-  justify-self: start;
+  flex: none;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 11px;
   line-height: 1.4;
@@ -1882,9 +1884,9 @@ textarea.prompt {
   white-space: nowrap;
 }
 .cheatsheet {
-  width: 640px;
+  width: 920px;
   max-width: 94vw;
-  max-height: 76vh;
+  max-height: 80vh;
   overflow-y: auto;
   background: var(--bg);
   color: var(--fg);
@@ -1892,24 +1894,55 @@ textarea.prompt {
   border-radius: 8px;
   padding: 16px 20px;
 }
-.cheat-title { font-size: 13px; font-weight: 600; margin-bottom: 10px; }
-.cheat-cols { display: flex; gap: 28px; flex-wrap: wrap; }
-.cheat-col { flex: 1 1 260px; min-width: 220px; }
+.cheat-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+.cheat-close {
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 6px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.cheat-close:hover { background: var(--muted-bg); color: var(--fg); }
+/* Responsive auto column count: scope blocks flow into as many columns as
+   fit (up to ~4 on wide screens), collapsing when narrow. Mirrors the Home
+   page hotkey grid so both surfaces stay visually consistent. */
+.cheat-cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px 28px;
+  align-items: start;
+}
+.cheat-col { min-width: 0; }
 .cheat-scope {
   font-size: 11px;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  margin: 6px 0;
+  margin: 0 0 6px;
 }
+/* each row is ONE flowing line: keycap inline, then the description, with
+   uniform spacing — no fixed keycap width, so rows read evenly. */
 .cheat-row {
   display: flex;
   align-items: baseline;
-  gap: 10px;
-  padding: 2px 0;
+  gap: 8px;
+  padding: 3px 5px;
   font-size: 13px;
+  border-radius: 5px;
+  cursor: default;
 }
-.cheat-row .palette-kbd { min-width: 92px; text-align: center; }
+.cheat-row:hover { background: var(--muted-bg); }
+.cheat-row .palette-kbd { flex: none; text-align: center; }
 .cheat-what { color: var(--fg); }
 
 /* health debug view */
