@@ -117,12 +117,19 @@ const DEFAULT_ROLLOVER_HOUR = 4;
 /** Field separator inside notes.flds. */
 const FLD_SEP = "\x1f";
 
-/** Default collection path; override with ZEHNTAGE_ANKI_DB. */
+/** Default collection path; override with ZEHNTAGE_ANKI_DB.
+ *  Cross-platform default profile directory:
+ *    - Windows: %APPDATA%\Anki2\User 1\collection.anki2
+ *    - Linux/mac: ~/.local/share/Anki2/User 1/collection.anki2
+ */
 export function collectionPath(): string {
-  return (
-    process.env.ZEHNTAGE_ANKI_DB ||
-    join(homedir(), ".local", "share", "Anki2", "User 1", "collection.anki2")
-  );
+  if (process.env.ZEHNTAGE_ANKI_DB) return process.env.ZEHNTAGE_ANKI_DB;
+  if (process.platform === "win32") {
+    const appData =
+      process.env.APPDATA || join(homedir(), "AppData", "Roaming");
+    return join(appData, "Anki2", "User 1", "collection.anki2");
+  }
+  return join(homedir(), ".local", "share", "Anki2", "User 1", "collection.anki2");
 }
 
 // ---------------------------------------------------------------------------
@@ -1988,12 +1995,16 @@ export async function dbDeleteNoteByFront(
 // col.mod (ms), NEVER touch col.scm / col.usn / col.ver.
 // ===========================================================================
 
+// Card-shape constants. Exported so the AnkiConnect write path (ankiconnect.ts)
+// mirrors EXACTLY the note type / deck / tag dbAddNote uses — keeping cards
+// identical across both write paths (direct-DB when Anki is closed, AnkiConnect
+// when Anki is open). Do NOT fork these values; import them.
 /** The notetype zehntage cards use; resolved BY NAME at runtime (never the id). */
-const ZR_NOTETYPE_NAME = "Back+Front+Usage";
+export const ZR_NOTETYPE_NAME = "Back+Front+Usage";
 /** The deck zehntage cards live in; resolved BY NAME at runtime. */
-const ZR_DECK_NAME = "Mixed";
+export const ZR_DECK_NAME = "Mixed";
 /** The single tag this app stamps mined cards with. */
-const ZR_TAG = "zehntage";
+export const ZR_TAG = "zehntage";
 
 /**
  * Anki's base91 GUID alphabet (pylib `anki/utils.py` _base91 / rslib base91).

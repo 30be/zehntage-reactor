@@ -160,6 +160,14 @@ function world(opts: {
         (opts.ankiOpen ? failClosed : { ok: true, noteId: 12345, cardIds: [12346] })
       );
     },
+    // AnkiConnect path disabled by default here so these DB-routing tests stay
+    // deterministic (the dedicated ankiconnect-routing.test.ts exercises the
+    // AnkiConnect-reachable branch). canWrite mirrors ankiOpen so the
+    // "Anki open w/o AnkiConnect" refusal is reachable when needed.
+    acAvailable: async () => false,
+    canWrite: (_p: string) =>
+      opts.ankiOpen ? { ok: false, reason: "anki-open" } : { ok: true },
+    collectionPath: () => "/tmp/fake/collection.anki2",
   });
   return { restore, spy };
 }
@@ -430,14 +438,18 @@ describe("addNoteAuto routing (DB-direct only)", () => {
     expect(w.spy.acAddCard).toBe(0);
   });
 
-  test("Anki OPEN -> dbAddNote fails-closed; REFUSED, never AnkiConnect", async () => {
+  test("Anki OPEN + no AnkiConnect -> REFUSED (anki-open) without touching the DB", async () => {
+    // acAvailable=false (default) + canWrite=anki-open ⇒ the new routing refuses
+    // up front with a clear message; it must NOT attempt the direct-DB write
+    // (that would risk the collection while Anki holds it).
     const w = world({ ankiOpen: true });
     restore = w.restore;
     const r = await addNoteAuto(sampleCard);
     expect(r.ok).toBe(false);
     expect(r.reason).toBe("anki-open");
     expect(r.backend).toBe("db");
-    expect(w.spy.dbAddNote).toBe(1);
+    expect(r.error).toContain("AnkiConnect");
+    expect(w.spy.dbAddNote).toBe(0); // never touched the DB while Anki open
     expect(w.spy.acAddCard).toBe(0);
   });
 

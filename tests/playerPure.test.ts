@@ -6,6 +6,7 @@ import {
   cueUnknownKeys,
   computeCueUnknowns,
 } from "../web/player/cueUnknowns.ts";
+import { pickDisplayCues } from "../web/player/displayCues.ts";
 import type { KToken } from "../web/tokenizer.ts";
 import { buildWordIndex } from "../web/progress.ts";
 import type { Cue } from "../web/api.ts";
@@ -172,5 +173,61 @@ describe("cueUnknowns", () => {
     );
     expect(counts).toEqual([1, 1]);
     expect(lemmas).toEqual([["猫"], ["鳥"]]);
+  });
+});
+
+// ---- displayCues.ts ----
+describe("pickDisplayCues", () => {
+  function makeCue(start: number, end: number, text = ""): Cue {
+    return { start, end, text };
+  }
+  const CUES: Cue[] = [
+    makeCue(1, 2, "first"),
+    makeCue(3, 4, "second"),
+    makeCue(5, 6, "third"),
+  ];
+
+  test("active cue: current text, no prev when single-line", () => {
+    expect(pickDisplayCues(CUES, 1, -1, { twoLine: false })).toEqual({
+      curText: "second",
+      prevText: "",
+    });
+  });
+
+  test("gap (single-line) blanks the line", () => {
+    // activeP === -1 in a gap, no hold when twoLine is off
+    expect(pickDisplayCues(CUES, -1, 1, { twoLine: false })).toEqual({
+      curText: "",
+      prevText: "",
+    });
+  });
+
+  test("gap (twoLine) holds the last cue → never blank", () => {
+    // activeP === -1 but heldIdx points at cue[1]: hold it, show its prev above
+    expect(pickDisplayCues(CUES, -1, 1, { twoLine: true })).toEqual({
+      curText: "second",
+      prevText: "first",
+    });
+  });
+
+  test("twoLine active cue surfaces the previous line", () => {
+    expect(pickDisplayCues(CUES, 2, -1, { twoLine: true })).toEqual({
+      curText: "third",
+      prevText: "second",
+    });
+  });
+
+  test("eff === 0 has no previous line (boundary)", () => {
+    expect(pickDisplayCues(CUES, 0, -1, { twoLine: true })).toEqual({
+      curText: "first",
+      prevText: "",
+    });
+  });
+
+  test("out-of-range held index yields blank, no throw", () => {
+    expect(pickDisplayCues(CUES, -1, 99, { twoLine: true })).toEqual({
+      curText: "",
+      prevText: "",
+    });
   });
 });

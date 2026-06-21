@@ -120,10 +120,29 @@ export function ankiRunning(collectionPath?: string): boolean {
       return true;
     }
   } catch {
-    // /proc unavailable (non-Linux). Fall through to pgrep.
+    // /proc unavailable (non-Linux). Fall through to tasklist (win32) / pgrep.
   }
 
   if (scanned) return false;
+
+  // Windows: /proc is absent and pgrep doesn't exist, so without this branch we
+  // would return false and WRONGLY allow a direct DB write while Anki holds the
+  // collection. Use `tasklist` filtered to anki.exe; any matching line is a hit.
+  if (process.platform === "win32") {
+    try {
+      const out = execFileSync(
+        "tasklist",
+        ["/FI", "IMAGENAME eq anki.exe", "/NH"],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+      );
+      // tasklist prints "INFO: No tasks ..." when nothing matches; a real match
+      // contains the image name. Match case-insensitively to be safe.
+      if (/anki\.exe/i.test(out)) return true;
+    } catch {
+      // tasklist missing/failed — fall through to pgrep (harmless on win32).
+    }
+    return false;
+  }
 
   // Fallback (non-Linux / /proc unreadable): use pgrep with an exact process-name
   // match rather than the loose `-f` substring search. `-i -f anki` is too broad:

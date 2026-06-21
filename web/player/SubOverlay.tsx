@@ -19,9 +19,12 @@ export const SubOverlay = memo(function SubOverlay({
   subScale,
   cuesLoading,
   primaryText,
+  prevText,
+  twoLine,
   secondaryText,
   echoCue,
   tokens,
+  prevTokens,
   wordIndex,
   knownWords,
   blacklist,
@@ -46,9 +49,14 @@ export const SubOverlay = memo(function SubOverlay({
   subScale: number;
   cuesLoading: boolean;
   primaryText: string;
+  /** twoLine ("retard mode"): the previous cue's text, shown above primary. */
+  prevText: string;
+  twoLine: boolean;
   secondaryText: string;
   echoCue: unknown;
   tokens: KToken[] | null;
+  /** tokenized prevText; null while pending → TokenLine renders plain. */
+  prevTokens: KToken[] | null;
   wordIndex: WordIndex;
   knownWords: Set<string>;
   blacklist: Set<string>;
@@ -80,6 +88,21 @@ export const SubOverlay = memo(function SubOverlay({
       )}
       {/* echo dictation hides the JP line (the diff overlay shows it on reveal) */}
       {echoCue ? null : (
+      <>
+      {twoLine && prevText && (
+        <div className="sub-prev">
+          <TokenLine
+            tokens={prevTokens}
+            fallbackText={prevText}
+            wordIndex={wordIndex}
+            knownWords={knownWords}
+            blacklist={blacklist}
+            furiganaOn={furiganaOn}
+            accents={accents}
+            pitchAccentOn={pitchOn}
+          />
+        </div>
+      )}
       <div className="sub-primary">
         <TokenLine
           tokens={tokens}
@@ -114,6 +137,7 @@ export const SubOverlay = memo(function SubOverlay({
           </button>
         )}
       </div>
+      </>
       )}
       {secondaryText && (
         <div

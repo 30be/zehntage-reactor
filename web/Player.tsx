@@ -55,6 +55,7 @@ import {
 import { useWhisperJob } from "./player/useWhisperJob.ts";
 import { usePersistedToggle } from "./usePersisted.ts";
 import { computeCueUnknowns } from "./player/cueUnknowns.ts";
+import { pickDisplayCues } from "./player/displayCues.ts";
 import { useResume } from "./player/useResume.ts";
 import { useActiveCues } from "./player/useActiveCues.ts";
 import { useSession } from "./player/useSession.ts";
@@ -120,6 +121,10 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     onAutopauseChange,
   );
   const autopauseRef = useRef(false);
+  // "retard mode" (zr.twoLine): show two cue lines (current + previous) and
+  // hold the last cue through gaps so the overlay is never blank. UI-only
+  // toggle in the CC popover; consumed by pickDisplayCues + SubOverlay.
+  const [twoLine, , toggleTwoLine] = usePersistedToggle("zr.twoLine", false);
   // True while WE are performing the autopause seek-back, so the user-seek
   // detector below doesn't treat it as a manual seek.
   const internalSeekRef = useRef(false);
@@ -148,6 +153,9 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   const secondaryCuesRef = useRef<Cue[]>([]);
 
   const [tokens, setTokens] = useState<KToken[] | null>(null);
+  // Tokenized PREVIOUS cue line (twoLine / "retard mode"). Same lazy-tokenize +
+  // cue-token cache as `tokens`; null while pending → TokenLine renders plain.
+  const [prevTokens, setPrevTokens] = useState<KToken[] | null>(null);
   const tracksLoaded = useRef(false);
   // True while the selected primary track's cues are still being fetched —
   // drives a dim "loading subtitles…" line in the overlay.
@@ -1079,7 +1087,17 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     toast,
   });
 
-  const primaryText = activeP >= 0 && activeP < displayCues.length ? displayCues[activeP]!.text : "";
+  // Held-last index: the last cue that was genuinely active. In twoLine mode we
+  // hold it through gaps so the overlay never blanks (see pickDisplayCues).
+  // Updated during render — an idempotent ref write that just mirrors activeP.
+  const heldCueIdxRef = useRef(-1);
+  if (activeP >= 0) heldCueIdxRef.current = activeP;
+  const { curText: primaryText, prevText } = pickDisplayCues(
+    displayCues,
+    activeP,
+    heldCueIdxRef.current,
+    { twoLine },
+  );
   // Bounds-checked: activeS can be stale for one render after the secondary
   // track switches (off / another track) — secondaryCues shrinks before the
   // timeupdate effect recomputes activeS.
@@ -1118,6 +1136,36 @@ export function Player({ entry, startAt, toast, settings }: Props) {
       cancelled = true;
     };
   }, [primaryText]);
+
+  // --- lazy tokenize the PREVIOUS cue line (twoLine mode), mirroring the
+  // primary tokenizer. Cheap: repeat cues hit the same module-level cache. When
+  // empty (single-line mode, or eff===0) we clear and TokenLine shows nothing.
+  useEffect(() => {
+    if (!prevText) {
+      setPrevTokens(null);
+      return;
+    }
+    const cached = cueTokensGet(prevText);
+    if (cached) {
+      setPrevTokens(cached);
+      return;
+    }
+    setPrevTokens(null); // plain line until tokens arrive
+    let cancelled = false;
+    void getTokenizer()
+      .then((tok) => {
+        if (cancelled) return;
+        const toks = tok.tokenize(prevText);
+        cueTokensPut(prevText, toks);
+        setPrevTokens(toks);
+      })
+      .catch(() => {
+        if (!cancelled) setPrevTokens(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [prevText]);
 
   // Pre-study bulk add: text-only lookup then a LIGHT Anki add (no mediaId /
   // timestamp → server skips frame + audio capture), sequentially per word.
@@ -2035,9 +2083,12 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           subScale={subScale}
           cuesLoading={cuesLoading}
           primaryText={primaryText}
+          prevText={prevText}
+          twoLine={twoLine}
           secondaryText={secondaryText}
           echoCue={echoCue}
           tokens={tokens}
+          prevTokens={prevTokens}
           wordIndex={wordIndex}
           knownWords={knownWords}
           blacklist={blacklist}
@@ -2082,6 +2133,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           secondaryId={secondaryId}
           setPrimaryId={setPrimaryId}
           setSecondaryId={setSecondaryId}
+          twoLine={twoLine}
+          toggleTwoLine={toggleTwoLine}
           whisperBusy={whisperBusy}
           translateBusy={translateBusy}
           condenseBusy={condenseBusy}

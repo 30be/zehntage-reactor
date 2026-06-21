@@ -323,7 +323,7 @@ export async function listBackups(dir?: string): Promise<BackupInfo[]> {
 // dir above (which also captures subs/). Snapshots are lightweight + restorable.
 // ---------------------------------------------------------------------------
 
-export const KEEP_SNAPSHOTS = 10;
+export const KEEP_SNAPSHOTS = 3;
 /** Skip taking a startup snapshot if the most recent one is younger than this. */
 export const SNAPSHOT_THROTTLE_MS = 6 * 60 * 60 * 1000; // 6h
 

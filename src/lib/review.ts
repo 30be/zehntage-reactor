@@ -47,9 +47,16 @@ import {
   dbListCards,
   dbProgress,
   dbGetMedia,
+  collectionPath,
   type DeckCounts,
   type DbMediaResult,
 } from "./ankidb.ts";
+import { canWrite } from "./ankilock.ts";
+import {
+  acAvailable,
+  acAddNote,
+  acDeleteByFront,
+} from "./ankiconnect.ts";
 
 export type ReviewScope = "zehntage" | "all";
 export type ReviewBackend = "db" | "ankiconnect";
@@ -91,6 +98,13 @@ interface ReviewDeps {
   dbListCards: typeof dbListCards;
   dbProgress: typeof dbProgress;
   dbGetMedia: typeof dbGetMedia;
+  // AnkiConnect write path (SAFE when Anki is open) + the gate/path helpers the
+  // add/delete routing consults to pick AnkiConnect vs direct-DB vs refuse.
+  acAvailable: typeof acAvailable;
+  acAddNote: typeof acAddNote;
+  acDeleteByFront: typeof acDeleteByFront;
+  canWrite: typeof canWrite;
+  collectionPath: typeof collectionPath;
 }
 
 const realDeps: ReviewDeps = {
@@ -111,9 +125,19 @@ const realDeps: ReviewDeps = {
   dbListCards,
   dbProgress,
   dbGetMedia,
+  acAvailable,
+  acAddNote,
+  acDeleteByFront,
+  canWrite,
+  collectionPath,
 };
 
 let deps: ReviewDeps = realDeps;
+
+// The error surfaced when Anki is OPEN (so the direct-DB write is refused) but
+// AnkiConnect is unreachable (so we can't mine through the running Anki either).
+const ANKI_OPEN_NO_CONNECT_MSG =
+  "Anki is open without AnkiConnect — close Anki or install AnkiConnect to mine";
 
 /**
  * TEST-ONLY. Override the backend dependencies and return a restore function.
@@ -406,9 +430,38 @@ export async function deleteNoteByFrontAuto(front: string): Promise<DeleteResult
     }
   }
 
-  // Real path: windowless DB write. dbDeleteNoteByFront fails-closed when Anki
-  // is open and returns reason:"not-found" when the front isn't in the deck.
+  // Real path. Same Anki-state routing as addNoteAuto:
+  //   1. AnkiConnect reachable → delete THROUGH the running Anki (SAFE while open).
+  //   2. else canWrite passes (Anki closed) → direct-DB dbDeleteNoteByFront.
+  //   3. else (Anki open, no AnkiConnect) → refuse with a clear message.
+  // A front that matches nothing returns reason:"not-found" on either real path
+  // (the server route maps not-found → ok, an idempotent no-op).
   if (dbDirectEnabled()) {
+    // 1. AnkiConnect (SAFE path when Anki is open — never touches the DB file).
+    try {
+      if (await deps.acAvailable()) {
+        const r = await deps.acDeleteByFront(front);
+        return {
+          ok: r.ok,
+          error: r.error,
+          reason: r.reason,
+          backend: "ankiconnect",
+        };
+      }
+    } catch (e) {
+      void e; // fall through to the fail-closed DB path on any probe/delete throw
+    }
+
+    // 2/3. Anki closed → direct DB; Anki open w/o AnkiConnect → refuse clearly.
+    const gate = deps.canWrite(deps.collectionPath());
+    if (!gate.ok && (gate.reason === "anki-open" || gate.reason === "locked")) {
+      return {
+        ok: false,
+        error: ANKI_OPEN_NO_CONNECT_MSG,
+        reason: "anki-open",
+        backend: "db",
+      };
+    }
     try {
       const r = await deps.dbDeleteNoteByFront(front);
       return {
@@ -464,16 +517,49 @@ export async function addNoteAuto(card: AnkiCard): Promise<AddResult> {
     }
   }
 
-  // Real path: windowless DB write. dbAddNote fails-closed when Anki is open.
+  // Real path. Route by Anki state so the `a` hotkey ALWAYS works without ever
+  // risking the real collection:
+  //   1. AnkiConnect reachable → add THROUGH the running Anki (SAFE while open).
+  //   2. else canWrite passes (Anki closed) → direct-DB dbAddNote.
+  //   3. else (Anki open, no AnkiConnect) → refuse with a clear message.
   if (dbDirectEnabled()) {
+    const payload = {
+      front: card.front,
+      back: card.back,
+      notes: typeof card.notes === "string" ? card.notes : "",
+      context: typeof card.context === "string" ? card.context : "",
+      tags: Array.isArray(card.tags) ? card.tags : ["zehntage"],
+    };
+
+    // 1. AnkiConnect (SAFE path when Anki is open — never touches the DB file).
     try {
-      const r = await deps.dbAddNote({
-        front: card.front,
-        back: card.back,
-        notes: typeof card.notes === "string" ? card.notes : "",
-        context: typeof card.context === "string" ? card.context : "",
-        tags: Array.isArray(card.tags) ? card.tags : ["zehntage"],
-      });
+      if (await deps.acAvailable()) {
+        const r = await deps.acAddNote(payload);
+        return {
+          ok: r.ok,
+          error: r.error,
+          reason: r.reason,
+          backend: "ankiconnect",
+        };
+      }
+    } catch (e) {
+      // A probe/add throw must not abort routing — fall through to the DB path,
+      // which fails-closed safely if Anki is in fact holding the collection.
+      void e;
+    }
+
+    // 2/3. Anki closed → direct DB; Anki open w/o AnkiConnect → refuse clearly.
+    const gate = deps.canWrite(deps.collectionPath());
+    if (!gate.ok && (gate.reason === "anki-open" || gate.reason === "locked")) {
+      return {
+        ok: false,
+        error: ANKI_OPEN_NO_CONNECT_MSG,
+        reason: "anki-open",
+        backend: "db",
+      };
+    }
+    try {
+      const r = await deps.dbAddNote(payload);
       return {
         ok: r.ok,
         error: r.error,

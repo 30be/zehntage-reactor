@@ -135,7 +135,7 @@ function WordOfDayCard({ go }: { go: (h: string) => void }) {
     <section className="today-panel card wordday-card">
       <h2 className="h2">Word of the day</h2>
       <div className="wordday-body">
-        <span className="wordday-word" style={{ color: "var(--accent-known, #7aa2f7)" }}>
+        <span className="wordday-word" style={{ color: "var(--accent-known, #7aa2f7)", marginRight: "0.5em" }}>
           {pick.word}
           {pick.reading ? <span className="wordday-reading muted"> （{pick.reading}）</span> : null}
         </span>

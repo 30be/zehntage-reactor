@@ -6,6 +6,9 @@ out
 dist
 *.tgz
 
+# parallel-work isolation (ephemeral git worktrees)
+.worktrees/
+
 # playwright artifacts
 test-results
 playwright-report

@@ -643,7 +643,7 @@ function DataSection({
       <div className="field">
         <label className="label">Snapshots</label>
         <div className="hint">
-          Automatic local backups taken on startup (kept: last 10). Restoring
+          Automatic local backups taken on startup (kept: last 3). Restoring
           overwrites current settings and merges saved progress.
         </div>
         {snapshots.length === 0 ? (

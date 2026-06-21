@@ -155,6 +155,25 @@ async function jpost<T>(
   return (await r.json()) as T;
 }
 
+/** Human-readable message for a failed /api/anki write. The server reports a
+ * refused windowless write as { ok:false, reason } at HTTP 200 (so jpost does
+ * not throw); the api.anki* wrappers turn that into a thrown Error carrying
+ * this message, so the Player's catch reverts the optimistic mark and toasts. */
+function ankiWriteError(r: { error?: string; reason?: string }): string {
+  if (r.error) return r.error;
+  switch (r.reason) {
+    case "anki-open":
+    case "locked":
+      return "Anki is open — close it (or install AnkiConnect) to mine";
+    case "schema":
+      return "Unsupported Anki collection version";
+    case "missing":
+      return "Anki collection not found";
+    default:
+      return r.reason ? `Anki write failed (${r.reason})` : "Anki write failed";
+  }
+}
+
 export interface BatchWhisperJob {
   jobId: string;
   entryId: string | null;
@@ -484,7 +503,15 @@ export const api = {
     /** matching secondary (RU) cue text, shown as its own context line */
     sentenceTranslation?: string;
   }) => {
-    const r = await jpost<{ ok: boolean }>("/api/anki/add", p);
+    const r = await jpost<{ ok: boolean; error?: string; reason?: string }>(
+      "/api/anki/add",
+      p,
+    );
+    // A refused write (e.g. Anki open without AnkiConnect) returns ok:false at
+    // HTTP 200 — surface it so onAdd reverts the optimistic mark + toasts,
+    // instead of write-through caching a card that was never created (the silent
+    // blue→red flash bug).
+    if (!r.ok) throw new Error(ankiWriteError(r));
     // Optimistic write-through: cached deck keeps instant underlines across
     // reloads; the server cache was busted, so refresh picks up real data.
     cacheAddWord(p.word, p.reading, p.translation, p.notes);
@@ -492,7 +519,11 @@ export const api = {
     return r;
   },
   ankiDelete: async (front: string) => {
-    const r = await jpost<{ ok: boolean }>("/api/anki/delete", { front });
+    const r = await jpost<{ ok: boolean; error?: string; reason?: string }>(
+      "/api/anki/delete",
+      { front },
+    );
+    if (!r.ok) throw new Error(ankiWriteError(r));
     cacheDeleteWord(front);
     void refreshAnkiWords().catch(() => {});
     return r;

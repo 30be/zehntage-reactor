@@ -38,6 +38,8 @@ export function Vbar({
   secondaryId,
   setPrimaryId,
   setSecondaryId,
+  twoLine,
+  toggleTwoLine,
   whisperBusy,
   translateBusy,
   condenseBusy,
@@ -65,6 +67,8 @@ export function Vbar({
   secondaryId: string;
   setPrimaryId: (id: string) => void;
   setSecondaryId: (id: string) => void;
+  twoLine: boolean;
+  toggleTwoLine: () => void;
   whisperBusy: boolean;
   translateBusy: boolean;
   condenseBusy: boolean;
@@ -479,6 +483,19 @@ export function Vbar({
                 <span className="cc-label">{langLabel(t)}</span>
               </label>
             ))}
+          </div>
+          <div className="cc-group">
+            <label
+              className="cc-row"
+              title="2 lines, always on: current + previous cue, never blank"
+            >
+              <input
+                type="checkbox"
+                checked={twoLine}
+                onChange={toggleTwoLine}
+              />
+              <span className="cc-label">retard mode</span>
+            </label>
           </div>
           {((!hasJa && !whisperBusy) ||
             (primaryId &&
