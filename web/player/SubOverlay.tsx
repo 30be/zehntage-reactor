@@ -34,6 +34,8 @@ export const SubOverlay = memo(function SubOverlay({
   onWordEnter,
   onWordLeave,
   onWordClick,
+  onWordTap,
+  onWordDoubleTap,
   onExplainClick,
   clearCloseTimer,
   pauseForHover,
@@ -66,6 +68,8 @@ export const SubOverlay = memo(function SubOverlay({
   onWordEnter: (tok: KToken, e: React.MouseEvent) => void;
   onWordLeave: () => void;
   onWordClick: (tok: KToken, e: React.MouseEvent) => void;
+  onWordTap: (tok: KToken, el: HTMLElement) => void;
+  onWordDoubleTap: (tok: KToken, el: HTMLElement) => void;
   onExplainClick: (e: React.MouseEvent) => void;
   clearCloseTimer: () => void;
   pauseForHover: () => void;
@@ -116,6 +120,8 @@ export const SubOverlay = memo(function SubOverlay({
           onWordEnter={onWordEnter}
           onWordLeave={onWordLeave}
           onWordClick={onWordClick}
+          onWordTap={onWordTap}
+          onWordDoubleTap={onWordDoubleTap}
         />
         {primaryText && (
           <button

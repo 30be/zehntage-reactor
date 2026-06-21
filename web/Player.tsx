@@ -66,6 +66,7 @@ import { useSubControls } from "./player/useSubControls.ts";
 import { useEcho } from "./player/useEcho.ts";
 import { useHoverPause } from "./player/useHoverPause.ts";
 import { useLookup } from "./player/useLookup.ts";
+import { DOUBLE_TAP_MS } from "./player/touch.ts";
 import { LookupPanel } from "./player/LookupPanel.tsx";
 import {
   PreStudyPanel,
@@ -1297,18 +1298,49 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     [buildWordPopup, clearOpenTimer, clearCloseTimer, pauseForHover],
   );
 
+  // Open the word popup immediately and PIN it (no hover-out auto-close).
+  // Shared by mouse click and by touch tap; both pause for reading and pin so
+  // the panel stays until the user taps/clicks elsewhere.
+  const openWordPinned = useCallback(
+    (tok: KToken, el: HTMLElement, ctx?: string) => {
+      clearOpenTimer();
+      clearCloseTimer();
+      pauseForHover();
+      setPopup(buildWordPopup(tok, el, ctx));
+      setPinned(true);
+    },
+    [buildWordPopup, clearOpenTimer, clearCloseTimer, pauseForHover],
+  );
+
   // Click a word: open immediately and PIN — no hover-out auto-close. Clicking
   // another word retargets the pinned panel.
   const onWordClick = useCallback(
     (tok: KToken, e: React.MouseEvent, ctx?: string) => {
       e.stopPropagation();
-      clearOpenTimer();
-      clearCloseTimer();
-      pauseForHover();
-      setPopup(buildWordPopup(tok, e.currentTarget as HTMLElement, ctx));
-      setPinned(true);
+      openWordPinned(tok, e.currentTarget as HTMLElement, ctx);
     },
-    [buildWordPopup, clearOpenTimer, clearCloseTimer, pauseForHover],
+    [openWordPinned],
+  );
+
+  // --- touch gestures (phones): single tap = open popup (like hover), double
+  // tap = open popup + add the card. TokenLine owns the tap/double-tap timing
+  // and feeds us the already-resolved token span element. ---
+  const pendingAddKeyRef = useRef<string | null>(null);
+  const onWordTap = useCallback(
+    (tok: KToken, el: HTMLElement) => {
+      pendingAddKeyRef.current = null; // a plain tap never queues an add
+      openWordPinned(tok, el);
+    },
+    [openWordPinned],
+  );
+  const onWordDoubleTap = useCallback(
+    (tok: KToken, el: HTMLElement) => {
+      // Open + pin now, then arm the add: once the lookup for THIS word lands
+      // (see the effect below) we fire the same toggle the `a` hotkey uses.
+      openWordPinned(tok, el);
+      pendingAddKeyRef.current = wordKey(tok);
+    },
+    [openWordPinned],
   );
 
   // Pinned panel: clicking anywhere outside the panel (and not on a word,
@@ -1327,9 +1359,13 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     return () => document.removeEventListener("mousedown", onDown);
   }, [pinned, resumeFromHover]);
 
-  // Safety: whenever the popup is gone, the pin is gone too.
+  // Safety: whenever the popup is gone, the pin is gone too — and a queued
+  // double-tap add can't outlive the popup it targeted.
   useEffect(() => {
-    if (!popup) setPinned(false);
+    if (!popup) {
+      setPinned(false);
+      pendingAddKeyRef.current = null;
+    }
   }, [popup]);
 
   // Leaving a word to empty space: cancel a pending open, and if a popup is
@@ -1799,6 +1835,21 @@ export function Player({ entry, startAt, toast, settings }: Props) {
   }, [popup, popupSaved, lookup, explain, onAdd, onAddSentence, onDelete]);
   ankiToggleRef.current = onAnkiToggle;
 
+  // Double-tap-to-add (touch): onWordDoubleTap opened the popup and armed
+  // pendingAddKeyRef with the word's key. The lookup fetch is async, so we wait
+  // here until it lands for the SAME word still on screen, then fire the toggle
+  // exactly once (mirrors pressing `a`). Guard on the key so a quick re-tap on
+  // a different word can't add the wrong card.
+  useEffect(() => {
+    const want = pendingAddKeyRef.current;
+    if (!want) return;
+    if (!popup || popup.kind !== "word") return;
+    if (popupKeyRef.current !== want) return;
+    if (lookupLoading || !lookup) return; // wait for the lookup to resolve
+    pendingAddKeyRef.current = null;
+    onAnkiToggle();
+  }, [lookup, lookupLoading, popup, popupSaved, onAnkiToggle]);
+
   // --- translate primary -> RU ---
   const onTranslateRu = useCallback(async () => {
     if (!primaryId) return;
@@ -1870,6 +1921,55 @@ export function Player({ entry, startAt, toast, settings }: Props) {
     if (v.paused) void v.play().catch(() => {});
     else v.pause();
   }, []);
+
+  // Seek by the same ±5s step the ArrowLeft/Right hotkeys use.
+  const seekBy = useCallback((delta: number) => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (delta < 0) v.currentTime = Math.max(0, v.currentTime + delta);
+    else v.currentTime = Math.min(v.duration || Infinity, v.currentTime + delta);
+  }, []);
+  const VIDEO_SEEK_STEP = 5;
+
+  // --- video touch zones (phones): single tap toggles play, double-tap on the
+  // LEFT half seeks back / RIGHT half seeks forward (YouTube/Netflix style).
+  // Desktop mouse keeps the plain onClick={togglePlay} below — we only enter
+  // this state machine on a real touch pointer, and swallow the synthetic click
+  // it produces so play never double-toggles. ---
+  const videoTap = useRef<{ t: number; timer: number } | null>(null);
+  const swallowVideoClick = useRef(false);
+  const onVideoPointerUp = useCallback(
+    (e: React.PointerEvent<HTMLVideoElement>) => {
+      if (e.pointerType !== "touch") return; // mouse/pen → onClick handles it
+      swallowVideoClick.current = true; // kill the synthetic click that follows
+      const now = Date.now();
+      const rect = e.currentTarget.getBoundingClientRect();
+      const left = e.clientX - rect.left < rect.width / 2;
+      const prev = videoTap.current;
+      if (prev && now - prev.t < DOUBLE_TAP_MS) {
+        window.clearTimeout(prev.timer);
+        videoTap.current = null;
+        seekBy(left ? -VIDEO_SEEK_STEP : VIDEO_SEEK_STEP);
+        return;
+      }
+      const timer = window.setTimeout(() => {
+        videoTap.current = null;
+        togglePlay();
+      }, DOUBLE_TAP_MS);
+      videoTap.current = { t: now, timer };
+    },
+    [seekBy, togglePlay],
+  );
+  const onVideoClick = useCallback(() => {
+    // On touch the pointerup state machine owns play/seek; swallow the
+    // browser's synthetic click so we don't toggle play twice. Mouse clicks
+    // (no preceding touch flag) fall straight through to togglePlay.
+    if (swallowVideoClick.current) {
+      swallowVideoClick.current = false;
+      return;
+    }
+    togglePlay();
+  }, [togglePlay]);
 
   const toggleFullscreen = useCallback(() => {
     if (document.fullscreenElement) void document.exitFullscreen();
@@ -2076,7 +2176,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
         <video
           ref={videoRef}
           src={mediaUrl(entry.id)}
-          onClick={togglePlay}
+          onPointerUp={onVideoPointerUp}
+          onClick={onVideoClick}
         />
         <SubOverlay
           subRef={subOverlayRef}
@@ -2098,6 +2199,8 @@ export function Player({ entry, startAt, toast, settings }: Props) {
           onWordEnter={onWordEnter}
           onWordLeave={onWordLeave}
           onWordClick={onWordClick}
+          onWordTap={onWordTap}
+          onWordDoubleTap={onWordDoubleTap}
           onExplainClick={onExplainClick}
           clearCloseTimer={clearCloseTimer}
           pauseForHover={pauseForHover}

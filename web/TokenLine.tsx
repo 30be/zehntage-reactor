@@ -8,8 +8,9 @@
 //   in deck (learning)   -> blue fading to ambient as the interval grows
 //   in deck (mature)     -> plain ambient text
 
-import { memo } from "react";
+import { memo, useRef } from "react";
 import { isLexical, kataToHira, vocabKey, type KToken } from "./tokenizer.ts";
+import { DOUBLE_TAP_MS } from "./player/touch.ts";
 import {
   matchFront,
   progressBucket,
@@ -77,6 +78,11 @@ export interface TokenLineProps {
   onWordEnter?: (tok: KToken, e: React.MouseEvent) => void;
   onWordLeave?: () => void;
   onWordClick?: (tok: KToken, e: React.MouseEvent) => void;
+  /** Touch single-tap on a word (phones): open the lookup popup, like hover.
+   * `el` is the tapped token span (for popup positioning). */
+  onWordTap?: (tok: KToken, el: HTMLElement) => void;
+  /** Touch double-tap on a word: open the popup AND add the card. */
+  onWordDoubleTap?: (tok: KToken, el: HTMLElement) => void;
 }
 
 // Memoized with the default shallow prop comparison: all coloring inputs are
@@ -98,7 +104,40 @@ function TokenLineInner({
   onWordEnter,
   onWordLeave,
   onWordClick,
+  onWordTap,
+  onWordDoubleTap,
 }: TokenLineProps) {
+  // Touch tap / double-tap state machine (one per line). On a touch pointer we
+  // own the gesture: a lone tap fires onWordTap after DOUBLE_TAP_MS, a second
+  // tap on the SAME word inside that window cancels it and fires
+  // onWordDoubleTap instead. We also swallow the synthetic mouse click the
+  // browser emits after a touch, so onWordClick never double-fires on phones.
+  const tap = useRef<{ key: string; t: number; timer: number } | null>(null);
+  const handleWordPointerUp = (
+    tok: KToken,
+    key: string,
+    e: React.PointerEvent,
+  ) => {
+    if (e.pointerType !== "touch") return; // mouse/pen keep the click path
+    if (!onWordTap && !onWordDoubleTap) return;
+    e.preventDefault(); // suppress the synthetic 300ms click → no double-fire
+    e.stopPropagation();
+    const el = e.currentTarget as HTMLElement; // grab synchronously
+    const now = Date.now();
+    const prev = tap.current;
+    if (prev && prev.key === key && now - prev.t < DOUBLE_TAP_MS) {
+      window.clearTimeout(prev.timer);
+      tap.current = null;
+      onWordDoubleTap?.(tok, el);
+      return;
+    }
+    if (prev) window.clearTimeout(prev.timer);
+    const timer = window.setTimeout(() => {
+      tap.current = null;
+      onWordTap?.(tok, el);
+    }, DOUBLE_TAP_MS);
+    tap.current = { key, t: now, timer };
+  };
   if (!tokens) return <>{fallbackText}</>;
   return (
     <>
@@ -138,6 +177,7 @@ function TokenLineInner({
           !!tok.reading &&
           HAS_KANJI.test(tok.surface_form);
         const isInteractive = !!onWordClick;
+        const touchable = !!(onWordTap || onWordDoubleTap);
         return (
           <span
             key={i}
@@ -147,6 +187,9 @@ function TokenLineInner({
             tabIndex={isInteractive ? 0 : undefined}
             onMouseEnter={onWordEnter ? (e) => onWordEnter(tok, e) : undefined}
             onMouseLeave={onWordLeave}
+            onPointerUp={
+              touchable ? (e) => handleWordPointerUp(tok, key, e) : undefined
+            }
             onClick={onWordClick ? (e) => onWordClick(tok, e) : undefined}
             onKeyDown={onWordClick ? (e) => {
               if (e.key === "Enter" || e.key === " ") {
