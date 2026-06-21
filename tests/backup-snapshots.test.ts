@@ -175,7 +175,7 @@ describe("snapshot bundle shape + rotation (tmp fs)", () => {
     );
   });
 
-  test("KEEP_SNAPSHOTS default is 10", () => {
-    expect(KEEP_SNAPSHOTS).toBe(10);
+  test("KEEP_SNAPSHOTS default is 3", () => {
+    expect(KEEP_SNAPSHOTS).toBe(3);
   });
 });
