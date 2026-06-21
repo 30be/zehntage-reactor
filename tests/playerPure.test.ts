@@ -177,6 +177,14 @@ describe("cueUnknowns", () => {
 });
 
 // ---- displayCues.ts ----
+//
+// pickDisplayCues(cues, activeP, heldIdx, {twoLine}) derives the on-screen
+// subtitle text(s) for the dual-line "retard mode" feature. The contract:
+//   twoLine OFF → current cue only (blank during gaps).
+//   twoLine ON  → never blank: hold the last-active cue (heldIdx) through gaps
+//                 and surface the previous cue's text above it (when eff-1 >= 0).
+// These tests pin every branch + the active→gap→active transition behaviour the
+// Player drives via heldCueIdxRef.
 describe("pickDisplayCues", () => {
   function makeCue(start: number, end: number, text = ""): Cue {
     return { start, end, text };
@@ -187,47 +195,244 @@ describe("pickDisplayCues", () => {
     makeCue(5, 6, "third"),
   ];
 
-  test("active cue: current text, no prev when single-line", () => {
-    expect(pickDisplayCues(CUES, 1, -1, { twoLine: false })).toEqual({
-      curText: "second",
-      prevText: "",
+  // ---------------------------------------------------------------------------
+  // toggle OFF: current cue only, blank in gaps, never a prev line.
+  // ---------------------------------------------------------------------------
+  describe("twoLine OFF", () => {
+    test("active cue → current text only, no prev", () => {
+      expect(pickDisplayCues(CUES, 1, -1, { twoLine: false })).toEqual({
+        curText: "second",
+        prevText: "",
+      });
+    });
+
+    test("active at index 0 → still no prev line (OFF never shows prev)", () => {
+      expect(pickDisplayCues(CUES, 0, -1, { twoLine: false })).toEqual({
+        curText: "first",
+        prevText: "",
+      });
+    });
+
+    test("every active index shows exactly that cue and never a prev line", () => {
+      for (let i = 0; i < CUES.length; i++) {
+        expect(pickDisplayCues(CUES, i, -1, { twoLine: false })).toEqual({
+          curText: CUES[i]!.text,
+          prevText: "",
+        });
+      }
+    });
+
+    test("gap (activeP=-1) → fully blank, NO hold even with a valid heldIdx", () => {
+      // heldIdx points at a real cue but OFF mode ignores it entirely.
+      expect(pickDisplayCues(CUES, -1, 1, { twoLine: false })).toEqual({
+        curText: "",
+        prevText: "",
+      });
+      // ...and with no held index either.
+      expect(pickDisplayCues(CUES, -1, -1, { twoLine: false })).toEqual({
+        curText: "",
+        prevText: "",
+      });
     });
   });
 
-  test("gap (single-line) blanks the line", () => {
-    // activeP === -1 in a gap, no hold when twoLine is off
-    expect(pickDisplayCues(CUES, -1, 1, { twoLine: false })).toEqual({
-      curText: "",
-      prevText: "",
+  // ---------------------------------------------------------------------------
+  // toggle ON: current + previous; never blank while a cue has played.
+  // ---------------------------------------------------------------------------
+  describe("twoLine ON — active cue", () => {
+    test("active cue surfaces the previous line above it", () => {
+      expect(pickDisplayCues(CUES, 2, -1, { twoLine: true })).toEqual({
+        curText: "third",
+        prevText: "second",
+      });
+      expect(pickDisplayCues(CUES, 1, -1, { twoLine: true })).toEqual({
+        curText: "second",
+        prevText: "first",
+      });
+    });
+
+    test("at index 0 the prev line is empty (no cue before the first)", () => {
+      expect(pickDisplayCues(CUES, 0, -1, { twoLine: true })).toEqual({
+        curText: "first",
+        prevText: "",
+      });
+    });
+
+    test("for every i>0, curText=cues[i], prevText=cues[i-1]", () => {
+      for (let i = 1; i < CUES.length; i++) {
+        expect(pickDisplayCues(CUES, i, -1, { twoLine: true })).toEqual({
+          curText: CUES[i]!.text,
+          prevText: CUES[i - 1]!.text,
+        });
+      }
     });
   });
 
-  test("gap (twoLine) holds the last cue → never blank", () => {
-    // activeP === -1 but heldIdx points at cue[1]: hold it, show its prev above
-    expect(pickDisplayCues(CUES, -1, 1, { twoLine: true })).toEqual({
-      curText: "second",
-      prevText: "first",
+  describe("twoLine ON — gaps hold (never blank)", () => {
+    test("single gap holds heldIdx and shows its prev", () => {
+      // activeP === -1 but heldIdx points at cue[1]: hold it, show its prev above
+      expect(pickDisplayCues(CUES, -1, 1, { twoLine: true })).toEqual({
+        curText: "second",
+        prevText: "first",
+      });
+    });
+
+    test("gap while held at index 0 → holds first, prev empty", () => {
+      expect(pickDisplayCues(CUES, -1, 0, { twoLine: true })).toEqual({
+        curText: "first",
+        prevText: "",
+      });
+    });
+
+    test("gap held at the LAST cue → holds last, shows prev", () => {
+      expect(pickDisplayCues(CUES, -1, 2, { twoLine: true })).toEqual({
+        curText: "third",
+        prevText: "second",
+      });
+    });
+
+    test("multiple consecutive gap renders keep holding the same cue", () => {
+      // Player keeps heldCueIdxRef pinned across every gap render — assert the
+      // function is a pure function of (heldIdx) here: repeated calls are stable.
+      for (let k = 0; k < 5; k++) {
+        expect(pickDisplayCues(CUES, -1, 1, { twoLine: true })).toEqual({
+          curText: "second",
+          prevText: "first",
+        });
+      }
     });
   });
 
-  test("twoLine active cue surfaces the previous line", () => {
-    expect(pickDisplayCues(CUES, 2, -1, { twoLine: true })).toEqual({
-      curText: "third",
-      prevText: "second",
+  // ---------------------------------------------------------------------------
+  // Defensive / boundary inputs: must never throw, always {string,string}.
+  // ---------------------------------------------------------------------------
+  describe("twoLine ON — safe on bad indices / empty inputs", () => {
+    test("heldIdx out of range (too high) → blank, no throw", () => {
+      expect(pickDisplayCues(CUES, -1, 99, { twoLine: true })).toEqual({
+        curText: "",
+        prevText: "",
+      });
+    });
+
+    test("heldIdx === -1 during a gap (nothing has played yet) → blank", () => {
+      expect(pickDisplayCues(CUES, -1, -1, { twoLine: true })).toEqual({
+        curText: "",
+        prevText: "",
+      });
+    });
+
+    test("negative heldIdx other than -1 → blank, no throw", () => {
+      expect(pickDisplayCues(CUES, -1, -5, { twoLine: true })).toEqual({
+        curText: "",
+        prevText: "",
+      });
+    });
+
+    test("empty cue array → blank for both ON and OFF, no throw", () => {
+      expect(pickDisplayCues([], 0, 0, { twoLine: true })).toEqual({
+        curText: "",
+        prevText: "",
+      });
+      expect(pickDisplayCues([], -1, 5, { twoLine: true })).toEqual({
+        curText: "",
+        prevText: "",
+      });
+      expect(pickDisplayCues([], 0, 0, { twoLine: false })).toEqual({
+        curText: "",
+        prevText: "",
+      });
+    });
+
+    test("single-cue list: active shows it with empty prev (ON and OFF)", () => {
+      const one = [makeCue(1, 2, "only")];
+      expect(pickDisplayCues(one, 0, -1, { twoLine: true })).toEqual({
+        curText: "only",
+        prevText: "",
+      });
+      expect(pickDisplayCues(one, 0, -1, { twoLine: false })).toEqual({
+        curText: "only",
+        prevText: "",
+      });
+    });
+
+    test("single-cue list: gap holds it with empty prev", () => {
+      const one = [makeCue(1, 2, "only")];
+      expect(pickDisplayCues(one, -1, 0, { twoLine: true })).toEqual({
+        curText: "only",
+        prevText: "",
+      });
+    });
+
+    test("activeP beyond the array length → blank curText (no cue there)", () => {
+      // A stale activeP one render ahead of a shrunk cue list must not throw.
+      expect(pickDisplayCues(CUES, 99, -1, { twoLine: true })).toEqual({
+        curText: "",
+        // eff-1 = 98 also has no cue → empty prev
+        prevText: "",
+      });
+      expect(pickDisplayCues(CUES, 99, -1, { twoLine: false })).toEqual({
+        curText: "",
+        prevText: "",
+      });
     });
   });
 
-  test("eff === 0 has no previous line (boundary)", () => {
-    expect(pickDisplayCues(CUES, 0, -1, { twoLine: true })).toEqual({
-      curText: "first",
-      prevText: "",
-    });
-  });
+  // ---------------------------------------------------------------------------
+  // Transition simulation: active → gap → active, mirroring the Player's
+  // heldCueIdxRef update (`if (activeP >= 0) held = activeP`). In ON mode the
+  // line must NEVER blank once any cue has been active; in OFF mode gaps blank.
+  // ---------------------------------------------------------------------------
+  describe("active→gap→active transitions (heldIdx tracking)", () => {
+    // Drive a timeline of activeP values through the same held-index update the
+    // Player does, collecting the rendered {curText, prevText} at each step.
+    function runTimeline(activeSeq: number[], twoLine: boolean) {
+      let held = -1;
+      return activeSeq.map((activeP) => {
+        if (activeP >= 0) held = activeP; // mirrors Player.tsx line 1094
+        return pickDisplayCues(CUES, activeP, held, { twoLine });
+      });
+    }
 
-  test("out-of-range held index yields blank, no throw", () => {
-    expect(pickDisplayCues(CUES, -1, 99, { twoLine: true })).toEqual({
-      curText: "",
-      prevText: "",
+    test("ON: cue0 → gap → cue1 → gap → cue2 never blanks and tracks prev", () => {
+      const out = runTimeline([0, -1, 1, -1, 2, -1], true);
+      expect(out).toEqual([
+        { curText: "first", prevText: "" }, // active cue0
+        { curText: "first", prevText: "" }, // gap holds cue0
+        { curText: "second", prevText: "first" }, // active cue1
+        { curText: "second", prevText: "first" }, // gap holds cue1
+        { curText: "third", prevText: "second" }, // active cue2
+        { curText: "third", prevText: "second" }, // gap holds cue2
+      ]);
+      // Invariant: not a single blank curText after the first cue played.
+      for (const r of out) expect(r.curText).not.toBe("");
+    });
+
+    test("ON: leading gap BEFORE any cue is blank, then never blanks again", () => {
+      const out = runTimeline([-1, -1, 0, -1, 1], true);
+      expect(out[0]).toEqual({ curText: "", prevText: "" }); // nothing has played
+      expect(out[1]).toEqual({ curText: "", prevText: "" });
+      expect(out[2]).toEqual({ curText: "first", prevText: "" });
+      // After cue0 played, every later render is non-blank.
+      for (const r of out.slice(2)) expect(r.curText).not.toBe("");
+    });
+
+    test("ON: a long run of consecutive gaps keeps holding the last cue", () => {
+      const out = runTimeline([1, -1, -1, -1, -1], true);
+      for (const r of out) {
+        expect(r).toEqual({ curText: "second", prevText: "first" });
+      }
+    });
+
+    test("OFF: the SAME timeline blanks during every gap", () => {
+      const out = runTimeline([0, -1, 1, -1, 2, -1], false);
+      expect(out).toEqual([
+        { curText: "first", prevText: "" },
+        { curText: "", prevText: "" }, // gap → blank
+        { curText: "second", prevText: "" },
+        { curText: "", prevText: "" }, // gap → blank
+        { curText: "third", prevText: "" },
+        { curText: "", prevText: "" }, // gap → blank
+      ]);
     });
   });
 });

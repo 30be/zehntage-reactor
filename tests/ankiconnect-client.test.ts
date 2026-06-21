@@ -200,4 +200,176 @@ describe("acDeleteByFront — findNotes then deleteNotes", () => {
     expect(r.ok).toBe(false);
     expect(r.error).toBe("some failure");
   });
+
+  test("a single matching note → deleteNotes([id]), deleted:1", async () => {
+    stubFetch({
+      findNotes: () => ({ result: [777], error: null }),
+      deleteNotes: (p) => {
+        expect(p.notes).toEqual([777]);
+        return { result: null, error: null };
+      },
+    });
+    const r = await acDeleteByFront("solo");
+    expect(r).toEqual({ ok: true, deleted: 1 });
+  });
+
+  test("several notes share a front → all ids deleted (un-mine the word)", async () => {
+    stubFetch({
+      findNotes: () => ({ result: [1, 2, 3], error: null }),
+      deleteNotes: (p) => {
+        expect(p.notes).toEqual([1, 2, 3]);
+        return { result: null, error: null };
+      },
+    });
+    const r = await acDeleteByFront("dup-front");
+    expect(r.ok).toBe(true);
+    expect(r.deleted).toBe(3);
+  });
+
+  test("findNotes {error:!null} (e.g. bad query) → failure, no deleteNotes", async () => {
+    stubFetch({
+      findNotes: () => ({ result: null, error: "invalid search" }),
+    });
+    const r = await acDeleteByFront("x");
+    expect(r.ok).toBe(false);
+    expect(r.error).toBe("invalid search");
+    expect(r.reason).toBeUndefined(); // reachable-but-failed, NOT transport
+    expect(calls.map((c) => c.action)).toEqual(["findNotes"]);
+  });
+
+  test("deleteNotes connection refused mid-delete → transport reason", async () => {
+    stubFetch({
+      findNotes: () => ({ result: [9], error: null }),
+      deleteNotes: () => new Error("ECONNREFUSED"),
+    });
+    const r = await acDeleteByFront("x");
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("transport");
+  });
+
+  test("only a backslash in the front is escaped", async () => {
+    stubFetch({
+      findNotes: (p) => {
+        expect(p.query).toBe('deck:Mixed Front:"C:\\\\path"');
+        return { result: [], error: null };
+      },
+    });
+    await acDeleteByFront("C:\\path");
+  });
+
+  test("a front with no special chars passes through unescaped", async () => {
+    stubFetch({
+      findNotes: (p) => {
+        expect(p.query).toBe('deck:Mixed Front:"猫 [ねこ]"');
+        return { result: [], error: null };
+      },
+    });
+    await acDeleteByFront("猫 [ねこ]");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Transport / protocol edge cases shared across actions: timeout (AbortError),
+// HTTP non-200, malformed JSON. All must map cleanly without throwing — and the
+// transport ones must be distinguishable so review.ts can fall back to the DB.
+// ---------------------------------------------------------------------------
+describe("acAvailable — probe failure modes", () => {
+  test("AnkiConnect {error:!null} on the version probe → not available", async () => {
+    // Reachable but the version action itself errored → treat as unavailable
+    // (no usable numeric version), NOT a crash.
+    stubFetch({ version: () => ({ result: null, error: "collection is not open" }) });
+    expect(await acAvailable()).toBe(false);
+  });
+
+  test("version returns a non-number result → not available", async () => {
+    stubFetch({ version: () => ({ result: "six", error: null }) });
+    expect(await acAvailable()).toBe(false);
+  });
+
+  test("HTTP 500 from the endpoint → not available, never throws", async () => {
+    globalThis.fetch = (async () =>
+      new Response("nope", { status: 500 })) as unknown as typeof fetch;
+    expect(await acAvailable()).toBe(false);
+  });
+
+  test("timeout (AbortError) is treated as unavailable", async () => {
+    // Simulate the AbortController firing: fetch rejects with an AbortError, the
+    // same shape acRaw's catch maps to a transport failure.
+    globalThis.fetch = (async () => {
+      const e = new Error("The operation was aborted.");
+      e.name = "AbortError";
+      throw e;
+    }) as unknown as typeof fetch;
+    expect(await acAvailable()).toBe(false);
+  });
+});
+
+describe("acAddNote — transport/protocol edge cases", () => {
+  test("HTTP 500 → {ok:false}, reachable (reason undefined, NOT transport)", async () => {
+    globalThis.fetch = (async () =>
+      new Response("boom", { status: 500 })) as unknown as typeof fetch;
+    const r = await acAddNote({ front: "x", back: "y" });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBeUndefined();
+    expect(r.error).toContain("HTTP 500");
+  });
+
+  test("malformed JSON body → {ok:false} reachable, never throws", async () => {
+    globalThis.fetch = (async () =>
+      new Response("<html>not json</html>", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch;
+    const r = await acAddNote({ front: "x", back: "y" });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("bad JSON");
+    expect(r.reason).toBeUndefined();
+  });
+
+  test("timeout (AbortError) → transport failure", async () => {
+    globalThis.fetch = (async () => {
+      const e = new Error("aborted");
+      e.name = "AbortError";
+      throw e;
+    }) as unknown as typeof fetch;
+    const r = await acAddNote({ front: "x", back: "y" });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("transport");
+  });
+
+  test("disabled via ANKI_FAKE=1 → transport failure, fetch never called", async () => {
+    process.env.ANKI_FAKE = "1";
+    stubFetch({ addNote: () => ({ result: 1, error: null }) });
+    const r = await acAddNote({ front: "x", back: "y" });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("transport");
+    expect(calls.length).toBe(0);
+  });
+
+  test("explicit empty tags array falls back to the zehntage default", async () => {
+    // [] is "no tags" → the client uses the ZR_TAG default (matches dbAddNote).
+    stubFetch({ addNote: () => ({ result: 1, error: null }) });
+    await acAddNote({ front: "x", back: "y", tags: [] });
+    const note = (calls[0]!.params as { note: { tags: string[] } }).note;
+    expect(note.tags).toEqual(["zehntage"]);
+  });
+});
+
+describe("acDeleteByFront — transport/protocol edge cases", () => {
+  test("HTTP 500 on findNotes → {ok:false} reachable, no deleteNotes", async () => {
+    globalThis.fetch = (async () =>
+      new Response("boom", { status: 500 })) as unknown as typeof fetch;
+    const r = await acDeleteByFront("x");
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBeUndefined();
+  });
+
+  test("disabled via ZR_ANKICONNECT_DISABLE=1 → transport, fetch never called", async () => {
+    process.env.ZR_ANKICONNECT_DISABLE = "1";
+    stubFetch({ findNotes: () => ({ result: [1], error: null }) });
+    const r = await acDeleteByFront("x");
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("transport");
+    expect(calls.length).toBe(0);
+  });
 });
