@@ -3021,3 +3021,200 @@ textarea:focus-visible {
   color: var(--c-warn);
   margin: 8px 0;
 }
+
+/* ===================================================================== */
+/* ---- mobile / responsive (appended) ----                              */
+/* PWA + phone layout. Everything below is gated behind max-width / touch */
+/* media queries; the wide desktop layout is untouched. The mobile bottom */
+/* nav (web/MobileNav.tsx) is display:none by default and only appears at */
+/* <=700px, where the desktop sidebar is hidden in turn.                  */
+/* ===================================================================== */
+
+/* The bottom nav is always rendered (web/App.tsx) but hidden on desktop. */
+.mnav,
+.mnav-drawer,
+.mnav-drawer-backdrop {
+  display: none;
+}
+
+/* Honor the iOS/Android dynamic safe-area for the fixed bottom bar. */
+:root {
+  --mnav-h: 56px;
+}
+
+@media (max-width: 700px) {
+  /* Swap the left rail for the bottom tab bar. The sidebar (and its
+     narrow-rail variants at 480/900px) is fully replaced here. */
+  .app.shell .sidebar {
+    display: none;
+  }
+  .app.shell {
+    flex-direction: column;
+  }
+
+  /* Reserve room so the fixed bar never covers page content. */
+  .app.shell .container {
+    padding: 16px 14px;
+    padding-bottom: calc(var(--mnav-h) + env(safe-area-inset-bottom, 0px) + 16px);
+  }
+
+  .mnav {
+    display: flex;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 60;
+    height: calc(var(--mnav-h) + env(safe-area-inset-bottom, 0px));
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    background: var(--bg);
+    border-top: 1px solid var(--border);
+  }
+  .mnav-item {
+    flex: 1 1 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    min-width: 0;
+    padding: 6px 2px;
+    font: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .mnav-item:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .mnav-item.active {
+    color: var(--accent);
+  }
+  .mnav-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .mnav-icon svg {
+    display: block;
+  }
+  .mnav-label {
+    line-height: 1;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* "More" overflow drawer: slides up from above the bottom bar. */
+  .mnav-drawer-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 55;
+    background: rgba(0, 0, 0, 0.35);
+  }
+  .mnav-drawer {
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: calc(var(--mnav-h) + env(safe-area-inset-bottom, 0px));
+    z-index: 60;
+    padding: 6px;
+    background: var(--bg);
+    border-top: 1px solid var(--border);
+    box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.18);
+    transform: translateY(110%);
+    transition: transform 0.18s ease;
+    visibility: hidden;
+  }
+  .mnav-drawer.open {
+    transform: translateY(0);
+    visibility: visible;
+  }
+  .mnav-drawer-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    padding: 12px 14px;
+    font: inherit;
+    font-size: 15px;
+    font-weight: 600;
+    text-align: left;
+    color: var(--fg);
+    background: transparent;
+    border: none;
+    border-radius: var(--radius);
+    cursor: pointer;
+  }
+  .mnav-drawer-item:hover {
+    background: var(--muted-bg);
+  }
+  .mnav-drawer-item.active {
+    color: var(--accent);
+  }
+  .mnav-drawer-item .mnav-icon {
+    width: 1.3em;
+    flex: none;
+  }
+}
+
+/* Player: stack stage + cue list and let the video use the full width on
+   phones. (The existing <=700px stage-row rule already stacks them; here we
+   tighten paddings and keep the cue list from eating the whole viewport.) */
+@media (max-width: 700px) {
+  .container .player,
+  .container .player-wrap {
+    gap: 12px;
+  }
+  .cue-sidebar {
+    max-height: 38vh;
+  }
+}
+
+/* Library list: drop to a single comfortable column and let long names wrap
+   instead of overflowing on phone widths. */
+@media (max-width: 700px) {
+  .container .grid {
+    grid-template-columns: 1fr;
+  }
+  .container .lib-row {
+    flex-wrap: wrap;
+  }
+  .container .lib-row .name {
+    min-width: 0;
+    word-break: break-word;
+  }
+  .container .lib-langs {
+    flex-wrap: wrap;
+  }
+}
+
+/* Settings + Review: full-width controls and tighter page gutters so forms
+   and the flashcard reader fit a phone screen. */
+@media (max-width: 700px) {
+  .container .settings-form .field input[type="text"],
+  .container .settings-form .field input[type="number"],
+  .container .settings-form .field select,
+  .container .cards-filters select {
+    width: 100%;
+    max-width: 100%;
+  }
+  .container .review {
+    width: 100%;
+  }
+  .review-question {
+    font-size: 19px;
+  }
+  .review-answer {
+    font-size: 16px;
+  }
+}

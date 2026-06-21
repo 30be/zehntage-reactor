@@ -16,3 +16,19 @@ if (root) {
     </StrictMode>,
   );
 }
+
+// PWA: register the app-shell service worker. Guarded so it only runs in a
+// production bundle served over http(s) (not the dev server / file://), and
+// failures are swallowed — the app must work even when SW registration fails.
+if (
+  process.env.NODE_ENV === "production" &&
+  typeof navigator !== "undefined" &&
+  "serviceWorker" in navigator &&
+  /^https?:$/.test(window.location.protocol)
+) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {
+      /* offline support is best-effort */
+    });
+  });
+}
