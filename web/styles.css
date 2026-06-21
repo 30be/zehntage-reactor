@@ -136,6 +136,9 @@ a { color: inherit; }
   overflow: hidden;
 }
 .video-stage video { display: block; width: 100%; max-height: 72vh; }
+/* touch gestures: kill the double-tap-to-zoom delay on the tap targets so
+   single/double-tap (play, seek, word lookup/add) register instantly. */
+.video-stage video, .sub-primary .tok { touch-action: manipulation; }
 
 .sub-overlay {
   position: absolute;
