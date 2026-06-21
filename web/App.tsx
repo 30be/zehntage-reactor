@@ -14,6 +14,7 @@ import { Stats } from "./StatsRoute.tsx";
 import { Search } from "./SearchRoute.tsx";
 import { Review } from "./ReviewRoute.tsx";
 import { Settings } from "./SettingsRoute.tsx";
+import { MobileNav } from "./MobileNav.tsx";
 import { Palette } from "./Palette.tsx";
 import { startSync, emitVocabChanged } from "./sync.ts";
 import { tmEvent, tmStart } from "./telemetry.ts";
@@ -283,6 +284,12 @@ export function App() {
               {toastMsg}
             </div>
           ))}
+      <MobileNav
+        routeName={route.name}
+        go={go}
+        viewHash={lastMedia ? `#/play/${lastMedia}` : "#/"}
+        viewDisabled={!lastMedia}
+      />
       <Palette go={go} toast={toast} settings={settings} setSettings={setSettings} />
     </div>
   );
