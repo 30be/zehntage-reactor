@@ -37,7 +37,10 @@ import {
   deckCountsAuto,
   answerCardAuto,
   deleteNoteAuto,
+  deleteNoteByFrontAuto,
   addNoteAuto,
+  listCardsAuto,
+  progressAuto,
   reviewStatus,
 } from "../src/lib/review.ts";
 
@@ -168,6 +171,9 @@ function world(opts: {
     canWrite: (_p: string) =>
       opts.ankiOpen ? { ok: false, reason: "anki-open" } : { ok: true },
     collectionPath: () => "/tmp/fake/collection.anki2",
+    // Keep ankiBackendFake() deterministic (never the persisted fake deck) for
+    // these DB-routing tests; the fake-deck path has its own coverage.
+    readSettings: (async () => ({ ankiBackend: "auto" })) as never,
   });
   return { restore, spy };
 }
@@ -483,5 +489,114 @@ describe("addNoteAuto routing (DB-direct only)", () => {
     expect(r.backend).toBe("ankiconnect");
     expect(w.spy.acAddCard).toBe(1);
     expect(w.spy.dbAddNote).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Persistent FAKE deck routing (ankiBackend === "fake"). ANKI_FAKE is UNSET so
+// the real branch is reached; readSettings() reports "fake" so add/delete/list/
+// progress route to the on-disk fakeDeck* helpers, never the DB write path.
+describe("persistent fake-deck routing (ankiBackend=fake)", () => {
+  interface FakeSpy {
+    fakeDeckAdd: number;
+    fakeDeckDeleteByFront: number;
+    fakeDeckDeleteById: number;
+    fakeDeckList: number;
+    dbAddNote: number;
+    dbDeleteNote: number;
+    dbDeleteNoteByFront: number;
+    dbListCards: number;
+  }
+  function fakeWorld() {
+    const spy: FakeSpy = {
+      fakeDeckAdd: 0,
+      fakeDeckDeleteByFront: 0,
+      fakeDeckDeleteById: 0,
+      fakeDeckList: 0,
+      dbAddNote: 0,
+      dbDeleteNote: 0,
+      dbDeleteNoteByFront: 0,
+      dbListCards: 0,
+    };
+    const r = __setReviewDeps({
+      readSettings: (async () => ({ ankiBackend: "fake" })) as never,
+      fakeDeckAdd: async (_c) => {
+        spy.fakeDeckAdd++;
+        return { ok: true, noteId: 111 };
+      },
+      fakeDeckDeleteByFront: async (_f) => {
+        spy.fakeDeckDeleteByFront++;
+        return { ok: true, deleted: 1 };
+      },
+      fakeDeckDeleteById: async (_id) => {
+        spy.fakeDeckDeleteById++;
+        return { ok: true, deleted: 1 };
+      },
+      fakeDeckList: () => {
+        spy.fakeDeckList++;
+        return [{ front: "勉強", back: "study", noteId: 111 }];
+      },
+      dbAddNote: async (_c) => {
+        spy.dbAddNote++;
+        return { ok: true, noteId: 1 };
+      },
+      dbDeleteNote: async (_id) => {
+        spy.dbDeleteNote++;
+        return { ok: true };
+      },
+      dbDeleteNoteByFront: async (_f) => {
+        spy.dbDeleteNoteByFront++;
+        return { ok: true };
+      },
+      dbListCards: (_scope) => {
+        spy.dbListCards++;
+        return [];
+      },
+    });
+    return { restore: r, spy };
+  }
+
+  test("add routes to the fake deck, never the DB", async () => {
+    const w = fakeWorld();
+    restore = w.restore;
+    const res = await addNoteAuto({ front: "勉強", back: "study" });
+    expect(res.ok).toBe(true);
+    expect(w.spy.fakeDeckAdd).toBe(1);
+    expect(w.spy.dbAddNote).toBe(0);
+  });
+
+  test("delete-by-front routes to the fake deck, never the DB", async () => {
+    const w = fakeWorld();
+    restore = w.restore;
+    const res = await deleteNoteByFrontAuto("勉強");
+    expect(res.ok).toBe(true);
+    expect(w.spy.fakeDeckDeleteByFront).toBe(1);
+    expect(w.spy.dbDeleteNoteByFront).toBe(0);
+  });
+
+  test("delete-by-id routes to the fake deck, never the DB", async () => {
+    const w = fakeWorld();
+    restore = w.restore;
+    const res = await deleteNoteAuto(111);
+    expect(res.ok).toBe(true);
+    expect(w.spy.fakeDeckDeleteById).toBe(1);
+    expect(w.spy.dbDeleteNote).toBe(0);
+  });
+
+  test("list routes to the fake deck, never the DB", async () => {
+    const w = fakeWorld();
+    restore = w.restore;
+    const cards = await listCardsAuto();
+    expect(cards.map((c) => c.front)).toEqual(["勉強"]);
+    expect(w.spy.fakeDeckList).toBeGreaterThanOrEqual(1);
+    expect(w.spy.dbListCards).toBe(0);
+  });
+
+  test("progress synthesizes a known-word map from the fake deck", async () => {
+    const w = fakeWorld();
+    restore = w.restore;
+    const prog = (await progressAuto()) as Record<string, { queue: number }>;
+    expect(prog["勉強"]).toBeDefined();
+    expect(prog["勉強"]!.queue).toBe(2); // settled review card → colors as known
   });
 });

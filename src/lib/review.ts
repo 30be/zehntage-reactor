@@ -33,9 +33,14 @@ import {
   addCard as acAddCard,
   listWords as acListWords,
   getProgress as acGetProgress,
+  fakeDeckList,
+  fakeDeckAdd,
+  fakeDeckDeleteByFront,
+  fakeDeckDeleteById,
   type AnkiCard,
   type ReviewCard,
 } from "./anki.ts";
+import { readSettings } from "./settings.ts";
 import {
   dbStatus,
   dbReviewQueue,
@@ -105,6 +110,13 @@ interface ReviewDeps {
   acDeleteByFront: typeof acDeleteByFront;
   canWrite: typeof canWrite;
   collectionPath: typeof collectionPath;
+  // Persistent FAKE deck (ankiBackend === "fake", no-Anki deploys). Used only
+  // when ankiBackendFake() is true; the in-memory ac* deps above are e2e-only.
+  fakeDeckList: typeof fakeDeckList;
+  fakeDeckAdd: typeof fakeDeckAdd;
+  fakeDeckDeleteByFront: typeof fakeDeckDeleteByFront;
+  fakeDeckDeleteById: typeof fakeDeckDeleteById;
+  readSettings: typeof readSettings;
 }
 
 const realDeps: ReviewDeps = {
@@ -130,9 +142,31 @@ const realDeps: ReviewDeps = {
   acDeleteByFront,
   canWrite,
   collectionPath,
+  fakeDeckList,
+  fakeDeckAdd,
+  fakeDeckDeleteByFront,
+  fakeDeckDeleteById,
+  readSettings,
 };
 
 let deps: ReviewDeps = realDeps;
+
+/**
+ * True when the persistent FAKE Anki backend is selected (ankiBackend ===
+ * "fake") — a no-Anki deployment that persists mined cards to an on-disk JSON
+ * deck instead of a real collection. Read from settings; defaults to false
+ * (auto) and never throws. ANKI_FAKE (the e2e flag) takes precedence over this
+ * everywhere, so tests are unaffected.
+ */
+async function ankiBackendFake(): Promise<boolean> {
+  if (process.env.ANKI_FAKE === "1") return false;
+  try {
+    const s = await deps.readSettings();
+    return s.ankiBackend === "fake";
+  } catch {
+    return false;
+  }
+}
 
 // The error surfaced when Anki is OPEN (so the direct-DB write is refused) but
 // AnkiConnect is unreachable (so we can't mine through the running Anki either).
@@ -371,6 +405,22 @@ export async function deleteNoteAuto(cardId: number): Promise<DeleteResult> {
     }
   }
 
+  // Persistent FAKE deck (no-Anki deploy): drop the card from the on-disk JSON
+  // store by its synthetic noteId.
+  if (await ankiBackendFake()) {
+    try {
+      await deps.fakeDeckDeleteById(cardId);
+      return { ok: true, backend: "db" };
+    } catch (e) {
+      return {
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+        reason: "fake-delete-threw",
+        backend: "db",
+      };
+    }
+  }
+
   // Real path: windowless DB write. dbDeleteNote fails-closed when Anki is open.
   if (dbDirectEnabled()) {
     try {
@@ -426,6 +476,22 @@ export async function deleteNoteByFrontAuto(front: string): Promise<DeleteResult
         error: e instanceof Error ? e.message : String(e),
         reason: "fake-delete-threw",
         backend: "ankiconnect",
+      };
+    }
+  }
+
+  // Persistent FAKE deck (no-Anki deploy): drop the card from the on-disk JSON
+  // store by front (idempotent — already-absent is ok).
+  if (await ankiBackendFake()) {
+    try {
+      await deps.fakeDeckDeleteByFront(front);
+      return { ok: true, backend: "db" };
+    } catch (e) {
+      return {
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+        reason: "fake-delete-threw",
+        backend: "db",
       };
     }
   }
@@ -517,6 +583,22 @@ export async function addNoteAuto(card: AnkiCard): Promise<AddResult> {
     }
   }
 
+  // Persistent FAKE deck (no-Anki deploy): write the card to the on-disk JSON
+  // store so it survives restarts. Never touches a real collection.
+  if (await ankiBackendFake()) {
+    try {
+      await deps.fakeDeckAdd(card);
+      return { ok: true, backend: "db" };
+    } catch (e) {
+      return {
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+        reason: "fake-add-threw",
+        backend: "db",
+      };
+    }
+  }
+
   // Real path. Route by Anki state so the `a` hotkey ALWAYS works without ever
   // risking the real collection:
   //   1. AnkiConnect reachable → add THROUGH the running Anki (SAFE while open).
@@ -599,6 +681,10 @@ export async function listCardsAuto(): Promise<AnkiCard[]> {
   if (process.env.ANKI_FAKE === "1") {
     return deps.acListWords();
   }
+  // Persistent FAKE deck (no-Anki deploy): list the on-disk JSON store.
+  if (await ankiBackendFake()) {
+    return deps.fakeDeckList();
+  }
   // Real path: windowless DB read.
   if (dbDirectEnabled()) {
     const cards = deps.dbListCards("all");
@@ -628,6 +714,28 @@ export async function listCardsAuto(): Promise<AnkiCard[]> {
 export async function progressAuto(): Promise<Record<string, unknown> | null> {
   if (process.env.ANKI_FAKE === "1") {
     return deps.acGetProgress();
+  }
+  // Persistent FAKE deck (no-Anki deploy): synthesize a minimal progress map so
+  // mined words still color as "known". The fake deck has no FSRS scheduling, so
+  // every mined card is reported as a settled review card (queue 2) — enough for
+  // token coloring; it is not a real scheduler.
+  if (await ankiBackendFake()) {
+    const map: Record<string, unknown> = {};
+    for (const c of deps.fakeDeckList()) {
+      if (typeof c.front !== "string") continue;
+      map[c.front] = {
+        interval: 1,
+        due: 0,
+        reps: 1,
+        lapses: 0,
+        ease: 2500,
+        queue: 2,
+        type: 2,
+        isDue: false,
+        daysOverdue: 0,
+      };
+    }
+    return map;
   }
   // Real path: windowless DB read.
   if (dbDirectEnabled()) {

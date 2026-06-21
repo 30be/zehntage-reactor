@@ -15,11 +15,18 @@
  */
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   listWords,
   addCard,
   deleteCard,
   bustListWordsCache,
+  fakeDeckList,
+  fakeDeckAdd,
+  fakeDeckDeleteByFront,
+  fakeDeckDeleteById,
   type AnkiCard,
 } from "../src/lib/anki.ts";
 
@@ -183,5 +190,71 @@ describe("listWords — live-map in ANKI_FAKE mode", () => {
   test("bustListWordsCache is callable and idempotent (no AnkiConnect cache now)", () => {
     expect(() => bustListWordsCache()).not.toThrow();
     expect(() => bustListWordsCache()).not.toThrow(); // idempotent
+  });
+});
+
+// ===========================================================================
+// PERSISTENT FAKE DECK (ankiBackend === "fake") — on-disk JSON store
+// ===========================================================================
+
+describe("persistent fake deck (on-disk JSON store)", () => {
+  let base: string;
+  let savedDir: string | undefined;
+
+  beforeEach(async () => {
+    base = await mkdtemp(join(tmpdir(), "zr-fakedeck-test-"));
+    savedDir = process.env.ZR_CONFIG_DIR;
+    process.env.ZR_CONFIG_DIR = base;
+  });
+
+  afterEach(async () => {
+    if (savedDir === undefined) delete process.env.ZR_CONFIG_DIR;
+    else process.env.ZR_CONFIG_DIR = savedDir;
+    await rm(base, { recursive: true, force: true });
+  });
+
+  test("list is [] when nothing has been written", () => {
+    expect(fakeDeckList()).toEqual([]);
+  });
+
+  test("add persists a card and survives a re-read", async () => {
+    const card: AnkiCard = { front: "勉強", back: "study", notes: "n", context: "c" };
+    const r = await fakeDeckAdd(card);
+    expect(r.ok).toBe(true);
+    expect(typeof r.noteId).toBe("number");
+    const cards = fakeDeckList();
+    expect(cards.length).toBe(1);
+    expect(cards[0]!.front).toBe("勉強");
+    // default tag applied
+    expect(cards[0]!.tags).toEqual(["zehntage"]);
+  });
+
+  test("add overwrites a card with the same front (no duplicate)", async () => {
+    await fakeDeckAdd({ front: "本", back: "old" });
+    await fakeDeckAdd({ front: "本", back: "new" });
+    const cards = fakeDeckList();
+    expect(cards.length).toBe(1);
+    expect(cards[0]!.back).toBe("new");
+  });
+
+  test("deleteByFront removes the card; idempotent on a miss", async () => {
+    await fakeDeckAdd({ front: "図書館", back: "library" });
+    const r1 = await fakeDeckDeleteByFront("図書館");
+    expect(r1).toEqual({ ok: true, deleted: 1 });
+    expect(fakeDeckList()).toEqual([]);
+    const r2 = await fakeDeckDeleteByFront("図書館"); // already gone
+    expect(r2).toEqual({ ok: true, deleted: 0 });
+  });
+
+  test("deleteById removes by synthetic noteId", async () => {
+    const { noteId } = await fakeDeckAdd({ front: "友達", back: "friend" });
+    const r = await fakeDeckDeleteById(noteId);
+    expect(r).toEqual({ ok: true, deleted: 1 });
+    expect(fakeDeckList()).toEqual([]);
+  });
+
+  test("a corrupt store reads as [] rather than throwing", async () => {
+    await Bun.write(join(base, "fake-deck.json"), "{ not valid json");
+    expect(fakeDeckList()).toEqual([]);
   });
 });

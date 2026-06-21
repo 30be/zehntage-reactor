@@ -37,7 +37,12 @@ import {
   type Cue,
   type SubTrack,
 } from "../lib/subs.ts";
-import { whisperQueue, atomicWrite, type WhisperEvent } from "../lib/whisper.ts";
+import {
+  whisperQueue,
+  atomicWrite,
+  whisperLocalCapability,
+  type WhisperEvent,
+} from "../lib/whisper.ts";
 import {
   lookupWord,
   translateCues,
@@ -1769,7 +1774,23 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         // instead of enqueuing a duplicate 20-minute transcription.
         const existing = whisperQueue.activeFor(entry.absPath, lang);
         if (existing) return json({ jobId: existing.id, status: existing.status });
-        const job = whisperQueue.enqueue(entry.absPath, lang, sidecarPath(entry, lang));
+        // Backend selection (local whisper-cli vs. a configured remote endpoint).
+        // Local is the default; "remote" only takes effect when a URL is set —
+        // otherwise we fall back to local so a half-configured toggle never
+        // silently no-ops a transcription.
+        const wSettings = await readSettings();
+        const useRemote =
+          wSettings.whisperBackend === "remote" &&
+          typeof wSettings.whisperRemoteUrl === "string" &&
+          wSettings.whisperRemoteUrl.trim() !== "";
+        // Probe duration up front so the client can detect a slow job (elapsed >
+        // media duration) without an extra round-trip. Best-effort: 0 on failure.
+        const wDuration = await mediaDurationSec(entry.absPath).catch(() => 0);
+        const job = whisperQueue.enqueue(entry.absPath, lang, sidecarPath(entry, lang), {
+          backend: useRemote ? "remote" : "local",
+          remoteUrl: useRemote ? wSettings.whisperRemoteUrl.trim() : "",
+          mediaDurationSec: wDuration,
+        });
         const _whisperT0 = Date.now();
         const doneListener = (e: WhisperEvent) => {
           if (e.type !== "status") return;
@@ -1789,14 +1810,39 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         return json({ jobId: job.id, status: job.status });
       }
 
+      // Local-whisper capability probe (smart toasts): the client reads this to
+      // suggest switching to the remote backend when whisper-cli/model is absent.
+      if (req.method === "GET" && path === "/api/whisper/capability") {
+        const cap = whisperLocalCapability();
+        const s = await readSettings();
+        return json({
+          ...cap,
+          backend: s.whisperBackend === "remote" ? "remote" : "local",
+          remoteConfigured:
+            typeof s.whisperRemoteUrl === "string" &&
+            s.whisperRemoteUrl.trim() !== "",
+        });
+      }
+
       // Active whisper job for a media id, so the UI can reattach after reload.
+      // Also surfaces elapsedMs + mediaDurationSec so the client can fire the
+      // "recognition is slow" toast when transcription outlasts the episode.
       if (req.method === "GET" && path === "/api/whisper/active") {
         const mediaId = url.searchParams.get("mediaId") ?? "";
         const entry = library.get(mediaId);
         if (!entry) return err("not found", 404);
         const job = whisperQueue.activeFor(entry.absPath);
         return json(
-          job ? { jobId: job.id, status: job.status, lang: job.lang } : { jobId: null },
+          job
+            ? {
+                jobId: job.id,
+                status: job.status,
+                lang: job.lang,
+                backend: job.backend,
+                elapsedMs: Date.now() - job.startedAt,
+                mediaDurationSec: job.mediaDurationSec,
+              }
+            : { jobId: null },
         );
       }
 

@@ -6,7 +6,7 @@ import { existsSync } from "node:fs";
 import { unlink, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import type { Cue } from "./subs.ts";
-import { cleanCues, cuesToSrt, findCoverageHoles, parseTimestamp } from "./subs.ts";
+import { cleanCues, cuesToSrt, findCoverageHoles, parseSrt, parseTimestamp } from "./subs.ts";
 
 const THREADS = 12;
 
@@ -51,6 +51,38 @@ export function resolveModelPath(): string {
   return medium;
 }
 
+/**
+ * Local-whisper capability probe for the smart-toast UI. The client reads this
+ * to decide whether to suggest switching to the remote backend.
+ *
+ * `whisperCli` — `whisper-cli` resolves on PATH (Bun.which). `model` — a usable
+ * ggml model file exists at the resolved path. `available` — both true, i.e. a
+ * local transcription would actually run. Under WHISPER_FAKE=1 we report fully
+ * available so the e2e/fake path is never nagged. Never throws.
+ */
+export function whisperLocalCapability(): {
+  available: boolean;
+  whisperCli: boolean;
+  model: boolean;
+} {
+  if (process.env.WHISPER_FAKE === "1") {
+    return { available: true, whisperCli: true, model: true };
+  }
+  let whisperCli = false;
+  try {
+    whisperCli = Bun.which("whisper-cli") != null;
+  } catch {
+    whisperCli = false;
+  }
+  let model = false;
+  try {
+    model = existsSync(resolveModelPath());
+  } catch {
+    model = false;
+  }
+  return { available: whisperCli && model, whisperCli, model };
+}
+
 export type WhisperJobStatus = "queued" | "extracting" | "running" | "done" | "error" | "canceled";
 
 export interface WhisperJob {
@@ -66,6 +98,87 @@ export interface WhisperJob {
   listeners: Set<(event: WhisperEvent) => void>;
   proc?: ReturnType<typeof Bun.spawn>;
   canceled: boolean;
+  /** epoch ms the job was enqueued — for the "slow recognition" toast (elapsed
+   *  transcription time vs. media duration). */
+  startedAt: number;
+  /** Media duration in seconds (0 = unknown). Set by the server when enqueuing
+   *  so the client can compare elapsed > duration without re-probing. */
+  mediaDurationSec: number;
+  /** Which backend transcribes this job. "local" spawns whisper-cli; "remote"
+   *  POSTs the extracted audio to `remoteUrl`. Defaults to local. */
+  backend: WhisperBackend;
+  /** Remote endpoint when backend === "remote" (empty otherwise). */
+  remoteUrl: string;
+}
+
+export type WhisperBackend = "local" | "remote";
+
+/**
+ * REMOTE WHISPER CONTRACT (backend === "remote")
+ * ----------------------------------------------
+ * The server extracts 16 kHz mono PCM WAV (identical to the local path) and
+ * POSTs the raw bytes to `whisperRemoteUrl`:
+ *
+ *   POST <whisperRemoteUrl>
+ *   Content-Type: audio/wav
+ *   X-Whisper-Lang: <bcp-47 tag>         (also ?lang= on the query string)
+ *   body: <wav bytes>
+ *
+ * The endpoint runs whisper (or any ASR) however it likes and replies with the
+ * transcript as EITHER:
+ *   - application/json  { "cues": [ { "start": <sec>, "end": <sec>, "text": "…" }, … ] }
+ *     (a bare array of the same cue objects is also accepted), OR
+ *   - text/plain / application/x-subrip  — an SRT document (parsed with the same
+ *     parser as sidecar files).
+ *
+ * No streaming: the whole transcript comes back in one response. The job emits
+ * its cues + a snapshot once the response is parsed, then writes the sidecar SRT
+ * exactly like the local path. Any non-2xx / unparseable body fails the job with
+ * a clear error so the client can fall back / re-try locally.
+ */
+export interface RemoteWhisperResult {
+  cues: Cue[];
+}
+
+/** Parse a remote backend response body into cues. Accepts {cues:[…]}, a bare
+ *  cue array, or an SRT document. Returns [] when nothing parses. */
+export function parseRemoteWhisperBody(
+  body: string,
+  contentType: string,
+): Cue[] {
+  const ct = contentType.toLowerCase();
+  const looksJson = ct.includes("json") || /^\s*[[{]/.test(body);
+  if (looksJson) {
+    try {
+      const data = JSON.parse(body) as unknown;
+      const arr = Array.isArray(data)
+        ? data
+        : (data as { cues?: unknown })?.cues;
+      if (Array.isArray(arr)) {
+        const cues: Cue[] = [];
+        for (const c of arr) {
+          if (c && typeof c === "object") {
+            const o = c as Record<string, unknown>;
+            const start = Number(o.start);
+            const end = Number(o.end);
+            const text = typeof o.text === "string" ? o.text.trim() : "";
+            if (Number.isFinite(start) && Number.isFinite(end) && text) {
+              cues.push({ start, end, text });
+            }
+          }
+        }
+        return cues;
+      }
+    } catch {
+      // not JSON after all — fall through to the SRT parser
+    }
+  }
+  // SRT fallback (same parser sidecar files use).
+  try {
+    return cleanCues(parseSrt(body));
+  } catch {
+    return [];
+  }
 }
 
 export type WhisperEvent =
@@ -162,7 +275,16 @@ class WhisperQueue {
     return this.activeFor(mediaPath) !== undefined;
   }
 
-  enqueue(mediaPath: string, lang: string, outPath: string): WhisperJob {
+  enqueue(
+    mediaPath: string,
+    lang: string,
+    outPath: string,
+    opts: {
+      backend?: WhisperBackend;
+      remoteUrl?: string;
+      mediaDurationSec?: number;
+    } = {},
+  ): WhisperJob {
     const job: WhisperJob = {
       id: `w${++this.counter}-${Date.now().toString(36)}`,
       mediaPath,
@@ -173,6 +295,10 @@ class WhisperQueue {
       warnings: [],
       listeners: new Set(),
       canceled: false,
+      startedAt: Date.now(),
+      mediaDurationSec: opts.mediaDurationSec ?? 0,
+      backend: opts.backend ?? "local",
+      remoteUrl: opts.remoteUrl ?? "",
     };
     this.jobs.set(job.id, job);
     this.queue.push(job);
@@ -290,6 +416,14 @@ class WhisperQueue {
       }
       if (job.canceled) return;
 
+      // REMOTE backend: hand the extracted WAV to the configured endpoint and
+      // skip all the local whisper-cli passes / hole-repair (that ASR is the
+      // remote's concern). The WAV is still cleaned up in `finally`.
+      if (job.backend === "remote") {
+        await this.runRemotePass(job, wavPath);
+        return;
+      }
+
       // 2. Run whisper-cli over the whole file, streaming segments from stdout.
       this.setStatus(job, "running");
       await this.whisperPass(job, wavPath, []);
@@ -403,6 +537,63 @@ class WhisperQueue {
       );
     }
     return passCues;
+  }
+
+  /**
+   * REMOTE backend pass: POST the extracted WAV to `job.remoteUrl`, parse the
+   * returned cues (JSON or SRT — see RemoteWhisperResult / the contract above),
+   * emit them, and write the sidecar SRT. No streaming and no hole-repair: the
+   * whole transcript arrives in one response and the remote ASR owns quality.
+   * Any misconfiguration / non-2xx / unparseable body throws so the job errors
+   * cleanly (the client can then fall back to local).
+   */
+  private async runRemotePass(job: WhisperJob, wavPath: string): Promise<void> {
+    if (!job.remoteUrl) {
+      throw new Error("remote whisper backend selected but no URL configured");
+    }
+    this.setStatus(job, "running");
+    const wav = await Bun.file(wavPath).arrayBuffer();
+    if (job.canceled) return;
+
+    const sep = job.remoteUrl.includes("?") ? "&" : "?";
+    const url = `${job.remoteUrl}${sep}lang=${encodeURIComponent(job.lang)}`;
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "audio/wav",
+          "X-Whisper-Lang": job.lang,
+        },
+        body: wav,
+      });
+    } catch (e) {
+      throw new Error(
+        `remote whisper request failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    if (job.canceled) return;
+    if (!res.ok) {
+      const detail = (await res.text().catch(() => "")).slice(0, 300);
+      throw new Error(`remote whisper HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
+    }
+    const contentType = res.headers.get("content-type") ?? "";
+    const body = await res.text();
+    if (job.canceled) return;
+
+    const cues = parseRemoteWhisperBody(body, contentType);
+    if (cues.length === 0) {
+      throw new Error("remote whisper returned no usable cues");
+    }
+    cues.sort((a, b) => a.start - b.start);
+    const cleaned = cleanCues(cues);
+    job.cues = cleaned;
+    // Emit per-cue (so a live overlay still fills in) then a snapshot to
+    // reconcile, mirroring the local path's finalization.
+    for (const cue of cleaned) this.emit(job, { type: "cue", cue });
+    this.emit(job, { type: "snapshot", status: "running", cues: cleaned });
+    await atomicWrite(job.outPath, cuesToSrt(cleaned));
+    this.setStatus(job, "done");
   }
 }
 

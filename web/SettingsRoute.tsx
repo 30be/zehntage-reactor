@@ -57,6 +57,17 @@ export function Settings({
   const [geminiApiKey, setGeminiApiKey] = useState(
     (settings.geminiApiKey as string) || "",
   );
+  // --- backend-modes block (local/remote whisper + fake AnkiConnect) ---------
+  const [whisperBackend, setWhisperBackend] = useState(
+    settings.whisperBackend === "remote" ? "remote" : "local",
+  );
+  const [whisperRemoteUrl, setWhisperRemoteUrl] = useState(
+    (settings.whisperRemoteUrl as string) || "",
+  );
+  const [ankiBackend, setAnkiBackend] = useState(
+    settings.ankiBackend === "fake" ? "fake" : "auto",
+  );
+  // ---------------------------------------------------------------------------
   // Language-aware default prompts for the CURRENT (target, known) pair. The
   // editors show the stored prompt if non-empty, else this concrete default —
   // so the user always sees editable text appropriate to their languages.
@@ -94,6 +105,10 @@ export function Settings({
     );
     setTheme((settings.theme as string) || "light");
     setGeminiApiKey((settings.geminiApiKey as string) || "");
+    // backend-modes block
+    setWhisperBackend(settings.whisperBackend === "remote" ? "remote" : "local");
+    setWhisperRemoteUrl((settings.whisperRemoteUrl as string) || "");
+    setAnkiBackend(settings.ankiBackend === "fake" ? "fake" : "auto");
     const tgt = (settings.targetLang as string) || "ja";
     const known = (settings.knownLang as string) || "ru";
     const defs = buildLangDefaults(tgt, known);
@@ -120,6 +135,9 @@ export function Settings({
     geminiApiKey,
     lookupPrompt,
     explainPrompt,
+    whisperBackend,
+    whisperRemoteUrl,
+    ankiBackend,
   });
   latest.current = {
     primaryLang,
@@ -137,6 +155,9 @@ export function Settings({
     geminiApiKey,
     lookupPrompt,
     explainPrompt,
+    whisperBackend,
+    whisperRemoteUrl,
+    ankiBackend,
   };
   const saveTimer = useRef<number | null>(null);
   const save = useCallback(async () => {
@@ -169,6 +190,10 @@ export function Settings({
         geminiApiKey: s.geminiApiKey,
         lookupPrompt: s.lookupPrompt,
         explainPrompt: s.explainPrompt,
+        // backend-modes block
+        whisperBackend: s.whisperBackend,
+        whisperRemoteUrl: s.whisperRemoteUrl,
+        ankiBackend: s.ankiBackend,
       });
       setSettings(next);
       toast("saved");
@@ -545,6 +570,79 @@ export function Settings({
             </div>
           </div>
         </section>
+
+        {/* ===================================================================
+            BACKEND MODES (distributable / mobile builds) — local vs. remote
+            Whisper transcription, and a fake AnkiConnect deck for no-Anki
+            deployments. Self-contained block; safe to move/remove as a unit.
+            =================================================================== */}
+        <section className="form-group">
+          <h2 className="group-title">Backends (mobile / distributable)</h2>
+          <div className="field">
+            <label htmlFor="whisperBackend">Subtitle recognition (Whisper)</label>
+            <select
+              id="whisperBackend"
+              title="Local runs whisper-cli on this machine (default). Remote sends the audio to a configured endpoint — useful when this device can't run whisper."
+              value={whisperBackend}
+              onChange={(e) => {
+                setWhisperBackend(e.target.value);
+                scheduleSave();
+              }}
+            >
+              <option value="local">Local (whisper-cli on this machine)</option>
+              <option value="remote">Remote (send audio to an endpoint)</option>
+            </select>
+            <div className="hint">
+              Local transcription is the default. Switch to Remote on devices
+              that can&rsquo;t run Whisper.
+            </div>
+          </div>
+          {whisperBackend === "remote" && (
+            <div className="field">
+              <label htmlFor="whisperRemoteUrl">Remote Whisper URL</label>
+              <input
+                id="whisperRemoteUrl"
+                type="url"
+                autoComplete="off"
+                title="The server POSTs 16 kHz mono WAV audio here and expects { cues: [{start,end,text}] } JSON or an SRT document back."
+                value={whisperRemoteUrl}
+                onChange={(e) => {
+                  setWhisperRemoteUrl(e.target.value);
+                  scheduleSave();
+                }}
+                onBlur={onBlurSave}
+                placeholder="https://example.com/transcribe"
+              />
+              <div className="hint">
+                Receives a POST with the audio (Content-Type: audio/wav,
+                X-Whisper-Lang header) and returns{" "}
+                <code>{`{ cues: [{start, end, text}] }`}</code> JSON or an SRT
+                document. Leave blank to keep using local.
+              </div>
+            </div>
+          )}
+          <div className="field">
+            <label htmlFor="ankiBackend">Anki cards</label>
+            <select
+              id="ankiBackend"
+              title="Auto uses your real Anki collection (windowless DB / AnkiConnect). Fake stores mined cards in a local file — for builds with no Anki installed."
+              value={ankiBackend}
+              onChange={(e) => {
+                setAnkiBackend(e.target.value);
+                scheduleSave();
+              }}
+            >
+              <option value="auto">Auto (real Anki collection)</option>
+              <option value="fake">Fake (local file — no Anki needed)</option>
+            </select>
+            <div className="hint">
+              Fake mode persists mined cards to a local &ldquo;deck&rdquo; file so
+              they survive without a real Anki install. Real review scheduling is
+              unavailable in this mode.
+            </div>
+          </div>
+        </section>
+        {/* =================== end BACKEND MODES block ====================== */}
 
         <DataSection setSettings={setSettings} />
 

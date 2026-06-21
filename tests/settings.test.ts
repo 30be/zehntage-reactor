@@ -85,6 +85,8 @@ describe("validateSettingsPatch", () => {
       "whisperAutoGenerate", "furigana", "pitchAccent", "showSecondary",
       "prestudyMinutes", "shadowRepeats", "autopauseMinUnknown", "subScale",
       "autopauseMode",
+      // backend-mode toggles (local/remote whisper + fake AnkiConnect)
+      "whisperBackend", "whisperRemoteUrl", "ankiBackend",
     ];
     for (const k of expected) {
       expect(SETTINGS_KEYS.has(k as Parameters<typeof SETTINGS_KEYS.has>[0])).toBe(true);
@@ -125,6 +127,50 @@ describe("validateSettingsPatch", () => {
       expect((r.patch as Record<string, unknown>).furigana).toBe(false);
       expect((r.patch as Record<string, unknown>).autopauseMode).toBe("unknown");
     }
+  });
+
+  test("accepts backend-mode keys (whisperBackend/whisperRemoteUrl/ankiBackend)", () => {
+    const r = validateSettingsPatch({
+      whisperBackend: "remote",
+      whisperRemoteUrl: "https://example.com/whisper",
+      ankiBackend: "fake",
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect((r.patch as Record<string, unknown>).whisperBackend).toBe("remote");
+      expect((r.patch as Record<string, unknown>).whisperRemoteUrl).toBe(
+        "https://example.com/whisper",
+      );
+      expect((r.patch as Record<string, unknown>).ankiBackend).toBe("fake");
+    }
+  });
+});
+
+// --- backend-mode enum defaults + normalization ---
+
+describe("backend-mode settings", () => {
+  test("defaults: whisperBackend=local, ankiBackend=auto, remote url empty", async () => {
+    const s = await readSettings();
+    expect(s.whisperBackend).toBe("local");
+    expect(s.ankiBackend).toBe("auto");
+    expect(s.whisperRemoteUrl).toBe("");
+  });
+
+  test("valid backend enum values are preserved", async () => {
+    await writeSettings({ whisperBackend: "remote", ankiBackend: "fake" });
+    const s = await readSettings();
+    expect(s.whisperBackend).toBe("remote");
+    expect(s.ankiBackend).toBe("fake");
+  });
+
+  test("invalid persisted backend enums normalize to their defaults", async () => {
+    await Bun.write(
+      join(base, "settings.json"),
+      JSON.stringify({ whisperBackend: "quantum", ankiBackend: "psychic" }),
+    );
+    const s = await readSettings();
+    expect(s.whisperBackend).toBe("local");
+    expect(s.ankiBackend).toBe("auto");
   });
 });
 
