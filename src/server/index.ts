@@ -139,8 +139,11 @@ import {
 } from "../lib/tokenindex.ts";
 
 import { bodyJson, q, qList, attachment } from "./http.ts";
+import { assetDir } from "../lib/assets.ts";
 
-const PUBLIC_DIR = join(import.meta.dir, "..", "..", "public");
+// Resolved via assetDir(): repo public/ in dev, public/ beside the binary in a
+// `bun build --compile` release (import.meta.dir is virtual in a compiled binary).
+const PUBLIC_DIR = assetDir();
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {

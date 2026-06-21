@@ -11,6 +11,7 @@
     "test": "bun test",
     "test:e2e": "playwright test",
     "build:web": "bun run scripts/build-web.ts",
+    "build:release": "bun run scripts/build-release.ts",
     "smoke": "bun run scripts/smoke.ts",
     "check:web": "bun run scripts/check-web.ts"
   },

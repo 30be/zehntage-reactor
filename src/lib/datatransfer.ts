@@ -20,6 +20,7 @@ import { readSettings, writeSettings, type Settings } from "./settings.ts";
 import { readState, mergeIntoFile, sanitize, type ZrState } from "./state.ts";
 import { readEvents, logEvents, type TelemetryEvent } from "./telemetry.ts";
 import { configDirPath } from "./backup.ts";
+import { appVersion } from "./assets.ts";
 
 export const BUNDLE_VERSION = 1;
 /** Cap exported events so a chatty log doesn't make a giant bundle. */
@@ -35,15 +36,11 @@ export interface ExportBundle {
   eventsTruncated: boolean;
 }
 
-async function packageVersion(): Promise<string> {
-  try {
-    const pkg = (await Bun.file(new URL("../../package.json", import.meta.url)).json()) as {
-      version?: string;
-    };
-    return pkg.version ?? "unknown";
-  } catch {
-    return "unknown";
-  }
+// App version: compile-time constant in a release binary, package.json in dev.
+// (assets.ts resolves both; reading ../../package.json via import.meta.url here
+// would break in a `bun build --compile` binary that has no repo beside it.)
+function packageVersion(): Promise<string> {
+  return appVersion();
 }
 
 /** Build the export bundle from the current config dir / events log. */

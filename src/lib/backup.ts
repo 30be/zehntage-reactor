@@ -22,6 +22,7 @@ import { join, dirname, relative } from "node:path";
 import { mkdir, mkdtemp, readdir, rm, stat, cp, copyFile } from "node:fs/promises";
 import { eventsFilePath } from "./telemetry.ts";
 import { buildExportBundle, type ExportBundle } from "./datatransfer.ts";
+import { appVersion } from "./assets.ts";
 
 export const KEEP_BACKUPS = 10;
 
@@ -47,15 +48,11 @@ export function defaultBackupDir(): string {
   return join(homedir(), ".local", "share", "zehntage-reactor", "backups");
 }
 
-async function packageVersion(): Promise<string> {
-  try {
-    const pkg = (await Bun.file(new URL("../../package.json", import.meta.url)).json()) as {
-      version?: string;
-    };
-    return pkg.version ?? "unknown";
-  } catch {
-    return "unknown";
-  }
+// App version: compile-time constant in a release binary, package.json in dev
+// (see assets.ts). Reading ../../package.json via import.meta.url would break in
+// a `bun build --compile` binary that has no repo beside it.
+function packageVersion(): Promise<string> {
+  return appVersion();
 }
 
 /** mediaRoot from settings.json (read directly so env overrides apply at call time). */
