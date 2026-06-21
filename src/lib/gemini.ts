@@ -120,14 +120,37 @@ export class TranslationCountError extends Error {}
  */
 export type ServiceTier = "standard" | "flex";
 
+/**
+ * Resolve the Gemini API key: the `geminiApiKey` saved on the Settings page
+ * takes precedence (so a distributed user can paste a key with no shell env),
+ * falling back to the GEMINI_API_KEY environment variable / ~/.env. A blank
+ * setting is treated as "unset" and falls through to the env value.
+ */
+async function resolveGeminiKey(): Promise<string | undefined> {
+  try {
+    const settings = await readSettings();
+    const fromSettings =
+      typeof settings.geminiApiKey === "string" ? settings.geminiApiKey.trim() : "";
+    if (fromSettings) return fromSettings;
+  } catch {
+    // settings file unreadable — fall back to env below
+  }
+  const { geminiApiKey } = await loadSecrets();
+  return geminiApiKey;
+}
+
 async function callGemini(
   prompt: string,
   schema: unknown,
   image?: GeminiImage,
   serviceTier: ServiceTier = "standard",
 ): Promise<unknown> {
-  const { geminiApiKey } = await loadSecrets();
-  if (!geminiApiKey) throw new Error("GEMINI_API_KEY not set in ~/.env");
+  const geminiApiKey = await resolveGeminiKey();
+  if (!geminiApiKey) {
+    throw new Error(
+      "Gemini API key not set — add one in Settings → AI & prompt, or set GEMINI_API_KEY in ~/.env",
+    );
+  }
 
   const parts: unknown[] = [{ text: prompt }];
   if (image) {

@@ -79,7 +79,7 @@ describe("validateSettingsPatch", () => {
   test("SETTINGS_KEYS covers all expected keys", () => {
     const expected = [
       "targetLang", "knownLang", "blurSecondary", "autoQuizPrompt",
-      "lookupPrompt", "explainPrompt", "theme",
+      "lookupPrompt", "explainPrompt", "theme", "geminiApiKey",
       // player/learning prefs the UI actually persists (regression: these
       // were dropped by an over-narrow allowlist and stopped persisting)
       "whisperAutoGenerate", "furigana", "pitchAccent", "showSecondary",
@@ -107,6 +107,15 @@ describe("validateSettingsPatch", () => {
       expect("subScale" in r.patch).toBe(false);
       expect("autopauseMinUnknown" in r.patch).toBe(false);
     }
+  });
+
+  test("accepts geminiApiKey as a string, drops a non-string value", () => {
+    const ok = validateSettingsPatch({ geminiApiKey: "AIzaSecret" });
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect((ok.patch as Record<string, unknown>).geminiApiKey).toBe("AIzaSecret");
+    const bad = validateSettingsPatch({ geminiApiKey: 12345 });
+    expect(bad.ok).toBe(true);
+    if (bad.ok) expect("geminiApiKey" in bad.patch).toBe(false);
   });
 
   test("accepts furigana/autopauseMode (regression: persistence)", () => {
