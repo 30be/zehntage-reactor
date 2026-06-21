@@ -31,6 +31,13 @@ export interface Settings {
    * "system" follows the OS preference. Default "light".
    */
   theme: "light" | "dark" | "system";
+  /**
+   * Google AI Studio (Gemini) API key. When non-empty it takes precedence over
+   * the GEMINI_API_KEY environment variable (see gemini.ts callGemini). Stored
+   * in the settings file like any other string preference; entered via a masked
+   * password field on the Settings page. Empty string means "use the env var".
+   */
+  geminiApiKey: string;
   [key: string]: unknown;
 }
 
@@ -42,6 +49,7 @@ const DEFAULTS: Settings = {
   lookupPrompt: "",
   explainPrompt: "",
   theme: "light",
+  geminiApiKey: "",
 };
 
 // ZR_CONFIG_DIR override keeps tests away from the user's real settings.
@@ -68,6 +76,7 @@ export const SETTINGS_KEYS = new Set<keyof Settings>([
   "lookupPrompt",
   "explainPrompt",
   "theme",
+  "geminiApiKey",
   // booleans
   "blurSecondary",
   "autoQuizPrompt",
@@ -107,6 +116,7 @@ const STRING_KEYS = new Set<string>([
   "lookupPrompt",
   "explainPrompt",
   "theme",
+  "geminiApiKey",
   "autopauseMode",
 ]);
 

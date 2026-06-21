@@ -6,6 +6,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type SnapshotMeta } from "./api.ts";
 import { clampMinutesGoal, loadMinutesGoal, saveMinutesGoal } from "./timer.ts";
+import { LANGUAGES } from "./lang.ts";
+import { buildLangDefaults, supportsFurigana } from "./langdefaults.ts";
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -52,14 +54,24 @@ export function Settings({
     String(Math.max(1, Math.round(Number(settings.autopauseMinUnknown)) || 1)),
   );
   const [theme, setTheme] = useState((settings.theme as string) || "light");
-  const promptDefault = (settings.lookupPromptDefault as string) || "";
+  const [geminiApiKey, setGeminiApiKey] = useState(
+    (settings.geminiApiKey as string) || "",
+  );
+  // Language-aware default prompts for the CURRENT (target, known) pair. The
+  // editors show the stored prompt if non-empty, else this concrete default —
+  // so the user always sees editable text appropriate to their languages.
+  const initialTarget = (settings.targetLang as string) || "ja";
+  const initialKnown = (settings.knownLang as string) || "ru";
+  const initialDefaults = buildLangDefaults(initialTarget, initialKnown);
   const [lookupPrompt, setLookupPrompt] = useState(
-    (settings.lookupPrompt as string) || promptDefault,
+    (settings.lookupPrompt as string) || initialDefaults.lookupPrompt,
   );
-  const explainDefault = (settings.explainPromptDefault as string) || "";
   const [explainPrompt, setExplainPrompt] = useState(
-    (settings.explainPrompt as string) || explainDefault,
+    (settings.explainPrompt as string) || initialDefaults.sentencePrompt,
   );
+  // Track the (target, known) pair the visible prompt defaults belong to, so a
+  // language change can detect "still the old default" vs "user-customised".
+  const promptLangs = useRef({ target: initialTarget, known: initialKnown });
   // G4: daily immersion goal (minutes) — persisted to localStorage, not the
   // server settings, mirroring the cards daily goal (web/timer.ts).
   const [minutesGoal, setMinutesGoal] = useState<string>(() =>
@@ -81,10 +93,13 @@ export function Settings({
       String(Math.max(1, Math.round(Number(settings.autopauseMinUnknown)) || 1)),
     );
     setTheme((settings.theme as string) || "light");
-    const def = (settings.lookupPromptDefault as string) || "";
-    setLookupPrompt((settings.lookupPrompt as string) || def);
-    const exDef = (settings.explainPromptDefault as string) || "";
-    setExplainPrompt((settings.explainPrompt as string) || exDef);
+    setGeminiApiKey((settings.geminiApiKey as string) || "");
+    const tgt = (settings.targetLang as string) || "ja";
+    const known = (settings.knownLang as string) || "ru";
+    const defs = buildLangDefaults(tgt, known);
+    promptLangs.current = { target: tgt, known };
+    setLookupPrompt((settings.lookupPrompt as string) || defs.lookupPrompt);
+    setExplainPrompt((settings.explainPrompt as string) || defs.sentencePrompt);
   }, [settings]);
 
   // --- autosave: no Save button — every change saves (debounced), blur
@@ -102,6 +117,7 @@ export function Settings({
     autopauseMode,
     autopauseMinUnknown,
     theme,
+    geminiApiKey,
     lookupPrompt,
     explainPrompt,
   });
@@ -118,6 +134,7 @@ export function Settings({
     autopauseMode,
     autopauseMinUnknown,
     theme,
+    geminiApiKey,
     lookupPrompt,
     explainPrompt,
   };
@@ -149,6 +166,7 @@ export function Settings({
           Math.round(Number(s.autopauseMinUnknown)) || 1,
         ),
         theme: s.theme,
+        geminiApiKey: s.geminiApiKey,
         lookupPrompt: s.lookupPrompt,
         explainPrompt: s.explainPrompt,
       });
@@ -167,6 +185,30 @@ export function Settings({
   const onBlurSave = useCallback(() => {
     if (saveTimer.current != null) void save();
   }, [save]);
+
+  // When the target/known language changes, refresh the prompt editors to the
+  // new language pair's default — but ONLY if the user hasn't customised them.
+  // "Not customised" = the editor is empty OR still holds the previous pair's
+  // default text. Custom text is preserved (never clobbered).
+  const onLangChange = useCallback(
+    (nextTarget: string, nextKnown: string) => {
+      const prev = promptLangs.current;
+      const prevDefaults = buildLangDefaults(prev.target, prev.known);
+      const nextDefaults = buildLangDefaults(nextTarget, nextKnown);
+      setLookupPrompt((cur) =>
+        cur.trim() === "" || cur === prevDefaults.lookupPrompt
+          ? nextDefaults.lookupPrompt
+          : cur,
+      );
+      setExplainPrompt((cur) =>
+        cur.trim() === "" || cur === prevDefaults.sentencePrompt
+          ? nextDefaults.sentencePrompt
+          : cur,
+      );
+      promptLangs.current = { target: nextTarget, known: nextKnown };
+    },
+    [],
+  );
   useEffect(
     () => () => {
       if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
@@ -182,33 +224,43 @@ export function Settings({
           <div className="field-row">
             <div className="field">
               <label htmlFor="settings-primaryLang">Primary (target)</label>
-              <input
+              <select
                 id="settings-primaryLang"
-                type="text"
-                title="Preferred primary subtitle track."
+                title="The language you are learning (primary subtitle track)."
                 value={primaryLang}
                 onChange={(e) => {
-                  setPrimaryLang(e.target.value);
+                  const next = e.target.value;
+                  setPrimaryLang(next);
+                  onLangChange(next, secondaryLang);
                   scheduleSave();
                 }}
-                onBlur={onBlurSave}
-                placeholder="ja"
-              />
+              >
+                {LANGUAGES.map((l) => (
+                  <option key={l.code} value={l.code}>
+                    {l.name}
+                  </option>
+                ))}
+              </select>
             </div>
             <div className="field">
               <label htmlFor="settings-secondaryLang">Secondary (known)</label>
-              <input
+              <select
                 id="settings-secondaryLang"
-                type="text"
-                title="Translation track, blurred until hovered."
+                title="A language you already know (translation track, blurred until hovered)."
                 value={secondaryLang}
                 onChange={(e) => {
-                  setSecondaryLang(e.target.value);
+                  const next = e.target.value;
+                  setSecondaryLang(next);
+                  onLangChange(primaryLang, next);
                   scheduleSave();
                 }}
-                onBlur={onBlurSave}
-                placeholder="ru"
-              />
+              >
+                {LANGUAGES.map((l) => (
+                  <option key={l.code} value={l.code}>
+                    {l.name}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
         </section>
@@ -249,36 +301,42 @@ export function Settings({
             {/* TODO(player): read settings.blurSecondary instead of useState(false) */}
             <label htmlFor="blurSecondary">Blur secondary subtitles until hovered</label>
           </div>
-          <div
-            className="switch"
-            title="Show readings above kanji you haven't learned yet"
-          >
-            <input
-              type="checkbox"
-              id="furigana"
-              checked={furigana}
-              onChange={(e) => {
-                setFurigana(e.target.checked);
-                scheduleSave();
-              }}
-            />
-            <label htmlFor="furigana">Furigana on unknown kanji</label>
-          </div>
-          <div
-            className="switch"
-            title="Mark pitch accent in furigana readings (overline = high, ꜜ = downstep)"
-          >
-            <input
-              type="checkbox"
-              id="pitchAccent"
-              checked={pitchAccent}
-              onChange={(e) => {
-                setPitchAccent(e.target.checked);
-                scheduleSave();
-              }}
-            />
-            <label htmlFor="pitchAccent">Pitch accent marks</label>
-          </div>
+          {/* Furigana / pitch accent are Japanese-only (kana readings over
+              kanji); hide them for other target languages. */}
+          {supportsFurigana(primaryLang) && (
+            <>
+              <div
+                className="switch"
+                title="Show readings above kanji you haven't learned yet"
+              >
+                <input
+                  type="checkbox"
+                  id="furigana"
+                  checked={furigana}
+                  onChange={(e) => {
+                    setFurigana(e.target.checked);
+                    scheduleSave();
+                  }}
+                />
+                <label htmlFor="furigana">Furigana on unknown kanji</label>
+              </div>
+              <div
+                className="switch"
+                title="Mark pitch accent in furigana readings (overline = high, ꜜ = downstep)"
+              >
+                <input
+                  type="checkbox"
+                  id="pitchAccent"
+                  checked={pitchAccent}
+                  onChange={(e) => {
+                    setPitchAccent(e.target.checked);
+                    scheduleSave();
+                  }}
+                />
+                <label htmlFor="pitchAccent">Pitch accent marks</label>
+              </div>
+            </>
+          )}
           <div
             className="switch"
             title="Automatically launch the comprehension quiz when an episode reaches its end, covering the cues you just watched"
@@ -393,6 +451,34 @@ export function Settings({
         <section className="form-group">
           <h2 className="group-title">AI &amp; prompt</h2>
           <div className="field">
+            <label htmlFor="geminiApiKey">Gemini API key</label>
+            <input
+              id="geminiApiKey"
+              type="password"
+              autoComplete="off"
+              title="Stored locally; takes precedence over the GEMINI_API_KEY environment variable."
+              value={geminiApiKey}
+              onChange={(e) => {
+                setGeminiApiKey(e.target.value);
+                scheduleSave();
+              }}
+              onBlur={onBlurSave}
+              placeholder="AIza…"
+            />
+            <div className="hint">
+              Used for word lookups, explanations and translations.{" "}
+              <a
+                href="https://aistudio.google.com/app/apikey"
+                target="_blank"
+                rel="noreferrer"
+                title="Open Google AI Studio to create a free API key"
+              >
+                Get an API key
+              </a>
+              . Leave blank to use the GEMINI_API_KEY environment variable.
+            </div>
+          </div>
+          <div className="field">
             <label>Word-lookup prompt (Gemini)</label>
             <textarea
               className="prompt"
@@ -404,18 +490,20 @@ export function Settings({
                 scheduleSave();
               }}
               onBlur={onBlurSave}
-              placeholder={promptDefault}
             />
             <div>
               <button
                 type="button"
                 className="btn sm"
-                title="Restore the built-in lookup prompt"
+                title="Restore the default lookup prompt for the selected languages"
                 onClick={() => {
-                  // Set "" so gemini.ts treats it as "use built-in default"
-                  // (template && template.trim() check). Storing the full text
-                  // would snapshot the current default and miss future updates.
-                  setLookupPrompt("");
+                  setLookupPrompt(
+                    buildLangDefaults(primaryLang, secondaryLang).lookupPrompt,
+                  );
+                  promptLangs.current = {
+                    target: primaryLang,
+                    known: secondaryLang,
+                  };
                   scheduleSave();
                 }}
               >
@@ -435,18 +523,20 @@ export function Settings({
                 scheduleSave();
               }}
               onBlur={onBlurSave}
-              placeholder={explainDefault}
             />
             <div>
               <button
                 type="button"
                 className="btn sm"
-                title="Restore the built-in explanation prompt"
+                title="Restore the default explanation prompt for the selected languages"
                 onClick={() => {
-                  // Set "" so gemini.ts treats it as "use built-in default"
-                  // (template && template.trim() check). Storing the full text
-                  // would snapshot the current default and miss future updates.
-                  setExplainPrompt("");
+                  setExplainPrompt(
+                    buildLangDefaults(primaryLang, secondaryLang).sentencePrompt,
+                  );
+                  promptLangs.current = {
+                    target: primaryLang,
+                    known: secondaryLang,
+                  };
                   scheduleSave();
                 }}
               >
