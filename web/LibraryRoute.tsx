@@ -1139,26 +1139,10 @@ export function Library({ go, toast }: { go: (h: string) => void; toast: (m: str
                 })()}
                 {(() => {
                   const es = epStatus?.episodes[e.id];
-                  // Nothing to cache → render nothing.
-                  if (!es || es.total === 0) return null;
                   const globalActive = epStatus?.globalActive ?? false;
-                  const fullyCached = es.cached >= es.total;
                   const busy =
-                    es.state === "pending" || es.state === "running";
-                  // Already done → inert "Cached" chip.
-                  if (fullyCached) {
-                    return (
-                      <button
-                        type="button"
-                        className="btn sm ep-cache"
-                        disabled
-                        title="All unknown words in this episode are cached for offline viewing"
-                        onClick={(ev) => ev.stopPropagation()}
-                      >
-                        Cached
-                      </button>
-                    );
-                  }
+                    !!es && (es.state === "pending" || es.state === "running");
+                  const fullyCached = !!es && es.total > 0 && es.cached >= es.total;
                   // In flight (this episode, or the global cache-all sweeping
                   // everything) → disabled progress label, no redundant click.
                   if (busy || globalActive) {
@@ -1170,16 +1154,37 @@ export function Library({ go, toast }: { go: (h: string) => void; toast: (m: str
                         title="Caching word lookups for offline viewing"
                         onClick={(ev) => ev.stopPropagation()}
                       >
-                        Caching… {es.cached}/{es.total}
+                        Caching… {es!.cached}/{es!.total}
                       </button>
                     );
                   }
-                  // Idle with uncached words → offer the click.
+                  // Already cached → actionable Re-cache button.
+                  if (fullyCached) {
+                    return (
+                      <button
+                        type="button"
+                        className="btn sm ep-cache"
+                        title="Re-run cache for this episode"
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          void onCacheEpisode(e.id);
+                        }}
+                      >
+                        ✓ Re-cache
+                      </button>
+                    );
+                  }
+                  // Idle (uncached words, or not yet tokenized) → offer the click.
+                  const uncached = es ? es.total - es.cached : 0;
                   return (
                     <button
                       type="button"
                       className="btn sm ep-cache"
-                      title={`Cache ${es.total - es.cached} word lookup(s) for this episode (offline)`}
+                      title={
+                        uncached > 0
+                          ? `Cache ${uncached} word lookup(s) for this episode (offline)`
+                          : "Cache word lookups for this episode (offline)"
+                      }
                       onClick={(ev) => {
                         ev.stopPropagation();
                         void onCacheEpisode(e.id);
