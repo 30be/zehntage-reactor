@@ -101,7 +101,24 @@ async function runServer(arg?: string): Promise<void> {
   console.log(`zehntage-reactor serving ${handle.root}`);
   console.log(`  ${handle.url}`);
   if (process.env.ZR_NO_OPEN !== "1") {
-    Bun.spawn(["xdg-open", handle.url], { stdout: "ignore", stderr: "ignore" }).unref();
+    openBrowser(handle.url);
+  }
+}
+
+/** Open a URL in the default browser, platform-aware. Best-effort: failures
+ * (no GUI / missing opener) are swallowed — the server is already running and
+ * the URL is printed above. */
+function openBrowser(url: string): void {
+  const cmd =
+    process.platform === "win32"
+      ? ["cmd", "/c", "start", "", url]
+      : process.platform === "darwin"
+        ? ["open", url]
+        : ["xdg-open", url];
+  try {
+    Bun.spawn(cmd, { stdout: "ignore", stderr: "ignore" }).unref();
+  } catch {
+    // no opener available (headless box etc.) — the URL is already printed.
   }
 }
 

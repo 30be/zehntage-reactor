@@ -1,14 +1,15 @@
 // Per-library-entry lemma index built with kuromoji on the server (Bun).
 //
-// The dictionary ships inside the @sglkc/kuromoji package
-// (node_modules/@sglkc/kuromoji/dict/*.dat.gz); the builder accepts that
-// directory as a filesystem dicPath.
+// The IPADIC dictionary ships in the asset dir at public/dict/*.dat.gz
+// (build:web copies it there from node_modules/@sglkc/kuromoji/dict). We read
+// it from there via dictDir() so a `bun build --compile` release — which has no
+// node_modules beside the binary — still finds the dictionary.
 
 import { existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import kuromoji from "@sglkc/kuromoji";
+import { dictDir } from "./assets.ts";
 import type { Cue } from "./subs.ts";
 import type { LibraryEntry } from "./library.ts";
 import { mergeTokens, isLexical, lemmaOf, type KToken } from "./jatok.ts";
@@ -20,16 +21,10 @@ const INDEX_VERSION = "v2-homograph";
 
 export type Tokenize = (text: string) => KToken[];
 
-/** Path to the IPADIC bundled with @sglkc/kuromoji, or null if not found. */
+/** Path to the IPADIC shipped in the asset dir (public/dict), or null if absent. */
 export function defaultDicPath(): string | null {
-  try {
-    const req = createRequire(import.meta.url);
-    const pkg = req.resolve("@sglkc/kuromoji/package.json");
-    const dict = join(dirname(pkg), "dict");
-    return existsSync(join(dict, "base.dat.gz")) ? dict : null;
-  } catch {
-    return null;
-  }
+  const dict = dictDir();
+  return existsSync(join(dict, "base.dat.gz")) ? dict : null;
 }
 
 let tokenizerPromise: Promise<Tokenize> | null = null;
@@ -40,7 +35,7 @@ export function getServerTokenizer(dicPath?: string): Promise<Tokenize> {
     tokenizerPromise = new Promise<Tokenize>((resolve, reject) => {
       const dic = dicPath ?? defaultDicPath();
       if (!dic) {
-        reject(new Error("kuromoji dictionary not found in node_modules"));
+        reject(new Error("kuromoji dictionary not found in public/dict"));
         return;
       }
       kuromoji
