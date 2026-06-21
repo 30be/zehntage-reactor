@@ -2412,6 +2412,59 @@ textarea:focus-visible {
   margin: -4px 0 12px;
 }
 .lib-head .root-line { margin: 0; }
+
+/* ---- add-a-YouTube-video control ([+] button that floats an input) ---- */
+.lib-head-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+/* root-line is display:block by default — make it a shrinkable flex item so the
+   [+] sits beside it on one line instead of being pushed below. */
+.lib-head .lib-head-left .root-line { margin: 0; flex: 0 1 auto; min-width: 0; }
+.yt-add { position: relative; display: inline-flex; flex: none; }
+.yt-add-btn { display: inline-flex; align-items: center; justify-content: center; }
+.yt-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  min-width: 340px;
+  max-width: min(420px, calc(100vw - 32px));
+  margin: 0;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
+}
+
+/* yt-dlp download rows: a normal lib-row with a thin progress bar pinned to the
+   bottom edge. On completion the row is replaced by the real episode row. */
+.container .lib-row.yt-row { position: relative; cursor: default; }
+.container .lib-row.yt-row .name { color: var(--muted); }
+.container .lib-row.yt-row .yt-pct { color: var(--muted); }
+.container .lib-row.yt-row.err .yt-pct { color: var(--c-warn); }
+.container .lib-row.yt-row .yt-dismiss { flex: none; padding: 2px 9px; }
+.yt-progress-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--muted-bg);
+  overflow: hidden;
+}
+.yt-progress-bar > i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  display: block;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
+.container .lib-row.yt-row.indet .yt-progress-bar > i {
+  width: 100% !important;
+  animation: cache-shimmer 1.4s ease-in-out infinite;
+}
+
 /* compact, borderless continue: truncated name + ▶ time, no full row */
 .continue-card {
   display: inline-flex;

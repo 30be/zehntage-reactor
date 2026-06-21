@@ -548,6 +548,14 @@ export const api = {
     )}&end=${encodeURIComponent(String(end))}`,
   getRoot: () => jget<RootInfo>("/api/root"),
   setRoot: (path: string) => jpost<RootInfo>("/api/root", { path }),
+  // Download a YouTube video (yt-dlp) into the current library root; poll
+  // youtubeJobs() for progress until it appears as a normal episode.
+  youtubeDownload: (url: string) =>
+    jpost<{ jobId: string }>("/api/youtube/download", { url }),
+  youtubeJobs: () => jget<YtJob[]>("/api/youtube/jobs"),
+  // Drop a finished/failed job server-side so it stays dismissed across reloads.
+  youtubeDismiss: (id: string) =>
+    jpost<{ ok: boolean }>("/api/youtube/dismiss", { id }),
   statsSummary: () => jget<StatsSummary>("/api/stats/summary"),
   statsEpisodes: () => jget<EpisodeDayRow[]>("/api/stats/episodes"),
   statsOverview: () => jget<Overview>("/api/stats/overview"),
@@ -612,4 +620,19 @@ export const api = {
 
 export function mediaUrl(id: string): string {
   return `/media/${id}`;
+}
+
+// A yt-dlp download job (POST /api/youtube/download → GET /api/youtube/jobs).
+// `percent` is meaningful while downloading; `entryId` is the resulting library
+// entry once `done` (so the new episode can be opened directly).
+export interface YtJob {
+  id: string;
+  url: string;
+  status: "probing" | "downloading" | "merging" | "done" | "error";
+  percent: number;
+  title: string | null;
+  error: string | null;
+  entryId: string | null;
+  filePath: string | null;
+  createdAt: number;
 }

@@ -68,6 +68,13 @@ import {
 import { dbStoreMedia, collectionPath } from "../lib/ankidb.ts";
 import { readSettings, writeSettings, validateSettingsPatch } from "../lib/settings.ts";
 import {
+  isYoutubeUrl,
+  startYoutubeDownload,
+  listYoutubeJobs,
+  activeYoutubeJobCount,
+  dismissYoutubeJob,
+} from "../lib/youtube.ts";
+import {
   getCachedLookup,
   putCachedLookup,
   getAllCachedKeys,
@@ -2872,6 +2879,42 @@ export async function startServer(rootArg?: string, preferredPort = 8417): Promi
         } catch (e) {
           return jimakuErr(e);
         }
+      }
+
+      // --- youtube download (yt-dlp) → library root + sidecar subs ---
+      if (req.method === "POST" && path === "/api/youtube/download") {
+        const body = await bodyJson<{ url?: string }>(req, {});
+        const dlUrl = (body.url ?? "").trim();
+        if (!dlUrl) return err("url required", 400);
+        // SSRF guard: yt-dlp will fetch this URL, so restrict it to YouTube.
+        if (!isYoutubeUrl(dlUrl))
+          return err("only youtube.com / youtu.be URLs are allowed", 400);
+        // Cap concurrent downloads so a double-click / spam can't fork-bomb yt-dlp.
+        if (activeYoutubeJobCount() >= 3)
+          return err("too many downloads in progress — wait for one to finish", 429);
+        const settings = await readSettings();
+        const job = startYoutubeDownload({
+          url: dlUrl,
+          root: currentRoot,
+          // Fetch a known-language track too (a ready-made translation when
+          // YouTube has one); the video's own language is added by the module.
+          subLangs: isValidLang(settings.knownLang) ? [settings.knownLang] : [],
+          onComplete: async () => {
+            await library.refresh();
+          },
+        });
+        void logEvent("youtube_download", { jobId: job.id });
+        return json({ jobId: job.id });
+      }
+      if (req.method === "GET" && path === "/api/youtube/jobs") {
+        return json(listYoutubeJobs());
+      }
+      // Drop a (typically failed) job so it doesn't reappear on the next poll.
+      if (req.method === "POST" && path === "/api/youtube/dismiss") {
+        const body = await bodyJson<{ id?: string }>(req, {});
+        if (!body.id) return err("id required", 400);
+        dismissYoutubeJob(body.id);
+        return json({ ok: true });
       }
 
       // --- data export / import (portable JSON bundle, see lib/datatransfer.ts) ---

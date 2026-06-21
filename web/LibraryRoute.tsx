@@ -5,6 +5,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { guessEpisode } from "../src/lib/episode.ts";
+import { Plus } from "lucide-react";
 import {
   api,
   type BatchStatus,
@@ -12,6 +13,7 @@ import {
   type CacheAllStatus,
   type CacheEpisodeStatus,
   type LibraryEntry,
+  type YtJob,
 } from "./api.ts";
 import {
   pickContinueWatching,
@@ -415,6 +417,87 @@ function JimakuFind({
   );
 }
 
+// --- yt-dlp "add a YouTube video" control: a [+] button that floats an input ---
+
+function YtAdd({ onSubmit }: { onSubmit: (url: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [value, setValue] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const close = useCallback(() => {
+    setOpen(false);
+    setValue(""); // don't leave a stale URL behind when the panel reopens
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    inputRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, close]);
+
+  const submit = () => {
+    const v = value.trim();
+    if (!v) return;
+    onSubmit(v);
+    close();
+  };
+
+  return (
+    <div className="yt-add">
+      <button
+        type="button"
+        className="btn sm icon yt-add-btn"
+        aria-expanded={open}
+        aria-label="Add a YouTube video"
+        title="Add a YouTube video"
+        onClick={() => (open ? close() : setOpen(true))}
+      >
+        <Plus size={16} />
+      </button>
+      {open && (
+        <div className="root-panel yt-panel">
+          <div className="root-manual">
+            <input
+              ref={inputRef}
+              type="text"
+              className="root-input"
+              placeholder="Paste a YouTube link…"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submit();
+              }}
+            />
+            <button className="btn sm primary" onClick={submit}>
+              Add
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Short status word for a yt-dlp job row. */
+function ytStatusLabel(j: YtJob): string {
+  switch (j.status) {
+    case "probing":
+      return "Fetching info…";
+    case "downloading":
+      return `Downloading ${Math.round(j.percent)}%`;
+    case "merging":
+      return "Merging…";
+    case "error":
+      return j.error ?? "Download failed";
+    default:
+      return "";
+  }
+}
+
 export function Library({ go, toast }: { go: (h: string) => void; toast: (m: string) => void }) {
   const [entries, setEntries] = useState<LibraryEntry[] | null>(null);
   // --- transcript search (debounced 300ms; Esc clears) ---
@@ -582,6 +665,79 @@ export function Library({ go, toast }: { go: (h: string) => void; toast: (m: str
       .then(setEntries)
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, []);
+
+  // --- yt-dlp downloads: poll active jobs, surface them as grid rows ---
+  const [ytJobs, setYtJobs] = useState<YtJob[]>([]);
+  const ytHandledDone = useRef<Set<string>>(new Set());
+  const ytDismissed = useRef<Set<string>>(new Set());
+  const refreshYtJobs = useCallback(() => {
+    void api
+      .youtubeJobs()
+      .then((jobs) => {
+        for (const j of jobs) {
+          if (j.status === "done" && !ytHandledDone.current.has(j.id)) {
+            ytHandledDone.current.add(j.id);
+            loadEntries(); // the finished file is now a real episode
+          }
+        }
+        // Keep only non-done jobs in state: done ones become real grid rows, so
+        // holding them would just churn re-renders.
+        setYtJobs(jobs.filter((j) => j.status !== "done"));
+      })
+      .catch(() => {});
+  }, [loadEntries]);
+  const ytActiveCount = ytJobs.filter(
+    (j) => j.status !== "done" && j.status !== "error",
+  ).length;
+  // Recover any in-flight job after a reload, then poll while work is active.
+  useEffect(() => {
+    refreshYtJobs();
+  }, [refreshYtJobs]);
+  useEffect(() => {
+    if (ytActiveCount === 0) return;
+    const t = window.setInterval(refreshYtJobs, 1200);
+    return () => window.clearInterval(t);
+  }, [ytActiveCount, refreshYtJobs]);
+  const onYtSubmit = useCallback(
+    (url: string) => {
+      void api
+        .youtubeDownload(url)
+        .then(({ jobId }) => {
+          // Optimistic row so progress shows instantly. Its "probing" status
+          // makes ytActiveCount > 0, which starts the polling interval; no
+          // immediate refetch needed (and avoids racing the just-created job).
+          setYtJobs((prev) => [
+            {
+              id: jobId,
+              url,
+              status: "probing",
+              percent: 0,
+              title: null,
+              error: null,
+              entryId: null,
+              filePath: null,
+              createdAt: Date.now(),
+            },
+            ...prev.filter((j) => j.id !== jobId),
+          ]);
+        })
+        .catch((e) =>
+          toast(`YouTube download failed: ${e instanceof Error ? e.message : e}`),
+        );
+    },
+    [toast],
+  );
+  const dismissYtJob = useCallback((id: string) => {
+    ytDismissed.current.add(id);
+    setYtJobs((prev) => prev.filter((j) => j.id !== id));
+    // Also drop it server-side so it doesn't return on the next poll / reload.
+    void api.youtubeDismiss(id).catch(() => {});
+  }, []);
+  // Rows to render: active or errored jobs the user hasn't dismissed. Done jobs
+  // drop out — they've become real episodes via loadEntries().
+  const ytRows = ytJobs.filter(
+    (j) => j.status !== "done" && !ytDismissed.current.has(j.id),
+  );
 
   const refreshStatus = useCallback(() => {
     void api.batchStatus().then(setStatus).catch(() => {});
@@ -783,11 +939,14 @@ export function Library({ go, toast }: { go: (h: string) => void; toast: (m: str
   return (
     <>
       <div className="lib-head">
-        <RootChooser
-          toast={toast}
-          onChanged={loadEntries}
-          newWords={epStatus?.uniqueNewWords ?? newWordsTotal}
-        />
+        <div className="lib-head-left">
+          <RootChooser
+            toast={toast}
+            onChanged={loadEntries}
+            newWords={epStatus?.uniqueNewWords ?? newWordsTotal}
+          />
+          <YtAdd onSubmit={onYtSubmit} />
+        </div>
         {continueWatching.length > 0 && (() => {
           const { rec, entry } = continueWatching[0]!;
           return (
@@ -888,6 +1047,52 @@ export function Library({ go, toast }: { go: (h: string) => void; toast: (m: str
         </div>
       )}
       <div className="grid">
+        {ytRows.map((j) => (
+          <div
+            key={j.id}
+            className={`card lib-row yt-row${j.status === "error" ? " err" : ""}${
+              j.status === "probing" || j.status === "merging" ? " indet" : ""
+            }`}
+            aria-busy={j.status !== "error"}
+            title={ytStatusLabel(j)}
+          >
+            <div className="lib-row-main">
+              <div className="name">{j.title ?? j.url}</div>
+            </div>
+            <span className="ep-known yt-pct">
+              {j.status === "error"
+                ? "failed"
+                : j.status === "downloading"
+                  ? `${Math.round(j.percent)}%`
+                  : j.status === "merging"
+                    ? "merging…"
+                    : "…"}
+            </span>
+            {j.status === "error" && (
+              <button
+                type="button"
+                className="btn sm ghost yt-dismiss"
+                aria-label="Dismiss"
+                title={j.error ?? "Download failed"}
+                onClick={() => dismissYtJob(j.id)}
+              >
+                ×
+              </button>
+            )}
+            {j.status !== "error" && (
+              <div className="yt-progress-bar">
+                <i
+                  style={{
+                    width:
+                      j.status === "probing" || j.status === "merging"
+                        ? "100%"
+                        : `${Math.round(j.percent)}%`,
+                  }}
+                />
+              </div>
+            )}
+          </div>
+        ))}
         {ordered.map((e) => {
           const resume = savedPositions.get(e.id) ?? null;
           const cov = coverage.get(e.id);
