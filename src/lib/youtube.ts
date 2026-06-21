@@ -52,6 +52,16 @@ function isLangCode(lang: string): boolean {
   return /^[a-z]{2,3}(-[a-z]{2,4})?$/i.test(lang);
 }
 
+// yt-dlp reads YouTube auth from a local browser's cookies to get past the
+// "confirm you're not a bot" wall and ease rate-limiting. Defaults to Brave
+// (this machine's actual signed-in browser; "chrome" maps to ~/.config/
+// google-chrome, which is empty here). Override with ZR_YTDLP_COOKIES_BROWSER
+// (e.g. "chrome", "chromium", "firefox") or "" to disable cookies entirely.
+const COOKIES_BROWSER = (process.env.ZR_YTDLP_COOKIES_BROWSER ?? "brave").trim();
+function cookieArgs(): string[] {
+  return COOKIES_BROWSER ? ["--cookies-from-browser", COOKIES_BROWSER] : [];
+}
+
 export type YtStatus =
   | "probing"
   | "downloading"
@@ -169,27 +179,15 @@ async function runDownload(job: YtJob, opts: StartYoutubeOpts): Promise<void> {
   job.title = meta.title;
   job.status = "downloading";
 
-  // 2. Subtitle languages to fetch: the video's OWN subs (human-authored if any,
-  // otherwise its native auto-captions — the plain-coded ones; "xx-yy" entries
-  // are YouTube machine translations we skip, since the app's Gemini pipeline
-  // does translation into the known language). Plus the known language itself,
-  // in case the video genuinely ships it.
-  const native =
-    meta.manualSubs.length > 0
-      ? meta.manualSubs
-      : meta.autoSubs.filter((l) => !l.includes("-"));
-  const subLangs = [
-    ...new Set(
-      [...native, ...opts.subLangs, meta.language ?? ""].filter(isLangCode),
-    ),
-  ];
-
-  // 3. Download into the library root. `--print-to-file after_move:filepath`
-  // writes the final path (post-merge, post-move) so we don't have to guess
-  // yt-dlp's filename sanitization.
+  // 2. Download the VIDEO into the library root. Subtitles are fetched in a
+  // SEPARATE step afterwards, so a flaky / rate-limited subtitle request can
+  // never fail the (often large) video download. `--print-to-file
+  // after_move:filepath` writes the final path (post-merge, post-move) so we
+  // don't have to guess yt-dlp's filename sanitization.
   const pathFile = join(tmpdir(), `zr-ytdlp-${job.id}.path`);
   const argv = [
     "yt-dlp",
+    ...cookieArgs(),
     "--no-playlist",
     "--no-warnings",
     "--newline",
@@ -204,18 +202,8 @@ async function runDownload(job: YtJob, opts: StartYoutubeOpts): Promise<void> {
     "--print-to-file",
     "after_move:filepath",
     pathFile,
+    opts.url,
   ];
-  if (subLangs.length > 0) {
-    argv.push(
-      "--write-subs",
-      "--write-auto-subs",
-      "--sub-langs",
-      subLangs.join(","),
-      "--convert-subs",
-      "srt",
-    );
-  }
-  argv.push(opts.url);
 
   const { code, errTail } = await spawnStreaming(argv, (line) => {
     if (/\bMerging\b|\[Merger\]/.test(line)) {
@@ -253,10 +241,40 @@ async function runDownload(job: YtJob, opts: StartYoutubeOpts): Promise<void> {
   job.filePath = fileAbs;
   job.entryId = idForRelPath(relPath);
   job.percent = 100;
+
+  // 5. Best-effort subtitles: the video's OWN tracks (human-authored if any,
+  // else its native auto-captions — plain-coded; "xx-yy" machine translations
+  // are skipped since the app's Gemini pipeline does translation) plus the
+  // known language IF YouTube actually ships a track for it. Requesting only
+  // available languages avoids pointless rate-limited requests. Fully
+  // swallowed: a subtitle error (e.g. HTTP 429) must never fail the video.
+  const available = new Set([...meta.manualSubs, ...meta.autoSubs]);
+  const native =
+    meta.manualSubs.length > 0
+      ? meta.manualSubs
+      : meta.autoSubs.filter((l) => !l.includes("-"));
+  const subLangs = [
+    ...new Set(
+      [
+        ...native,
+        ...opts.subLangs.filter((l) => available.has(l)),
+        ...(meta.language && available.has(meta.language) ? [meta.language] : []),
+      ].filter(isLangCode),
+    ),
+  ];
+  if (subLangs.length > 0) {
+    await fetchSubtitles(opts.url, opts.root, subLangs).catch((e) => {
+      console.warn(
+        `[youtube] subtitle fetch failed (video kept): ${
+          e instanceof Error ? e.message : e
+        }`,
+      );
+    });
+  }
+
   // Mark done BEFORE the post-completion hook so a throwing onComplete can't be
   // mistaken for a failed download.
   job.status = "done";
-
   await opts.onComplete?.(job);
 }
 
@@ -271,10 +289,10 @@ async function probe(url: string): Promise<{
 }> {
   let proc: ReturnType<typeof Bun.spawn>;
   try {
-    proc = Bun.spawn(["yt-dlp", "-J", "--no-warnings", "--no-playlist", url], {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    proc = Bun.spawn(
+      ["yt-dlp", ...cookieArgs(), "-J", "--no-warnings", "--no-playlist", url],
+      { stdout: "pipe", stderr: "pipe" },
+    );
   } catch (e) {
     throw new Error(
       `could not launch yt-dlp (is it installed and on PATH?): ${
@@ -348,6 +366,42 @@ async function spawnStreaming(
   const errText = await errTextPromise;
   const errTail = errText.split("\n").filter(Boolean).slice(-6).join(" ").trim();
   return { code, errTail };
+}
+
+/** Best-effort subtitle download, run separately from the video so its failure
+ * (e.g. an HTTP 429) can never lose the video. Throws on non-zero so the caller
+ * can log it; the caller swallows the throw. */
+async function fetchSubtitles(
+  url: string,
+  root: string,
+  subLangs: string[],
+): Promise<void> {
+  const { code, errTail } = await spawnStreaming(
+    [
+      "yt-dlp",
+      ...cookieArgs(),
+      "--no-playlist",
+      "--no-warnings",
+      "--skip-download",
+      "--write-subs",
+      "--write-auto-subs",
+      "--sub-langs",
+      subLangs.join(","),
+      "--convert-subs",
+      "srt",
+      "--sleep-subtitles",
+      "1",
+      "-o",
+      join(root, "%(title)s [%(id)s].%(ext)s"),
+      url,
+    ],
+    () => {},
+  );
+  if (code !== 0) {
+    throw new Error(
+      `yt-dlp subtitles exited ${code}${errTail ? `: ${errTail}` : ""}`,
+    );
+  }
 }
 
 /** Final video path: prefer the path yt-dlp printed, else find a video in the
